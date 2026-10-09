@@ -850,8 +850,30 @@ type HubBuild = (Vec<Arc<PmsMovie>>, Vec<HubRow>, Vec<HeroSlot>);
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CwItem {
+    /// The deck's recency, for merging several servers' decks ([`deck_recency`]) — not
+    /// necessarily the item's own `lastViewedAt`.
     last_viewed_at: i64,
     m: Arc<PmsMovie>,
+}
+
+/// **The recency a server's deck row merges by**: its own `lastViewedAt`, never more recent than
+/// the row above it, and the row above's when it has none.
+///
+/// The server's deck is already in its own order — most recently active first — and that order is
+/// the truth for one server. But a next-up episode the profile has not started carries no
+/// `lastViewedAt` at all (it was never viewed: the SHOW was), so merging decks by each row's raw
+/// timestamp sank every next-up episode to the bottom of Continue Watching. Finishing an episode
+/// and starting the next was exactly that case: the server put the show first, and the row put it
+/// last. Carrying the row above's recency down keeps one server's order intact while still
+/// interleaving several servers' decks by time.
+fn deck_recency(raw: &[i64]) -> Vec<i64> {
+    let mut floor = i64::MAX;
+    raw.iter()
+        .map(|&lv| {
+            floor = if lv > 0 { lv.min(floor) } else { floor };
+            floor
+        })
+        .collect()
 }
 
 /// One shelf as a source projected it: rows already parsed, filtered and stamped with the server
@@ -962,16 +984,17 @@ fn project(
     // pair, this shelf would keep drawing a card the server had been told to hide, and the context
     // menu's Remove row would look broken while the server had done exactly as asked.
     for hub in cw.hub.iter() {
-        out.cw = hub
+        let rows: Vec<(&plx_plex::plex::Metadata, PmsMovie)> = hub
             .metadata
             .iter()
             .filter(|it| !spent_deck_entry(it))
-            .filter_map(|it| {
-                keep(it).map(|m| CwItem {
-                    last_viewed_at: it.last_viewed_at,
-                    m: Arc::new(m),
-                })
-            })
+            .filter_map(|it| keep(it).map(|m| (it, m)))
+            .collect();
+        let recency = deck_recency(&rows.iter().map(|(it, _)| it.last_viewed_at).collect::<Vec<_>>());
+        out.cw = rows
+            .into_iter()
+            .zip(recency)
+            .map(|((_, m), last_viewed_at)| CwItem { last_viewed_at, m: Arc::new(m) })
             .collect();
         if !out.cw.is_empty() {
             break; // the first hub that has anything in it IS the deck

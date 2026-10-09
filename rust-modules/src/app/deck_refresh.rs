@@ -38,6 +38,12 @@ pub(crate) const VISIBLE_CADENCE_MS: u32 = 2 * 60 * 1000;
 /// The beat between a playback stopping and its refetch, so the final timeline PUT lands first.
 pub(crate) const PLAYBACK_SETTLE_MS: u32 = 800;
 
+/// **A second refetch this long after a stop.** The final `stopped` timeline is sent by the
+/// scrobble worker, which first joins the progress reporter — a request that may itself be in
+/// flight — so it can land seconds after the settle beat. A deck read in that window is the old
+/// one, and Home would show it until the next two-minute tick.
+pub(crate) const PLAYBACK_FOLLOWUP_MS: u32 = 6_000;
+
 /// The deck's refetch schedule. Frame-clock milliseconds throughout, compared wrapping.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DeckRefresh {
@@ -47,6 +53,8 @@ pub(crate) struct DeckRefresh {
     owed_at: Option<u32>,
     /// Was Home the visible page on the previous step? Its rising edge is "Home shown again".
     home_visible: bool,
+    /// A stop's follow-up refetch, owed once the first one has been paid.
+    followup_at: Option<u32>,
 }
 
 /// `a` is at or after `b` on the wrapping frame clock.
@@ -57,7 +65,7 @@ fn reached(now: u32, at: u32) -> bool {
 impl DeckRefresh {
     /// A schedule whose deck was fetched at `now` (the boot fetch).
     pub(crate) fn new(now: u32) -> Self {
-        Self { asked_at: now, owed_at: None, home_visible: false }
+        Self { asked_at: now, owed_at: None, home_visible: false, followup_at: None }
     }
 
     /// Owe a refetch from `at` on, keeping an earlier debt if one is already owed.
@@ -71,6 +79,7 @@ impl DeckRefresh {
     /// A playback stopped and its refetch is owed from `at` (the stop plus the settle beat).
     pub(crate) fn playback_stopped(&mut self, at: u32) {
         self.owe(at);
+        self.followup_at = Some(at.wrapping_add(PLAYBACK_FOLLOWUP_MS - PLAYBACK_SETTLE_MS.min(PLAYBACK_FOLLOWUP_MS)));
     }
 
     /// The app came back to the foreground at `now`.
@@ -92,6 +101,13 @@ impl DeckRefresh {
         self.home_visible = home_visible;
         if home_visible && age >= VISIBLE_CADENCE_MS {
             self.owe(now);
+        }
+        // A stop's follow-up comes due once the first refetch has been paid.
+        if self.owed_at.is_none() {
+            if let Some(at) = self.followup_at.filter(|&at| reached(now, at)) {
+                self.followup_at = None;
+                self.owe(at);
+            }
         }
         let due = self.owed_at.is_some_and(|at| reached(now, at));
         if !due || !may_fetch || in_flight {

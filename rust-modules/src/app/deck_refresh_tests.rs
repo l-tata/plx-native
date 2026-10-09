@@ -94,3 +94,17 @@ fn the_schedule_reads_the_frame_clock_across_its_wrap() {
     assert!(d.step(start.wrapping_add(VISIBLE_CADENCE_MS + PLAYBACK_SETTLE_MS), true, true, false),
         "the cadence counts across the wrap");
 }
+
+/// **The deck after a stop is read twice**: at the settle beat, and again once the scrobble
+/// worker's late `stopped` timeline has surely landed — otherwise a deck read before it would stand
+/// until the next two-minute tick.
+#[test]
+fn a_stop_is_followed_by_a_second_refetch() {
+    let mut d = DeckRefresh::new(0);
+    d.playback_stopped(10_000 + PLAYBACK_SETTLE_MS);
+    assert!(d.step(10_000 + PLAYBACK_SETTLE_MS, true, true, false), "the first refetch at the settle beat");
+    assert!(!d.step(10_000 + PLAYBACK_SETTLE_MS + 100, true, true, false));
+    assert!(!d.step(10_000 + PLAYBACK_FOLLOWUP_MS - 1, true, true, false), "not before the follow-up");
+    assert!(d.step(10_000 + PLAYBACK_FOLLOWUP_MS + 100, true, true, false), "the follow-up refetch");
+    assert!(!d.step(10_000 + PLAYBACK_FOLLOWUP_MS + 200, true, true, false), "and only one");
+}
