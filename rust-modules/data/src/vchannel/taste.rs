@@ -53,7 +53,28 @@ pub fn recency(last_viewed_at: i64, now_s: i64) -> f64 {
         return 0.35; // watched, date unknown: count it, modestly
     }
     let days = ((now_s - last_viewed_at).max(0)) as f64 / 86_400.0;
-    0.5f64.powf(days / HALF_LIFE_DAYS)
+    halvings(days / HALF_LIFE_DAYS)
+}
+
+/// `0.5^h`, exact at every whole `h` and straight between them: no transcendental function, so
+/// two televisions weigh the same viewing identically (`ci/check-deps.sh`, the libm gate).
+fn halvings(h: f64) -> f64 {
+    let h = h.max(0.0);
+    let whole = h.floor();
+    if whole >= 60.0 {
+        return 0.0;
+    }
+    let base = 1.0 / (1u64 << whole as u32) as f64;
+    base * (1.0 - 0.5 * (h - whole))
+}
+
+/// How deep into a show `episodes` watched is, 0..=1: rising quickly over the first episodes and
+/// whole at about fifty — a rational curve rather than a logarithm, for the reason [`halvings`]
+/// gives.
+fn depth(episodes: i64) -> f64 {
+    const K: f64 = 12.0;
+    let v = episodes.max(0) as f64;
+    (v * (50.0 + K) / (50.0 * (v + K))).min(1.0)
 }
 
 /// How engaged the profile is with a film (0 when unwatched).
@@ -70,8 +91,7 @@ pub fn show_engagement(s: &Show, now_s: i64) -> f64 {
         return 0.0;
     }
     let completion = (s.viewed_leaf_count as f64 / s.leaf_count.max(1) as f64).min(1.0);
-    let depth = ((1 + s.viewed_leaf_count) as f64).ln() / (51f64).ln();
-    (0.5 * completion + 0.5 * depth.min(1.0)) * (0.4 + 0.6 * recency(s.last_viewed_at, now_s))
+    (0.5 * completion + 0.5 * depth(s.viewed_leaf_count)) * (0.4 + 0.6 * recency(s.last_viewed_at, now_s))
 }
 
 /// A film's features.
@@ -246,6 +266,11 @@ mod tests {
     fn recency_halves_on_schedule() {
         assert!((recency(NOW, NOW) - 1.0).abs() < 1e-9);
         assert!((recency(NOW - 120 * DAY, NOW) - 0.5).abs() < 1e-6);
+        assert!((recency(NOW - 240 * DAY, NOW) - 0.25).abs() < 1e-6);
+        let mid = recency(NOW - 60 * DAY, NOW);
+        assert!(mid > 0.5 && mid < 1.0, "{mid}");
+        assert_eq!(depth(0), 0.0);
+        assert!(depth(5) < depth(20) && depth(60) == 1.0);
     }
 
     #[test]

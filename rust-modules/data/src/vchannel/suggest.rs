@@ -969,7 +969,7 @@ pub fn surprise(cat: &Catalog, m: &Moment, kept: &[String], exclude: &[String], 
         .filter(|x| !kept.contains(&x.s.id) && !exclude.contains(&x.s.id))
         .take(60)
         .collect();
-    let weights: Vec<f64> = pool.iter().map(|x| x.s.score.max(0.01).powi(2)).collect();
+    let weights: Vec<f64> = pool.iter().map(|x| { let w = x.s.score.max(0.01); w * w }).collect();
     let total: f64 = weights.iter().sum();
     if total <= 0.0 {
         return None;
