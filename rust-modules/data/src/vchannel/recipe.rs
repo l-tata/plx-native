@@ -88,6 +88,16 @@ pub struct Rules {
     pub unwatched_only: bool,
     /// Never these shows or items (ratingKeys).
     pub exclude: Vec<String>,
+    /// Only these films (ratingKeys), beside [`Rules::shows`] — a hand-picked or "because you
+    /// watched" channel. With `shows` or `films` set, the other rules still narrow.
+    pub films: Vec<String>,
+    /// In one of these Plex collections / carrying one of these labels (by name, any case).
+    pub collections: Vec<String>,
+    pub labels: Vec<String>,
+    /// A word of the title or summary (any case) — the seasonal channels' net.
+    pub keywords: Vec<String>,
+    /// Added to the library within this many days; 0 = any time.
+    pub added_within_days: i64,
 }
 
 impl Rules {

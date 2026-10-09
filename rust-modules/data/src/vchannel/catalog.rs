@@ -43,6 +43,8 @@ pub struct Show {
     pub episode_ms: i64,
     pub added_at: i64,
     pub last_viewed_at: i64,
+    /// When the show last gained an episode (PMS's `updatedAt` on a show row tracks it closely).
+    pub last_added_at: i64,
 }
 
 impl Show {
@@ -159,6 +161,7 @@ pub fn show_of(m: &Metadata, sid: u16) -> Show {
         episode_ms: m.duration,
         added_at: m.added_at,
         last_viewed_at: m.last_viewed_at,
+        last_added_at: m.updated_at,
     }
 }
 
@@ -188,10 +191,60 @@ fn section_ok(r: &Rules, section: i64) -> bool {
     r.sections.is_empty() || r.sections.contains(&section)
 }
 
+fn words_ok(r: &Rules, title: &str, summary: &str) -> bool {
+    r.keywords.is_empty() || {
+        let t = title.to_lowercase();
+        let s = summary.to_lowercase();
+        r.keywords.iter().any(|k| {
+            let k = k.to_lowercase();
+            contains_word(&t, &k) || contains_word(&s, &k)
+        })
+    }
+}
+
+/// `needle` as a whole word (or phrase) of `hay`, both lower-case.
+fn contains_word(hay: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let mut from = 0;
+    while let Some(i) = hay[from..].find(needle) {
+        let at = from + i;
+        let before = hay[..at].chars().next_back().map_or(true, |c| !c.is_alphanumeric());
+        let after = hay[at + needle.len()..].chars().next().map_or(true, |c| !c.is_alphanumeric());
+        if before && after {
+            return true;
+        }
+        from = at + needle.len();
+    }
+    false
+}
+
+fn added_ok(r: &Rules, added_at: i64, now_s: i64) -> bool {
+    r.added_within_days <= 0 || (added_at > 0 && now_s - added_at <= r.added_within_days * 86_400)
+}
+
+fn tagged_ok(r: &Rules, collections: &[String], labels: &[String]) -> bool {
+    (r.collections.is_empty() || any_eq(collections, &r.collections)) && (r.labels.is_empty() || any_eq(labels, &r.labels))
+}
+
+/// Seconds since the epoch, for "added within" (the catalog's dates are the server's unix seconds).
+pub fn now_s() -> i64 {
+    plx_base::wallclock::now_ms() / 1000
+}
+
 /// Does a film meet the rules?
 pub fn film_matches(r: &Rules, p: &Program) -> bool {
+    film_matches_at(r, p, now_s())
+}
+
+pub fn film_matches_at(r: &Rules, p: &Program, now_s: i64) -> bool {
+    let picked = r.films.is_empty() && r.shows.is_empty() || r.films.contains(&p.rk);
     r.kinds.movies()
-        && r.shows.is_empty()
+        && picked
+        && tagged_ok(r, &p.collections, &p.labels)
+        && words_ok(r, &p.title, &p.summary)
+        && added_ok(r, p.added_at, now_s)
         && section_ok(r, p.section)
         && (r.genres.is_empty() || any_eq(&p.genres, &r.genres))
         && !any_eq(&p.genres, &r.not_genres)
@@ -208,8 +261,12 @@ pub fn film_matches(r: &Rules, p: &Program) -> bool {
 
 /// Does a show meet the rules at show level (its episodes are then checked one by one)?
 pub fn show_matches(r: &Rules, s: &Show) -> bool {
+    let picked = r.films.is_empty() && r.shows.is_empty() || r.shows.contains(&s.rk);
     r.kinds.episodes()
-        && (r.shows.is_empty() || r.shows.contains(&s.rk))
+        && picked
+        && tagged_ok(r, &s.collections, &s.labels)
+        && words_ok(r, &s.title, &s.summary)
+        && (r.added_within_days <= 0 || added_ok(r, s.added_at.max(s.last_added_at), now_s()))
         && section_ok(r, s.section)
         && (r.genres.is_empty() || any_eq(&s.genres, &r.genres))
         && !any_eq(&s.genres, &r.not_genres)
@@ -230,7 +287,10 @@ fn length_ok(r: &Rules, dur_ms: i64) -> bool {
 
 /// Does an episode of a matching show meet the episode-level rules?
 pub fn episode_matches(r: &Rules, p: &Program) -> bool {
-    length_ok(r, p.dur_ms) && (!r.unwatched_only || !p.watched) && !r.exclude.contains(&p.rk)
+    length_ok(r, p.dur_ms)
+        && (!r.unwatched_only || !p.watched)
+        && !r.exclude.contains(&p.rk)
+        && added_ok(r, p.added_at, now_s())
 }
 
 /// The programme-level rules any source honours (a collection's films over 90 minutes, say).
