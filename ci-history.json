@@ -1,11 +1,12 @@
-{"updated":"2026-10-09T14:08:08Z",
+{"updated":"2026-10-09T21:57:41Z",
 "ci":[
 {"id":37907603998,"at":"2026-10-09T08:51:56Z","sha":"d76ffbbd1","title":"Live TV from Tunarr with channel surfing; lenient streaming; Go to Show; top-bar clock","pr":null,"conclusion":"success","attempt":1,"jobs":{"host unit tests (default features)":360,"host unit tests (hostsim)":273,"cross-build (armv7) + artifact assertions":379,"host lint + type-checks":135,"host harness tests":149,"host python/shell/C gates":93,"host checks (NOT a device gate)":5}},
 {"id":37941121170,"at":"2026-10-09T14:01:38Z","sha":"b0bedbefd","title":"Live TV plays: MPEG-TS video and audio framing, timestamp rebase for a channel","pr":null,"conclusion":"success","attempt":1,"jobs":{"host unit tests (default features)":370,"host lint + type-checks":130,"host python/shell/C gates":115,"host harness tests":151,"host unit tests (hostsim)":315,"cross-build (armv7) + artifact assertions":293,"host checks (NOT a device gate)":3}}
 ],
 "sim":[
 {"id":37907603922,"at":"2026-10-09T08:51:56Z","sha":"d76ffbbd1","title":"Live TV from Tunarr with channel surfing; lenient streaming; Go to Show; top-bar clock","pr":null,"conclusion":"failure","attempt":1,"jobs":{"macOS tests against bundled FFmpeg and ASS":289,"Linux simulator build + launch":306,"Windows launcher syntax":12},"failed":["macOS simulator build + launch"]},
-{"id":37941121342,"at":"2026-10-09T14:01:38Z","sha":"b0bedbefd","title":"Live TV plays: MPEG-TS video and audio framing, timestamp rebase for a channel","pr":null,"conclusion":"failure","attempt":1,"jobs":{"macOS tests against bundled FFmpeg and ASS":174,"Windows launcher syntax":24,"Linux simulator build + launch":229},"failed":["macOS simulator build + launch"]}
+{"id":37941121342,"at":"2026-10-09T14:01:38Z","sha":"b0bedbefd","title":"Live TV plays: MPEG-TS video and audio framing, timestamp rebase for a channel","pr":null,"conclusion":"failure","attempt":1,"jobs":{"macOS tests against bundled FFmpeg and ASS":174,"Windows launcher syntax":24,"Linux simulator build + launch":229},"failed":["macOS simulator build + launch"]},
+{"id":37996211320,"at":"2026-10-09T21:54:25Z","sha":"716b81786","title":"A richer Live TV guide, Plex Watchlist, playlists, shuffle, a play queue, versions and a smarter Home","pr":null,"conclusion":"failure","attempt":1,"jobs":{"Windows launcher syntax":26,"macOS tests against bundled FFmpeg and ASS":139,"Linux simulator build + launch":181},"failed":["macOS simulator build + launch"]}
 ],
 "nightly":[],
 "cancelled":{},
