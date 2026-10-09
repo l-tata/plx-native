@@ -17,6 +17,8 @@ use super::catalog::Catalog;
 use super::recipe::{next_number, Recipe};
 use super::remote::{self, ClientReads, Stored};
 use super::schedule::{Program, Schedule};
+use super::suggest::{self, Moment, Suggestion};
+use super::dismissed;
 
 /// How long the channel list is trusted before entering Live TV or Home reads it again (another
 /// television may have added or deleted a channel).
@@ -26,6 +28,9 @@ pub const LIST_STALE_MS: i64 = 5 * 60 * 1000;
 pub const CATALOG_STALE_MS: i64 = 30 * 60 * 1000;
 /// Builds in flight at once.
 const BUILDS_IN_FLIGHT: usize = 2;
+/// How long a row of suggestions stands before it is worked out again (the hour of the day and
+/// the day of the week are part of the score).
+pub const SUGGEST_STALE_MS: i64 = 60 * 60 * 1000;
 
 /// Which server and profile the state was read for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,6 +110,12 @@ pub enum VCmd {
     /// its programmes again.
     Update { playlist: String, recipe: Recipe, rebuild: bool },
     Delete { playlist: String },
+    /// Work the suggestions out again now.
+    Suggest,
+    /// The profile is not interested in suggestion `id`: never show it again.
+    Dismiss { id: String },
+    /// Draw a surprise channel (seeded, so the same press draws the same idea).
+    Surprise { seed: u64 },
 }
 
 enum Job {
@@ -113,6 +124,8 @@ enum Job {
     Build { playlist: String, rx: Receiver<Option<Vec<Program>>> },
     Preview { token: u64, rx: Receiver<Option<Vec<Program>>> },
     Write(Receiver<(WriteDone, Option<Stored>)>),
+    Suggest(Receiver<Vec<Suggestion>>),
+    Surprise(Receiver<Option<Suggestion>>),
 }
 
 /// The state. See the module doc.
@@ -128,6 +141,10 @@ pub struct Channels {
     done: Vec<WriteDone>,
     jobs: Vec<Job>,
     episodes: Arc<Mutex<HashMap<String, Arc<Vec<Program>>>>>,
+    suggestions: Arc<Vec<Suggestion>>,
+    suggested_at: Option<i64>,
+    surprise: Option<Suggestion>,
+    dismissed: Option<dismissed::Map>,
     revision: u64,
 }
 
@@ -154,6 +171,30 @@ impl Channels {
 
     pub fn preview(&self) -> Option<&Preview> {
         self.preview.as_ref()
+    }
+
+    /// The suggested channels, best first ([`suggest::suggest`]).
+    pub fn suggestions(&self) -> &Arc<Vec<Suggestion>> {
+        &self.suggestions
+    }
+
+    pub fn suggestion(&self, id: &str) -> Option<&Suggestion> {
+        self.suggestions.iter().find(|s| s.id == id).or(self.surprise.as_ref().filter(|s| s.id == id))
+    }
+
+    /// The last *Surprise me* draw.
+    pub fn surprise(&self) -> Option<&Suggestion> {
+        self.surprise.as_ref()
+    }
+
+    fn kept_origins(&self) -> Vec<String> {
+        self.channels.iter().map(|c| c.recipe.origin.clone()).filter(|o| !o.is_empty()).collect()
+    }
+
+    fn dismissed_ids(&mut self) -> Vec<String> {
+        let profile = self.scope.as_ref().map(|s| s.profile.clone()).unwrap_or_default();
+        let map = self.dismissed.get_or_insert_with(dismissed::load);
+        map.get(&profile).cloned().unwrap_or_default()
     }
 
     /// Writes that finished since the last call (the builder reads its own).
@@ -192,8 +233,27 @@ impl Channels {
                 if self.catalog_at.map_or(true, |t| now_ms - t >= CATALOG_STALE_MS) {
                     c |= self.start_catalog(now_ms);
                 }
+                if self.suggested_at.map_or(true, |t| now_ms - t >= SUGGEST_STALE_MS) {
+                    c |= self.start_suggest(now_ms);
+                }
                 c | self.rebuild_stale(now_ms)
             }
+            VCmd::Suggest => self.start_suggest(now_ms),
+            VCmd::Dismiss { id } => {
+                let profile = self.scope.as_ref().map(|s| s.profile.clone()).unwrap_or_default();
+                let map = self.dismissed.get_or_insert_with(dismissed::load);
+                let added = dismissed::add(map, &profile, &id);
+                if added {
+                    dismissed::save(map);
+                }
+                let before = self.suggestions.len();
+                self.suggestions = Arc::new(self.suggestions.iter().filter(|s| s.id != id).cloned().collect());
+                if self.surprise.as_ref().is_some_and(|s| s.id == id) {
+                    self.surprise = None;
+                }
+                added || before != self.suggestions.len()
+            }
+            VCmd::Surprise { seed } => self.start_surprise(now_ms, seed),
             VCmd::Preview { token, recipe } => self.start_preview(token, recipe),
             VCmd::ClearPreview => {
                 self.jobs.retain(|j| !matches!(j, Job::Preview { .. }));
@@ -288,6 +348,34 @@ impl Channels {
         started
     }
 
+    fn start_suggest(&mut self, now_ms: i64) -> bool {
+        let Some(cat) = self.catalog.clone() else { return false };
+        if self.jobs.iter().any(|j| matches!(j, Job::Suggest(_))) {
+            return false;
+        }
+        let kept = self.kept_origins();
+        let dismissed = self.dismissed_ids();
+        let Some(rx) = Self::spawn("vchannel-suggest", move || {
+            suggest::suggest_excluding(&cat, &Moment::at(now_ms), &kept, &dismissed)
+        }) else { return false };
+        self.jobs.push(Job::Suggest(rx));
+        self.suggested_at = Some(now_ms);
+        true
+    }
+
+    fn start_surprise(&mut self, now_ms: i64, seed: u64) -> bool {
+        let Some(cat) = self.catalog.clone() else { return false };
+        self.jobs.retain(|j| !matches!(j, Job::Surprise(_)));
+        let kept = self.kept_origins();
+        let mut exclude = self.dismissed_ids();
+        exclude.extend(self.surprise.iter().map(|s| s.id.clone()));
+        let Some(rx) = Self::spawn("vchannel-surprise", move || {
+            suggest::surprise(&cat, &Moment::at(now_ms), &kept, &exclude, seed)
+        }) else { return false };
+        self.jobs.push(Job::Surprise(rx));
+        true
+    }
+
     fn start_preview(&mut self, token: u64, recipe: Recipe) -> bool {
         self.jobs.retain(|j| !matches!(j, Job::Preview { .. }));
         // Reshuffle and a new style change only the seed or style: reuse the programmes.
@@ -329,7 +417,29 @@ impl Channels {
             .map(|s| s.pass_order(0).iter().map(|&i| s.programs()[i].clone()).collect())
             .unwrap_or_default();
         let kept = recipe.clone();
+        let catalog = self.catalog.clone();
+        let cache = Arc::clone(&self.episodes);
+        let preview_built = !programmes.is_empty();
+        let held = Arc::clone(&self.episodes);
         let Some(rx) = Self::spawn("vchannel-keep", move || {
+            // Kept straight from a suggestion's tile, with no preview: build it here first, so
+            // the playlist has items and the channel airs the moment it lands.
+            let order = if order.is_empty() {
+                let mut reads = ClientReads { client: c, catalog: catalog.as_deref(), cache: &cache };
+                let built = super::build::programmes(&kept, catalog.as_deref(), &mut reads).unwrap_or_default();
+                if built.is_empty() {
+                    return (WriteDone::Failed { token }, None);
+                }
+                let s = Schedule::new(built.clone(), kept.style, kept.seed, kept.epoch_ms);
+                if !preview_built {
+                    if let Ok(mut m) = held.lock() {
+                        m.insert(format!("keep:{token}"), Arc::new(built));
+                    }
+                }
+                s.pass_order(0).iter().map(|&i| s.programs()[i].clone()).collect()
+            } else {
+                order
+            };
             match remote::keep(c, &kept, &order) {
                 Some(playlist) => (
                     WriteDone::Kept { token, playlist: playlist.clone() },
@@ -464,6 +574,23 @@ impl Channels {
                     Err(TryRecvError::Disconnected) => changed = true,
                     Err(TryRecvError::Empty) => self.jobs.push(Job::Preview { token, rx }),
                 },
+                Job::Suggest(rx) => match rx.try_recv() {
+                    Ok(list) => {
+                        plx_base::eventlog::log(&format!("vchannel: suggestions n={}", list.len()));
+                        self.suggestions = Arc::new(list);
+                        changed = true;
+                    }
+                    Err(TryRecvError::Disconnected) => changed = true,
+                    Err(TryRecvError::Empty) => self.jobs.push(Job::Suggest(rx)),
+                },
+                Job::Surprise(rx) => match rx.try_recv() {
+                    Ok(pick) => {
+                        self.surprise = pick;
+                        changed = true;
+                    }
+                    Err(TryRecvError::Disconnected) => changed = true,
+                    Err(TryRecvError::Empty) => self.jobs.push(Job::Surprise(rx)),
+                },
                 Job::Write(rx) => match rx.try_recv() {
                     Ok((done, stored)) => {
                         if let (WriteDone::Kept { token, .. }, Some(stored)) = (&done, stored) {
@@ -487,8 +614,17 @@ impl Channels {
                 },
             }
         }
+        if landed_catalog {
+            changed |= self.start_suggest(now_ms);
+        }
         if landed_catalog || changed {
             changed |= self.rebuild_stale(now_ms);
+        }
+        // A kept suggestion leaves the row at once.
+        let kept = self.kept_origins();
+        if self.suggestions.iter().any(|s| kept.contains(&s.id)) {
+            self.suggestions = Arc::new(self.suggestions.iter().filter(|s| !kept.contains(&s.id)).cloned().collect());
+            changed = true;
         }
         if changed {
             self.revision += 1;
