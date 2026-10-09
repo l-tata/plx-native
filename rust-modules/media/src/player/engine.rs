@@ -171,6 +171,9 @@ pub struct Engine {
     pub placed_src: (c_int, c_int),
     pub eos_pushed: bool, // Kodi VIDEO_DRAIN: pushEOS() sent once at true EOF
     pub rebase_pending: bool, // g_rebase_pending
+    /// This engine plays a Live TV channel: a stream that arrives at the speed it plays, so the
+    /// cushion it starts with is the cushion it keeps ([`prime_depth`]).
+    pub live: bool,
     // In-place seek only: keyframes this far AHEAD of the seek target are stale frames the demuxer
     // produced from its pre-flush read position before the reopen+av_seek won the race (playback
     // drifts forward during a long scrub) — reject them so the rebase anchors on the REAL post-seek
@@ -1390,6 +1393,7 @@ fn start_bufferfeed_inner(
             SHARED.seek_to_ns.load(Ordering::Relaxed) >= 0,
             crate::route::live(ps).is_some(),
         ),
+        live: crate::route::live(ps).is_some(),
         rebase_drops: 0,
         seek_armed_at: 0,
         seek_retries: 0,
@@ -1475,6 +1479,30 @@ fn install_synthetic_playurl(
 /// wait that long for its first frame. Plain fresh play of a file needs neither.
 fn first_open_rebases(seek_armed: bool, live: bool) -> bool {
     seek_armed || live
+}
+
+#[cfg(test)]
+mod live_prime_tests {
+    use super::*;
+
+    /// **The distorted Live TV audio.** A channel's clock used to start on the file depths —
+    /// 700 ms of video and 300 ms of audio — which a real-time stream never grows past, so the
+    /// audio decoder ran a third of a second from starving for the whole viewing. A live channel
+    /// now holds Play until both lanes carry the live cushion.
+    #[test]
+    fn a_live_channel_does_not_start_on_the_file_cushion() {
+        assert!(decoder_ready(PRIME_NS, PRIME_AUDIO_NS, true, false), "a file still starts at once");
+        assert!(!decoder_ready(PRIME_NS, PRIME_AUDIO_NS, true, true), "a channel waits for its cushion");
+        assert!(!decoder_ready(LIVE_PRIME_NS, PRIME_AUDIO_NS, true, true), "audio needs its cushion too");
+        assert!(decoder_ready(LIVE_PRIME_NS, LIVE_PRIME_NS, true, true));
+        assert!(LIVE_PRIME_NS >= 2_000_000_000, "at least two seconds of each lane");
+    }
+
+    #[test]
+    fn an_audioless_channel_still_starts_on_video_alone() {
+        assert!(decoder_ready(PRIME_VIDEO_MAX_NS.max(LIVE_PRIME_NS), 0, false, true));
+        assert!(!decoder_ready(PRIME_NS, 0, false, true));
+    }
 }
 
 #[cfg(test)]
@@ -2058,6 +2086,34 @@ const PRIME_NS: i64 = 700_000_000;
 // so a genuinely audioless region can't hang.
 const PRIME_AUDIO_NS: i64 = 300_000_000;
 const PRIME_VIDEO_MAX_NS: i64 = 2_500_000_000;
+/// **A Live TV channel primes BOTH lanes this deep before Play.** A file arrives faster than it
+/// plays, so whatever the clock starts on grows behind it; a Tunarr channel arrives at exactly the
+/// speed it plays (its encoder reads in real time), so the cushion at Play is the cushion for the
+/// whole viewing. Started on the file depths (700 ms video, 300 ms audio), every network or encoder
+/// hiccup longer than a third of a second starved the audio decoder under Starfish's audio-master
+/// clock — the distorted, warbling sound reported on the first Tunarr build that showed a
+/// picture. 2.5 s rides out ordinary jitter at the cost of tuning that much later.
+const LIVE_PRIME_NS: i64 = 2_500_000_000;
+
+/// How deep each lane must be before the clock starts: `(video, audio)`.
+fn prime_depth(live: bool) -> (i64, i64) {
+    if live {
+        (LIVE_PRIME_NS, LIVE_PRIME_NS)
+    } else {
+        (PRIME_NS, PRIME_AUDIO_NS)
+    }
+}
+
+/// Whether the decoder may start: both lanes at their [`prime_depth`], or — for a stream proven
+/// audioless — video alone at the video-only escape.
+fn decoder_ready(accepted_vbuf: i64, accepted_abuf: i64, audio_expected: bool, live: bool) -> bool {
+    let (video, audio) = prime_depth(live);
+    if audio_expected {
+        accepted_vbuf >= video && accepted_abuf >= audio
+    } else {
+        accepted_vbuf >= PRIME_VIDEO_MAX_NS.max(video)
+    }
+}
 // Feed-ahead throttle (Kodi-parity): keep the VIDEO lane at most this far ahead of the presented
 // position (SHARED.pres_fed) instead of feeding greedily to BufferFull. Bounding the buffer to
 // ~1.6s (was ~10-20s: aq 6MB + the pipeline's own ~8MB) makes seeks flush far less, keeps the
@@ -2412,11 +2468,10 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine) {
     // demuxer proved audioless may use the video-only escape; `abuf <= 0` alone is starvation, not
     // evidence that no audio exists.
     let audio_expected = SHARED.hls_audio_expected.load(Ordering::Acquire) || playable_abuf > 0;
-    let decoder_ready = if audio_expected {
-        accepted_vbuf >= PRIME_NS && accepted_abuf >= PRIME_AUDIO_NS
-    } else {
-        accepted_vbuf >= PRIME_VIDEO_MAX_NS
-    };
+    let decoder_ready = decoder_ready(accepted_vbuf, accepted_abuf, audio_expected, eng.live);
+    if decoder_ready && eng.live {
+        log(&format!("live: primed video={}ms audio={}ms", accepted_vbuf / 1_000_000, accepted_abuf / 1_000_000));
+    }
     let recovery = SHARED.hls_recovery();
     // A downshift has no discretionary trial reserve, yet it can queue candidate AUs while an
     // internal hold is active. Validate one seqlock generation around the ENTIRE tail/decoder/
@@ -3439,6 +3494,7 @@ mod prime_livelock_tests {
             placed_src: (0, 0),
             eos_pushed: false,
             rebase_pending: false,
+            live: false,
             rebase_drops: 0,
             seek_armed_at: 0,
             seek_retries: 0,
