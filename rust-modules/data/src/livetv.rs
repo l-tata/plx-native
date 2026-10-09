@@ -31,6 +31,50 @@ use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 
+/// How long the virtual channels' guide window stands before it slides with the clock.
+const VIRTUAL_SLIDE_MS: i64 = 20 * 60 * 1000;
+/// The virtual channels' guide window: from this long ago…
+const VIRTUAL_BEFORE_MS: i64 = 3 * 60 * 60 * 1000;
+/// …to this far ahead.
+const VIRTUAL_AHEAD_MS: i64 = 26 * 60 * 60 * 1000;
+
+/// The scheme of a virtual channel's `Channel::url`: `plxvc:<playlist ratingKey>`.
+pub const VIRTUAL_SCHEME: &str = "plxvc:";
+
+/// The playlist a lineup channel's URL names, when it is a virtual channel.
+pub fn virtual_playlist(url: &str) -> Option<&str> {
+    url.strip_prefix(VIRTUAL_SCHEME)
+}
+
+/// A virtual channel as the guide draws it: its airings over the window around `now_ms`.
+pub fn virtual_channel(vc: &crate::vchannel::channels::VChannel, now_ms: i64) -> guide::Channel {
+    let mut ch = guide::Channel {
+        number: vc.number(),
+        name: vc.recipe.name.clone(),
+        url: format!("{VIRTUAL_SCHEME}{}", vc.playlist),
+        icon: String::new(),
+        airings: Vec::new(),
+    };
+    let Some(s) = vc.schedule.as_ref() else { return ch };
+    for slot in s.window(now_ms - VIRTUAL_BEFORE_MS, now_ms + VIRTUAL_AHEAD_MS) {
+        let p = &s.programs()[slot.program];
+        let art = if !p.art.is_empty() { &p.art } else { &p.thumb };
+        ch.airings.push(guide::Airing {
+            start_ms: slot.start_ms,
+            stop_ms: slot.stop_ms,
+            title: p.headline().to_owned(),
+            sub_title: if p.episode { p.title.clone() } else { String::new() },
+            desc: p.summary.clone(),
+            episode: if p.episode && (p.season > 0 || p.index > 0) { format!("S{:02}E{:02}", p.season.max(0), p.index.max(0)) } else { String::new() },
+            category: p.genres.first().cloned().unwrap_or_default(),
+            categories: if p.episode { p.genres.clone() } else { std::iter::once("Movie".to_owned()).chain(p.genres.iter().cloned()).collect() },
+            year: u16::try_from(p.year).ok().filter(|y| *y > 0),
+            icon: if art.is_empty() { String::new() } else { format!("plex:{}:{}", p.sid, art) },
+        });
+    }
+    ch
+}
+
 /// How old a loaded guide may get before entering Live TV reloads it. Tunarr rebuilds its own
 /// XMLTV every 4 hours by default, so anything much faster than this re-reads the same file.
 pub const STALE_MS: i64 = 30 * 60 * 1000;
@@ -91,7 +135,14 @@ pub struct LiveTvState {
     source: String,
     status: Status,
     device: Option<Device>,
+    /// What every surface reads: Tunarr's channels, then the profile's virtual channels.
     lineup: Arc<Lineup>,
+    /// Tunarr's own channels, as loaded.
+    tunarr: Arc<Lineup>,
+    /// The profile's virtual channels (`crate::vchannel`).
+    virtuals: crate::vchannel::channels::Channels,
+    /// The start of the window the virtual channels' guide was last drawn for.
+    virtual_window_ms: i64,
     guide_error: Option<FetchError>,
     loaded_at_ms: Option<i64>,
     discovery: Discovery,
@@ -111,6 +162,9 @@ impl Default for LiveTvState {
             status: Status::Unconfigured,
             device: None,
             lineup: Arc::new(Lineup::default()),
+            tunarr: Arc::new(Lineup::default()),
+            virtuals: crate::vchannel::channels::Channels::default(),
+            virtual_window_ms: 0,
             guide_error: None,
             loaded_at_ms: None,
             discovery: Discovery::Idle,
@@ -124,7 +178,7 @@ impl Default for LiveTvState {
 }
 
 /// The store's command vocabulary.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum LiveTvCmd {
     /// Boot: adopt the persisted server without writing it back or loading anything yet.
     Restore { origin: String },
@@ -143,6 +197,8 @@ pub enum LiveTvCmd {
     Match(Want),
     /// Drop everything, the configured server included (tests).
     Reset,
+    /// A virtual-channel command (`crate::vchannel::channels::VCmd`).
+    Virtual(crate::vchannel::channels::VCmd),
 }
 
 /// Read access, borrowed for one frame.
@@ -156,8 +212,17 @@ impl<'a> LiveTvView<'a> {
     pub fn source(&self) -> &'a str {
         &self.state.source
     }
+    /// Is there anything to watch: a Tunarr server, or a virtual channel?
     pub fn configured(&self) -> bool {
+        !self.state.source.is_empty() || !self.state.virtuals.channels().is_empty()
+    }
+    /// Is a Tunarr server set up (Settings > Live TV)?
+    pub fn tunarr_configured(&self) -> bool {
         !self.state.source.is_empty()
+    }
+    /// The profile's virtual channels, their suggestions and the builder's preview.
+    pub fn virtuals(&self) -> &'a crate::vchannel::channels::Channels {
+        &self.state.virtuals
     }
     pub fn status(&self) -> &'a Status {
         &self.state.status
@@ -246,11 +311,37 @@ impl LiveTvState {
                 *self = LiveTvState { revision: self.revision, epoch: self.epoch + 1, ..LiveTvState::default() };
                 true
             }
+            LiveTvCmd::Virtual(cmd) => {
+                let changed = self.virtuals.run(cmd, now_ms);
+                if changed {
+                    self.republish(now_ms);
+                }
+                changed
+            }
         };
         if changed {
             self.revision += 1;
         }
         changed
+    }
+
+    /// Publish Tunarr's channels followed by the virtual channels, whose airings are drawn from
+    /// their timelines over a window around `now_ms`.
+    fn republish(&mut self, now_ms: i64) {
+        self.virtual_window_ms = now_ms;
+        if self.virtuals.channels().is_empty() {
+            self.lineup = Arc::clone(&self.tunarr);
+            return;
+        }
+        let mut merged = (*self.tunarr).clone();
+        let taken: std::collections::HashSet<String> = merged.channels.iter().map(|c| c.number.clone()).collect();
+        for vc in self.virtuals.channels() {
+            if taken.contains(&vc.number()) {
+                continue; // a Tunarr channel already has that number; the virtual one yields
+            }
+            merged.channels.push(virtual_channel(vc, now_ms));
+        }
+        self.lineup = Arc::new(merged);
     }
 
     fn set_source(&mut self, origin: String) -> bool {
@@ -261,7 +352,8 @@ impl LiveTvState {
         self.load = None;
         self.source = origin;
         self.device = None;
-        self.lineup = Arc::new(Lineup::default());
+        self.tunarr = Arc::new(Lineup::default());
+        self.republish(plx_base::wallclock::now_ms());
         self.guide_error = None;
         self.loaded_at_ms = None;
         self.status = if self.source.is_empty() { Status::Unconfigured } else { Status::Loading };
@@ -401,6 +493,12 @@ impl LiveTvState {
             }
         }
         changed |= self.pump_matches();
+        let virtual_changed = self.virtuals.pump(now_ms);
+        // The virtual channels' guide is drawn for a window; slide it as time passes.
+        if virtual_changed || (!self.virtuals.channels().is_empty() && now_ms - self.virtual_window_ms >= VIRTUAL_SLIDE_MS) {
+            self.republish(now_ms);
+            changed = true;
+        }
         if changed {
             self.revision += 1;
             plx_machine::idle::invalidate();
@@ -419,7 +517,8 @@ impl LiveTvState {
                 ));
                 self.device = Some(device);
                 plx_base::wallclock::set_offset_hint(lineup.source_offset_s);
-                self.lineup = Arc::new(lineup);
+                self.tunarr = Arc::new(lineup);
+                self.republish(now_ms);
                 self.guide_error = guide_error;
                 self.loaded_at_ms = Some(now_ms);
                 self.status = Status::Ready;
@@ -438,7 +537,8 @@ impl LiveTvState {
     #[cfg(any(test, feature = "test-support"))]
     pub fn install_for_test(&mut self, origin: &str, lineup: Lineup, now_ms: i64) {
         self.source = origin.to_owned();
-        self.lineup = Arc::new(lineup);
+        self.tunarr = Arc::new(lineup);
+        self.republish(now_ms);
         self.status = Status::Ready;
         self.loaded_at_ms = Some(now_ms);
         self.revision += 1;

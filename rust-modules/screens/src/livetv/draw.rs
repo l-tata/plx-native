@@ -256,7 +256,7 @@ impl LiveTvScreen {
             let (t, tw, th) = if p.is_recording() {
                 (0, 0.0, 0.0)
             } else {
-                plx_ui::tex::resolve_wh_on(plx_ui::tex::PLAIN_URL, icon, ART_MAX_W as i32, ART_H as i32, false)
+                { let (srv, path) = plx_ui::tex::art_source(icon); plx_ui::tex::resolve_wh_on(srv, path, ART_MAX_W as i32, ART_H as i32, false) }
             };
             if t != 0 && th > 0.0 {
                 let w = ART_H * (tw / th).clamp(2.0 / 3.0, 16.0 / 9.0);

@@ -636,7 +636,7 @@ impl LiveTvScreen {
         let art = if guide { self.focus_airing(view.lineup()).map(|(ch, a)| draw::info_art(ch, a)) } else { None };
         match art {
             Some(Some(url)) => {
-                let corners = plx_ui::tex::corners_on(plx_ui::tex::PLAIN_URL, url, ART_MAX_W as i32, ART_H as i32, false);
+                let corners = { let (srv, path) = plx_ui::tex::art_source(url); plx_ui::tex::corners_on(srv, path, ART_MAX_W as i32, ART_H as i32, false) };
                 self.ground.key(corners, plx_ui::widgets::PageGround::CARD_W, dt);
             }
             _ => self.ground.key_target([theme::SURFACE_APP; 4], dt),
