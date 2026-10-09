@@ -2094,5 +2094,17 @@
   "browse.home.playlists": {
     "value": "Playlists",
     "description": "Home shelf heading: the servers' video playlists"
+  },
+  "browse.home.channels": {
+    "value": "Suggested Channels",
+    "description": "Home shelf heading: TV channels the app suggests building from the viewer's own Plex library"
+  },
+  "browse.home.surprise_title": {
+    "value": "Surprise Me",
+    "description": "Home Suggested Channels shelf: the last card, which draws a surprise channel from the library"
+  },
+  "browse.home.surprise_why": {
+    "value": "A channel you might not think of",
+    "description": "Home Suggested Channels shelf: caption under the Surprise Me card"
   }
 }

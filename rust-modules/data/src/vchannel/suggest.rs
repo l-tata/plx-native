@@ -87,13 +87,14 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 /// Where an idea came from: its family decides its naming, its prior and its cap in a row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Family {
     BecauseYouWatched,
     CatchUp,
     Season,
     Mood,
     DecadeGenre,
+    #[default]
     Genre,
     Network,
     Studio,
@@ -151,7 +152,7 @@ impl Family {
 }
 
 /// One suggested channel.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Suggestion {
     /// Stable for the same idea over the same library, so a kept one is not suggested again.
     pub id: String,

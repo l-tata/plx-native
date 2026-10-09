@@ -202,7 +202,7 @@ pub const SHAPE: &str =
 /// Is `m` an item the menu has anything to offer? A leaf or a show/season — i.e. everything the
 /// home shelves carry. Kept as a predicate so the caller can decline to present an empty panel.
 pub fn has_actions(m: &PmsMovie) -> bool {
-    !matches!(m.kind, plx_data::pms::KIND_COLLECTION | plx_data::pms::KIND_PLAYLIST | plx_data::pms::KIND_CHANNEL)
+    !matches!(m.kind, plx_data::pms::KIND_COLLECTION | plx_data::pms::KIND_PLAYLIST | plx_data::pms::KIND_CHANNEL | plx_data::pms::KIND_CHANNEL_IDEA)
         && !m.rk.is_empty()
 }
 

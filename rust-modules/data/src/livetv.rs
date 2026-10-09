@@ -7,6 +7,7 @@
 //! * [`xmltv`] — the guide, parsed as a stream over a window of time.
 //! * [`guide`] — the two joined: [`guide::Lineup`], the model every Live TV surface reads.
 //! * [`on_now`] — Home's live shelf: one card per channel, the last-tuned first.
+//! * [`suggested`] — Home's Suggested Channels shelf, from the library (`crate::vchannel`).
 //! * [`source`] — the blocking reads and the LAN search, run by the store's workers.
 //! * [`plexmatch`] — whether an airing is in the viewer's Plex library, so the guide can offer it
 //!   from the start.
@@ -20,6 +21,7 @@ pub mod guide;
 pub mod hdhr;
 pub mod plexmatch;
 pub mod on_now;
+pub mod suggested;
 pub mod source;
 pub mod xmltv;
 
@@ -212,9 +214,14 @@ impl<'a> LiveTvView<'a> {
     pub fn source(&self) -> &'a str {
         &self.state.source
     }
-    /// Is there anything to watch: a Tunarr server, or a virtual channel?
+    /// Does Live TV have anything to show — a Tunarr server, a virtual channel, or a channel
+    /// suggested from the library? The top strip offers the page exactly while this holds.
     pub fn configured(&self) -> bool {
-        !self.state.source.is_empty() || !self.state.virtuals.channels().is_empty()
+        !self.state.source.is_empty() || self.has_virtuals() || !self.state.virtuals.suggestions().is_empty()
+    }
+    /// Does the profile hold a virtual channel?
+    pub fn has_virtuals(&self) -> bool {
+        !self.state.virtuals.channels().is_empty()
     }
     /// Is a Tunarr server set up (Settings > Live TV)?
     pub fn tunarr_configured(&self) -> bool {
@@ -541,6 +548,20 @@ impl LiveTvState {
         self.republish(now_ms);
         self.status = Status::Ready;
         self.loaded_at_ms = Some(now_ms);
+        self.revision += 1;
+    }
+
+    /// Install virtual channels and suggestions directly, and publish them in the lineup.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn install_virtuals_for_test(
+        &mut self,
+        channels: Vec<crate::vchannel::channels::VChannel>,
+        suggestions: Vec<crate::vchannel::suggest::Suggestion>,
+        now_ms: i64,
+    ) {
+        self.virtuals.install_for_test(channels);
+        self.virtuals.install_suggestions_for_test(suggestions);
+        self.republish(now_ms);
         self.revision += 1;
     }
 

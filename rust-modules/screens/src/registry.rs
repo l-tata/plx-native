@@ -260,6 +260,9 @@ pub enum HomeReq {
     /// OK on an On Now card: tune the live channel with this guide number (`LiveTvReq::Tune`'s
     /// work, keyed by number because Home's rows are not the lineup).
     Tune { number: String },
+    /// OK on a Suggested Channels card: open the channel studio on that suggestion (its id, or
+    /// `surprise`).
+    Studio { id: String },
     /// BACK from the shelves: fold to the hero and seat the engine in its remembered hero group.
     FoldToHero,
     Account,
@@ -1145,6 +1148,9 @@ pub enum AppMsg {
     /// Open the Live TV page on its setup face (Settings > Live TV) — delivered to a mounted Live
     /// TV page so a page already on the stack shows setup rather than its guide.
     LiveTvSetup,
+    /// Open the Live TV page's channel studio on this card (a suggestion's id, `surprise`; empty
+    /// for none) — a Home Suggested Channels card was pressed.
+    LiveTvStudio(String),
     /// The *Also available* surface committed a row: open that copy's own page. The SURFACE names
     /// the destination and the PAGE navigates, which is `LibraryMenu`'s shape (`LibrarySelect`) and
     /// what keeps "what a press means on the Detail page" in one place instead of two.
@@ -2183,7 +2189,8 @@ pub const SCREEN_SHAPES: &[&str] = &[
 // Library filters: the Library menu's value picker names its field (`LibraryMenu{…field:str…}`).
 // Playlists: a collection page can show a video playlist (`ARG_SHAPE`'s `Collection` gains
 // `playlist?:u32`, written only for a playlist); the previous pin was 0x4d7a_7df3_533c_f2bc.
-const SCREEN_SHAPES_PIN: u64 = 0x9df7_ee6a_d20c_7792;
+// The channel studio: `LiveTvScreen` gains `studio:str`; the previous pin was 0x9df7_ee6a_d20c_7792.
+const SCREEN_SHAPES_PIN: u64 = 0x270b_cd42_47e6_910c;
 
 #[cfg(test)]
 mod arg_tests {

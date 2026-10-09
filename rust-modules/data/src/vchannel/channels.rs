@@ -32,6 +32,9 @@ const BUILDS_IN_FLIGHT: usize = 2;
 /// the day of the week are part of the score).
 pub const SUGGEST_STALE_MS: i64 = 60 * 60 * 1000;
 
+/// How many write outcomes [`Channels::done`] holds.
+pub const DONE_KEPT: usize = 8;
+
 /// Which server and profile the state was read for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scope {
@@ -138,7 +141,9 @@ pub struct Channels {
     catalog: Option<Arc<Catalog>>,
     catalog_at: Option<i64>,
     preview: Option<Preview>,
+    /// The last few writes' outcomes, and how many there have been in all ([`Channels::done`]).
     done: Vec<WriteDone>,
+    done_seq: u64,
     jobs: Vec<Job>,
     episodes: Arc<Mutex<HashMap<String, Arc<Vec<Program>>>>>,
     suggestions: Arc<Vec<Suggestion>>,
@@ -197,9 +202,17 @@ impl Channels {
         map.get(&profile).cloned().unwrap_or_default()
     }
 
-    /// Writes that finished since the last call (the builder reads its own).
-    pub fn take_done(&mut self) -> Vec<WriteDone> {
-        std::mem::take(&mut self.done)
+    /// The writes that finished lately, oldest first, and how many have finished in all: a page
+    /// remembers the count it has read and looks at the outcomes past it (the last of the slice
+    /// is outcome number `seq`). Only the last [`DONE_KEPT`] are held.
+    pub fn done(&self) -> (u64, &[WriteDone]) {
+        (self.done_seq, &self.done)
+    }
+
+    /// The outcomes past `seen` (a count [`Channels::done`] gave earlier), oldest first.
+    pub fn done_since(&self, seen: u64) -> &[WriteDone] {
+        let n = self.done_seq.saturating_sub(seen) as usize;
+        &self.done[self.done.len().saturating_sub(n)..]
     }
 
     pub fn revision(&self) -> u64 {
@@ -607,6 +620,10 @@ impl Channels {
                             self.channels.sort_by_key(|c| c.recipe.number);
                         }
                         self.done.push(done);
+                        self.done_seq += 1;
+                        if self.done.len() > DONE_KEPT {
+                            self.done.remove(0);
+                        }
                         changed = true;
                     }
                     Err(TryRecvError::Disconnected) => changed = true,
@@ -624,6 +641,10 @@ impl Channels {
         let kept = self.kept_origins();
         if self.suggestions.iter().any(|s| kept.contains(&s.id)) {
             self.suggestions = Arc::new(self.suggestions.iter().filter(|s| !kept.contains(&s.id)).cloned().collect());
+            changed = true;
+        }
+        if self.surprise.as_ref().is_some_and(|s| kept.contains(&s.id)) {
+            self.surprise = None;
             changed = true;
         }
         if changed {
@@ -661,6 +682,14 @@ impl Channels {
         self.scope = Some(Scope::current());
         self.channels = channels;
         self.list = ListState::Ready;
+        self.revision += 1;
+    }
+
+    /// Install a row of suggestions directly (tests and the simulator's fixtures).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn install_suggestions_for_test(&mut self, suggestions: Vec<Suggestion>) {
+        self.scope = Some(Scope::current());
+        self.suggestions = Arc::new(suggestions);
         self.revision += 1;
     }
 }

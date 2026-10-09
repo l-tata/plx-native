@@ -277,6 +277,13 @@ pub(crate) fn stream_ended(app: &mut App, now: u32) {
     }
 }
 
+/// Open the Live TV page on its channel studio, on the suggestion `id` (a Home Suggested Channels
+/// card).
+pub(crate) fn open_studio(app: &mut App, id: String) {
+    bridge::nav_select_tab(&mut app.pages, AppArg::LiveTv);
+    app.bridge.request_livetv_studio(id);
+}
+
 /// Open the Live TV page — on its setup face when asked (Settings > Live TV).
 pub(crate) fn open_page(d: &mut plx_ui::dispatch::Dispatcher<AppHost>, rig: &mut bridge::Bridge, setup: bool) {
     bridge::nav_select_tab(d, AppArg::LiveTv);

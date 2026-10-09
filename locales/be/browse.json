@@ -496,5 +496,8 @@
   "browse.home.your_genres": "Нядаўна дададзенае ў вашых жанрах",
   "browse.menu.watchlist_add": "Дадаць у спіс жаданага",
   "browse.menu.watchlist_remove": "Прыбраць са спіса жаданага",
-  "browse.home.playlists": "Плэйлісты"
+  "browse.home.playlists": "Плэйлісты",
+  "browse.home.channels": "Прапанаваныя каналы",
+  "browse.home.surprise_title": "Здзіві мяне",
+  "browse.home.surprise_why": "Канал, пра які вы б не падумалі"
 }

@@ -41,16 +41,24 @@ fn chip_label(f: &Filter, measure: &dyn plx_machine::machine::Measure) -> Rc<CSt
 pub(super) fn strip_rects(chips: &[Filter], measure: &dyn plx_machine::machine::Measure) -> Vec<Rect> {
     let mut out = Vec::with_capacity(chips.len());
     let mut x = MARGIN_X;
+    // The studio's pill stands at the strip's right end; the chips fill what is left of it.
+    let end = studio_pill_rect(measure).x - CHIP_GAP;
     for chip in chips {
         let label = chip_label(chip, measure);
         let w = TabPill::width_measured(label.to_str().unwrap_or(""), CHIP_SZ, measure);
-        if x + w > SCR_W - MARGIN_X {
+        if x + w > end {
             break;
         }
         out.push(Rect::new(x, STRIP_TOP, w, STRIP_H));
         x += w + CHIP_GAP;
     }
     out
+}
+
+/// The channel studio's pill, at the right end of the genre strip.
+pub(super) fn studio_pill_rect(measure: &dyn plx_machine::machine::Measure) -> Rect {
+    let w = TabPill::width_measured(plx_platform::i18n::msg::livetv_studio_title(), CHIP_SZ, measure);
+    Rect::new(SCR_W - MARGIN_X - w, STRIP_TOP, w, STRIP_H)
 }
 
 /// How many of `chips` the strip shows.
@@ -241,6 +249,11 @@ impl LiveTvScreen {
                 .selected(*chip == self.filter)
                 .draw(&plx_ui::Env::inert(), p);
         }
+        let label = std::ffi::CString::new(plx_platform::i18n::msg::livetv_studio_title()).unwrap_or_default();
+        TabPill::new(label.as_ptr(), CHIP_SZ, studio_pill_rect(measure))
+            .focused(focused && self.on_strip && self.strip_sel == strip_fit(&self.chips, measure))
+            .plated()
+            .draw(&plx_ui::Env::inert(), p);
     }
 
     /// The info pane: the focused airing's artwork on the right (its programme picture, else its

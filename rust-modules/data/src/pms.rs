@@ -68,6 +68,10 @@ pub const KIND_CHANNEL: c_int = 5;
 /// A video playlist (`/playlists?playlistType=video`): `thumb` its composite, `child_count` its
 /// items. OK opens its page (the collection page, `CollectionRef::by_playlist`), where it plays.
 pub const KIND_PLAYLIST: c_int = 6;
+/// A channel suggested from the library (`crate::livetv::suggested`): `rk` is the suggestion's id,
+/// `title` its name, `show_title` why it is suggested, `thumb` the poster of a title on it. Not a
+/// PMS item and not yet a channel — OK opens it in the channel studio, where it can be kept.
+pub const KIND_CHANNEL_IDEA: c_int = 7;
 
 /// The hub identifiers of the shelves the APP assembles rather than a server's `/hubs` lists —
 /// see [`HomeExtras`]. One prefix, so every rule that must tell a server shelf from one of ours
@@ -75,6 +79,8 @@ pub const KIND_PLAYLIST: c_int = 6;
 pub const APP_SHELF_PREFIX: &str = "home.plx.";
 /// Home's live shelf (`crate::livetv::on_now`).
 pub const ON_NOW_HUB: &str = "home.plx.onnow";
+/// Channels suggested from the library (`crate::livetv::suggested`).
+pub const CHANNELS_HUB: &str = "home.plx.channels";
 /// The account's Plex watchlist, as the household's own library copies (`crate::watchlist`).
 pub const WATCHLIST_HUB: &str = "home.plx.watchlist";
 /// Recently added in the genres the profile watches most.
@@ -97,7 +103,7 @@ impl std::fmt::Debug for ShelfRows {
 /// Does a card of this kind open the item menu on a hold? Not a channel (it only tunes), a
 /// collection or a playlist (no watch state to mark, nothing to play from the start).
 pub fn item_has_menu_kind(kind: c_int) -> bool {
-    !matches!(kind, KIND_CHANNEL | KIND_COLLECTION | KIND_PLAYLIST)
+    !matches!(kind, KIND_CHANNEL | KIND_CHANNEL_IDEA | KIND_COLLECTION | KIND_PLAYLIST)
 }
 
 /// Is `hub_id` one of the shelves the app assembles ([`APP_SHELF_PREFIX`])?
@@ -243,12 +249,14 @@ pub struct PmsState {
 
 /// **Home's own shelves**: rows assembled from somewhere other than a server's `/hubs` answer, held
 /// beside the sources so every merge places them and a server landing never drops them. Each is
-/// set whole by its own command (`HubsCmd::SetOnNow`, `HubsCmd::SetWatchlist`); an empty one draws
+/// set whole by its own command (`HubsCmd::SetOnNow`, `HubsCmd::SetChannels`, `HubsCmd::SetWatchlist`); an empty one draws
 /// no heading at all, like a source that never answered.
 #[derive(Default, Clone)]
 pub struct HomeExtras {
     /// The live channels (`crate::livetv::on_now`), [`KIND_CHANNEL`] rows.
     pub on_now: Vec<Arc<PmsMovie>>,
+    /// The suggested channels (`crate::livetv::suggested`), [`KIND_CHANNEL_IDEA`] rows.
+    pub channels: Vec<Arc<PmsMovie>>,
     /// The watchlist's titles the household's libraries hold, as those library rows.
     pub watchlist: Vec<Arc<PmsMovie>>,
 }
@@ -1265,10 +1273,11 @@ fn merge_with_scope(srcs: &[Src], scope: &BrowseScope, extras: &HomeExtras) -> H
     // EVERYTHING else Home shows — the deck, the watchlist and every server shelf — because its
     // whole worth is titles you have not been shown already.
     let shelf_rows = |rows: &mut dyn Iterator<Item = &Arc<PmsMovie>>| -> Vec<Arc<PmsMovie>> {
-        rows.filter(|m| m.kind == KIND_CHANNEL || item_pinned(pins, m)).take(MAX_SHELF_ITEMS).cloned().collect()
+        rows.filter(|m| matches!(m.kind, KIND_CHANNEL | KIND_CHANNEL_IDEA) || item_pinned(pins, m)).take(MAX_SHELF_ITEMS).cloned().collect()
     };
     let watchlist = shelf_rows(&mut extras.watchlist.iter());
     let on_now = shelf_rows(&mut extras.on_now.iter());
+    let channels = shelf_rows(&mut extras.channels.iter());
     let genres = {
         let shown: std::collections::HashSet<(ServerId, &str)> = new_cat.iter().map(|m| (m.sid, m.rk.as_str()))
             .chain(watchlist.iter().map(|m| (m.sid, m.rk.as_str())))
@@ -1285,6 +1294,7 @@ fn merge_with_scope(srcs: &[Src], scope: &BrowseScope, extras: &HomeExtras) -> H
     for (hub_id, title, rows) in [
         (WATCHLIST_HUB, plx_platform::i18n::msg::browse_home_watchlist(), &watchlist),
         (ON_NOW_HUB, plx_platform::i18n::msg::browse_home_on_now(), &on_now),
+        (CHANNELS_HUB, plx_platform::i18n::msg::browse_home_channels(), &channels),
         (GENRES_HUB, plx_platform::i18n::msg::browse_home_your_genres(), &genres),
         (PLAYLISTS_HUB, plx_platform::i18n::msg::browse_home_playlists(), &playlists),
     ] {
@@ -2187,7 +2197,7 @@ pub fn land_with_directory(
 pub fn run(state: &mut PmsState, adapter: &Arc<PmsAdapter>, cmd: crate::stores::hubs::HubsCmd) -> crate::stores::StoreOutcome {
     use crate::stores::hubs::HubsCmd;
     match cmd {
-        HubsCmd::RefetchHubs | HubsCmd::Reset | HubsCmd::SetOnNow(_) | HubsCmd::EditWatchlist { .. } =>
+        HubsCmd::RefetchHubs | HubsCmd::Reset | HubsCmd::SetOnNow(_) | HubsCmd::SetChannels(_) | HubsCmd::EditWatchlist { .. } =>
             run_with_scope(state, adapter, cmd, &BrowseScope::standalone()),
         other => run_without_browse(state, adapter, other),
     }
@@ -2225,6 +2235,7 @@ fn run_with_scope(
             crate::stores::StoreOutcome::changed(true)
         }
         HubsCmd::SetOnNow(ShelfRows(rows)) => crate::stores::StoreOutcome::changed(set_on_now(state, rows, scope)),
+        HubsCmd::SetChannels(ShelfRows(rows)) => crate::stores::StoreOutcome::changed(set_channels(state, rows, scope)),
         HubsCmd::EditWatchlist { guid, add, row: ShelfRows(row) } => {
             crate::stores::StoreOutcome::changed(edit_watchlist(state, adapter, &guid, add, row, scope))
         }
@@ -2335,6 +2346,22 @@ fn set_on_now(state: &mut PmsState, rows: Vec<PmsMovie>, scope: &BrowseScope) ->
     true
 }
 
+/// Replace the Suggested Channels shelf and re-commit Home, unless the rows draw the same.
+fn set_channels(state: &mut PmsState, rows: Vec<PmsMovie>, scope: &BrowseScope) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    plx_base::testlock::assert_held("the pms hub catalog (set_channels)");
+    let same = rows.len() == state.extras.channels.len()
+        && rows.iter().zip(&state.extras.channels).all(|(a, b)| same_channel_card(a, b));
+    if same {
+        return false;
+    }
+    state.extras.channels = rows.into_iter().map(Arc::new).collect();
+    let build = merge_with_scope(&state.srcs, scope, &state.extras);
+    adopt_browse_scope(state, scope);
+    commit(state, build);
+    true
+}
+
 /// Two On Now cards that draw the same: one channel, one programme, one art, one progress.
 fn same_channel_card(a: &PmsMovie, b: &PmsMovie) -> bool {
     (&a.rk, &a.title, &a.show_title, &a.thumb, a.resume_ms, a.dur_ns, a.sid)
@@ -2352,7 +2379,7 @@ fn run_without_browse(state: &mut PmsState, adapter: &Arc<PmsAdapter>, cmd: crat
         #[cfg(not(any(test, feature = "test-support")))]
         HubsCmd::EditItem { .. } =>
             unreachable!("Hubs EditItem requires a retained Browse directory"),
-        HubsCmd::RefetchHubs | HubsCmd::Reset | HubsCmd::SetOnNow(_) | HubsCmd::EditWatchlist { .. } =>
+        HubsCmd::RefetchHubs | HubsCmd::Reset | HubsCmd::SetOnNow(_) | HubsCmd::SetChannels(_) | HubsCmd::EditWatchlist { .. } =>
             unreachable!("Browse-scoped Hubs command reached the independent runner"),
     }
 }

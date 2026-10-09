@@ -1450,6 +1450,10 @@ impl HomeScreen {
                     // An On Now card tunes its channel, as OK on the guide does; its key is the
                     // channel's guide number (`livetv::on_now::rows`).
                     (item, HomeReq::Tune { number: item.rk.clone() })
+                } else if item.kind == plx_data::pms::KIND_CHANNEL_IDEA {
+                    // A Suggested Channels card opens the channel studio on that suggestion
+                    // (`livetv::suggested::rows`), where it is previewed and kept.
+                    (item, HomeReq::Studio { id: item.rk.clone() })
                 } else if self
                     .rows
                     .get(row)

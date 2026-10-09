@@ -683,6 +683,7 @@ fn home_requests(app: &mut App, now: u32) {
             HomeReq::Detail { sid, rk } =>
                 activate_home_item(app, source, entry, sid, &rk, None, ret, now),
             HomeReq::Tune { number } => super::livetv::tune_number(app, &number, now),
+            HomeReq::Studio { id } => super::livetv::open_studio(app, id),
             HomeReq::ItemMenu { sid, rk } => {
                 let snapshot = app.bridge.hubs_snapshot();
                 let Some(item) = home_item(snapshot.view(), sid, &rk)
