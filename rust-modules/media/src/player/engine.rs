@@ -1384,8 +1384,12 @@ fn start_bufferfeed_inner(
         // if a seek is armed for the FIRST open (resume, or reload_at), rebase the first
         // post-seek keyframe to fed-pts 0 so the pipeline sees a 0-based timeline identical
         // to fresh play (disp_base carries the content offset). Plain fresh play leaves this
-        // false (first keyframe is already ~0).
-        rebase_pending: SHARED.seek_to_ns.load(Ordering::Relaxed) >= 0,
+        // false (first keyframe is already ~0). A Live TV channel rebases too — see
+        // `first_open_rebases`.
+        rebase_pending: first_open_rebases(
+            SHARED.seek_to_ns.load(Ordering::Relaxed) >= 0,
+            crate::route::live(ps).is_some(),
+        ),
         rebase_drops: 0,
         seek_armed_at: 0,
         seek_retries: 0,
@@ -1459,6 +1463,32 @@ fn install_synthetic_playurl(
     let url = play.url.clone();
     crate::route::set_url(ps, &url);
     Ok(url)
+}
+
+/// Does the first Load rebase its first keyframe to fed-pts 0 (and drop what precedes it)?
+///
+/// A resume or a seek-reload does, because its first keyframe is mid-file. So does a Live TV
+/// channel, for the same two reasons from the other side: an MPEG-TS stream joined in progress
+/// starts mid-GOP, with frames no decoder can use before the next IDR, and its timestamps run on
+/// from wherever the channel's encoder began — minutes or hours in when Tunarr hands this viewer a
+/// transcode that is already running — while a fresh Load's pipeline schedules from 0, so it would
+/// wait that long for its first frame. Plain fresh play of a file needs neither.
+fn first_open_rebases(seek_armed: bool, live: bool) -> bool {
+    seek_armed || live
+}
+
+#[cfg(test)]
+mod first_open_rebase_tests {
+    use super::first_open_rebases;
+
+    /// A Live TV channel's first Load rebases like a resume: its stream is joined mid-GOP and its
+    /// timestamps start wherever the channel's encoder did.
+    #[test]
+    fn a_live_channel_rebases_its_first_keyframe() {
+        assert!(first_open_rebases(false, true));
+        assert!(first_open_rebases(true, false));
+        assert!(!first_open_rebases(false, false), "fresh play of a file starts at ~0 and keeps its own timestamps");
+    }
 }
 
 /// Arm the demuxer to open+seek to `target_ns` on the NEXT Load, displaying honest content

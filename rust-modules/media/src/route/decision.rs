@@ -5323,6 +5323,12 @@ pub fn install_live_stream(ps: &mut PlaybackSession, session: crate::live::LiveS
     ps.tsession.clear();
     ps.up_next = None;
     ps.queue.clear();
+    // The film's delivery facts go with it: Auto's Original watch reads them, and a channel has
+    // no Plex item for it to move onto a transcode.
+    ps.cur_contract = plx_plex::plex::EncodeContract::original(false, plx_plex::plex::AudioEnhancements::NONE);
+    ps.cur_auto_original_watched = false;
+    ps.cur_transport_kbps = 0;
+    ps.auto_original = None;
     // The channel's raster is not known before the first frame; 1080p is what Tunarr's default
     // transcode config produces and what the H.264 envelope declares for it.
     set_stream_source_raster(ps, 1920, 1080);
@@ -10360,6 +10366,10 @@ mod subtitle_style_tests;
 #[cfg(test)]
 #[path = "carried_audio_tests.rs"]
 mod carried_audio_tests;
+
+#[cfg(test)]
+#[path = "live_route_tests.rs"]
+mod live_route_tests;
 
 #[cfg(test)]
 #[path = "plan_audio_enhancement_tests.rs"]

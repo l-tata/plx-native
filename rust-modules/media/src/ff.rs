@@ -3165,8 +3165,11 @@ fn adts_header(freq_idx: u8, chan_cfg: u8, payload_len: usize) -> [u8; 7] {
     ]
 }
 
+/// The parameter sets an Annex-B stream has carried in band, each with its 4-byte start code,
+/// kept to put in front of a keyframe that arrives without them. `vps` is HEVC's only.
 #[derive(Default)]
 struct H264ParamSets {
+    vps: Vec<u8>,
     sps: Vec<u8>,
     pps: Vec<u8>,
 }
@@ -3193,9 +3196,21 @@ fn ts_h264_access_unit(
     params: &mut H264ParamSets,
     out: &mut Vec<u8>,
 ) -> Result<bool, &'static str> {
+    annexb_access_unit(data, false, params, out)
+}
+
+/// [`ts_h264_access_unit`] for either codec: H.264 (SPS 7, PPS 8, IDR 5) or HEVC (VPS 32, SPS 33,
+/// PPS 34, IRAP 16..=23). The packet is fed as it came; only the missing parameter sets of a
+/// keyframe are put in front, from what earlier packets (or the extradata) carried.
+fn annexb_access_unit(
+    data: &[u8],
+    is_hevc: bool,
+    params: &mut H264ParamSets,
+    out: &mut Vec<u8>,
+) -> Result<bool, &'static str> {
     out.clear();
     let Some((first, _)) = annexb_start(data, 0) else {
-        return Err("H.264 packet is not Annex-B");
+        return Err(if is_hevc { "HEVC packet is not Annex-B" } else { "H.264 packet is not Annex-B" });
     };
     if first != 0 {
         return Err("bytes precede the first Annex-B start code");
@@ -3203,30 +3218,33 @@ fn ts_h264_access_unit(
 
     let mut cursor = 0;
     let mut is_key = false;
-    let mut has_sps = false;
-    let mut has_pps = false;
+    let (mut has_vps, mut has_sps, mut has_pps) = (false, false, false);
     while let Some((start, prefix)) = annexb_start(data, cursor) {
         let payload = start + prefix;
         if payload >= data.len() {
             return Err("empty Annex-B NAL");
         }
         let end = annexb_start(data, payload).map_or(data.len(), |(next, _)| next);
-        let nal_type = data[payload] & 0x1f;
-        match nal_type {
-            5 => is_key = true,
-            7 => {
-                params.sps.clear();
-                params.sps.extend_from_slice(&[0, 0, 0, 1]);
-                params.sps.extend_from_slice(&data[payload..end]);
-                has_sps = true;
+        let keep = |slot: &mut Vec<u8>| {
+            slot.clear();
+            slot.extend_from_slice(&[0, 0, 0, 1]);
+            slot.extend_from_slice(&data[payload..end]);
+        };
+        if is_hevc {
+            match (data[payload] >> 1) & 0x3f {
+                16..=23 => is_key = true,
+                32 => { keep(&mut params.vps); has_vps = true; }
+                33 => { keep(&mut params.sps); has_sps = true; }
+                34 => { keep(&mut params.pps); has_pps = true; }
+                _ => {}
             }
-            8 => {
-                params.pps.clear();
-                params.pps.extend_from_slice(&[0, 0, 0, 1]);
-                params.pps.extend_from_slice(&data[payload..end]);
-                has_pps = true;
+        } else {
+            match data[payload] & 0x1f {
+                5 => is_key = true,
+                7 => { keep(&mut params.sps); has_sps = true; }
+                8 => { keep(&mut params.pps); has_pps = true; }
+                _ => {}
             }
-            _ => {}
         }
         cursor = end;
         if cursor >= data.len() {
@@ -3235,21 +3253,116 @@ fn ts_h264_access_unit(
     }
 
     if is_key {
+        if is_hevc && !has_vps {
+            if params.vps.is_empty() {
+                return Err("IRAP has no in-band or cached VPS");
+            }
+            out.extend_from_slice(&params.vps);
+        }
         if !has_sps {
             if params.sps.is_empty() {
-                return Err("IDR has no in-band or cached SPS");
+                return Err(if is_hevc { "IRAP has no in-band or cached SPS" } else { "IDR has no in-band or cached SPS" });
             }
             out.extend_from_slice(&params.sps);
         }
         if !has_pps {
             if params.pps.is_empty() {
-                return Err("IDR has no in-band or cached PPS");
+                return Err(if is_hevc { "IRAP has no in-band or cached PPS" } else { "IDR has no in-band or cached PPS" });
             }
             out.extend_from_slice(&params.pps);
         }
     }
     out.extend_from_slice(data);
     Ok(is_key)
+}
+
+/// **The progressive demuxer's video access-unit builder**: one packet in, one Starfish AU out
+/// (Annex-B with the parameter sets in front of every keyframe).
+///
+/// MP4 and Matroska carry length-prefixed NALs and an avcC/hvcC record; [`packet_to_annexb`]
+/// rewrites those. An MPEG-TS source — a Live TV channel from Tunarr, a `.ts` recording — already
+/// carries Annex-B with its parameter sets in band, and running it through the AVCC rewrite reads
+/// its first `00 00 00 01` as a NAL length of one: every AU reached the decoder as one byte and
+/// the channel sat on Buffering. Which framing a source uses is read from its extradata (an
+/// avcC/hvcC record starts with version byte 1, Annex-B parameter sets with a start code), or,
+/// when there is none, from the first packet.
+struct ProgressiveVideo {
+    is_hevc: bool,
+    framing: Option<VideoFraming>,
+}
+
+enum VideoFraming {
+    LengthPrefixed { params: Vec<u8>, nal_len: usize },
+    AnnexB(H264ParamSets),
+}
+
+impl ProgressiveVideo {
+    fn new(extradata: &[u8], is_hevc: bool) -> Self {
+        let framing = if extradata.first() == Some(&1) && extradata.len() >= 7 {
+            let (params, nal_len) = unsafe { parse_extradata(extradata.as_ptr(), extradata.len(), is_hevc) };
+            Some(VideoFraming::LengthPrefixed { params, nal_len })
+        } else if annexb_start(extradata, 0).is_some_and(|(at, _)| at == 0) {
+            // The extradata IS the parameter sets, in band form: cache them for the first IDR.
+            let mut sets = H264ParamSets::default();
+            let _ = annexb_access_unit(extradata, is_hevc, &mut sets, &mut Vec::new());
+            Some(VideoFraming::AnnexB(sets))
+        } else if extradata.is_empty() {
+            None
+        } else {
+            let (params, nal_len) = unsafe { parse_extradata(extradata.as_ptr(), extradata.len(), is_hevc) };
+            Some(VideoFraming::LengthPrefixed { params, nal_len })
+        };
+        Self { is_hevc, framing }
+    }
+
+    /// Build the AU for one packet into `out`: `Ok(is_key)`, or why the packet cannot be fed.
+    fn access_unit(&mut self, data: &[u8], out: &mut Vec<u8>) -> Result<bool, &'static str> {
+        let is_hevc = self.is_hevc;
+        let framing = self.framing.get_or_insert_with(|| {
+            // No extradata: a 4-byte start code at byte 0 is Annex-B (as an AVCC length it would
+            // announce a one-byte NAL, which no stream carries); anything else is length-prefixed.
+            if data.starts_with(&[0, 0, 0, 1]) {
+                VideoFraming::AnnexB(H264ParamSets::default())
+            } else {
+                VideoFraming::LengthPrefixed { params: Vec::new(), nal_len: 4 }
+            }
+        });
+        match framing {
+            VideoFraming::LengthPrefixed { params, nal_len } => {
+                Ok(unsafe { packet_to_annexb(data.as_ptr(), data.len(), *nal_len, is_hevc, params, out) })
+            }
+            VideoFraming::AnnexB(sets) => annexb_access_unit(data, is_hevc, sets, out),
+        }
+    }
+
+    /// The `ff: video framing …` log line's fields.
+    fn describe(&self) -> String {
+        match &self.framing {
+            Some(VideoFraming::LengthPrefixed { params, nal_len }) => {
+                format!("param_sets={} bytes nal_len={nal_len} is_hevc={}", params.len(), self.is_hevc)
+            }
+            Some(VideoFraming::AnnexB(sets)) => format!(
+                "annexb param_sets={} bytes is_hevc={}",
+                sets.vps.len() + sets.sps.len() + sets.pps.len(),
+                self.is_hevc
+            ),
+            None => format!("framing from the first packet is_hevc={}", self.is_hevc),
+        }
+    }
+}
+
+/// The AAC frame the progressive demuxer feeds for one packet: LG's decoder wants ADTS. MP4 and
+/// Matroska carry raw AAC, so the 7-byte header is prepended; MPEG-TS AAC is ADTS already and goes
+/// as it came (a raw AAC frame cannot begin with the 0xFFF sync: its first element would be
+/// ID_END). The HLS path makes the same decision.
+fn progressive_aac_frame(raw: &[u8], freq_idx: u8, chan_cfg: u8) -> Vec<u8> {
+    if packet_has_adts(raw) {
+        return raw.to_vec();
+    }
+    let mut framed = Vec::with_capacity(7 + raw.len());
+    framed.extend_from_slice(&adts_header(freq_idx, chan_cfg, raw.len()));
+    framed.extend_from_slice(raw);
+    framed
 }
 
 fn packet_has_adts(data: &[u8]) -> bool {
@@ -8043,17 +8156,14 @@ pub fn demux(
                 // parameter sets on this 3.3 build (it leaves the keyframe starting with SEI), so we
                 // build the AU from the codecpar extradata; libavformat still owns demux + seeking.
                 let is_hevc = (*vcp).codec_id == AV_CODEC_ID_HEVC;
-                let (param_blob, nal_len_size) = parse_extradata(
-                    (*vcp).extradata,
-                    (*vcp).extradata_size.max(0) as usize,
-                    is_hevc,
-                );
-                crate::player::log(&format!(
-                    "ff: param_sets={} bytes nal_len={} is_hevc={}",
-                    param_blob.len(),
-                    nal_len_size,
-                    is_hevc
-                ));
+                let extradata = if (*vcp).extradata.is_null() {
+                    &[][..]
+                } else {
+                    std::slice::from_raw_parts((*vcp).extradata, (*vcp).extradata_size.max(0) as usize)
+                };
+                let mut video_au = ProgressiveVideo::new(extradata, is_hevc);
+                crate::player::log(&format!("ff: {}", video_au.describe()));
+                let mut rejected_aus = 0u32;
                 let mut aubuf: Vec<u8> = Vec::with_capacity(4 * 1024 * 1024);
 
                 let pkt = av_packet_alloc();
@@ -8137,14 +8247,24 @@ pub fn demux(
                             *SHARED.side_anchor.lock().unwrap_or_else(|e| e.into_inner()) =
                                 Some(subside::Anchor::of(pts_ns(pkt, vst), raw));
                         }
-                        let is_key = packet_to_annexb(
-                            (*pkt).data,
-                            (*pkt).size.max(0) as usize,
-                            nal_len_size,
-                            is_hevc,
-                            &param_blob,
-                            &mut aubuf,
-                        );
+                        let raw = if (*pkt).data.is_null() {
+                            &[][..]
+                        } else {
+                            std::slice::from_raw_parts((*pkt).data, (*pkt).size.max(0) as usize)
+                        };
+                        let is_key = match video_au.access_unit(raw, &mut aubuf) {
+                            Ok(key) => key,
+                            Err(why) => {
+                                // One unusable packet (a broken NAL, an IDR before any parameter
+                                // set) is dropped, not the stream: the next keyframe recovers it.
+                                rejected_aus += 1;
+                                if rejected_aus <= 3 || rejected_aus % 500 == 0 {
+                                    crate::player::log(&format!("ff: video packet dropped #{rejected_aus}: {why}"));
+                                }
+                                av_packet_unref(pkt);
+                                continue;
+                            }
+                        };
                         let pts = pts_ns(pkt, vst);
                         if DIAG_FIRST.swap(false, Ordering::Relaxed) {
                             let n = aubuf.len().min(40);
@@ -8179,11 +8299,8 @@ pub fn demux(
                         let ast = *streams.add(ai as usize);
                         let pts = pts_ns(pkt, ast);
                         let pushed = if let Some((freq_idx, chan_cfg)) = aac_adts {
-                            // prepend a 7-byte ADTS header so LG's decoder can frame the raw AAC
-                            let plen = (*pkt).size as usize;
-                            let mut framed = Vec::with_capacity(7 + plen);
-                            framed.extend_from_slice(&adts_header(freq_idx, chan_cfg, plen));
-                            framed.extend_from_slice(std::slice::from_raw_parts((*pkt).data, plen));
+                            let raw = std::slice::from_raw_parts((*pkt).data, (*pkt).size.max(0) as usize);
+                            let framed = progressive_aac_frame(raw, freq_idx, chan_cfg);
                             crate::aq::aq_push_with_drain(
                                 aqa_p,
                                 framed.as_ptr(),
@@ -8419,6 +8536,10 @@ mod packet_framing_tests;
 #[cfg(test)]
 #[path = "ff_aac_timestamp_tests.rs"]
 mod aac_timestamp_tests;
+
+#[cfg(test)]
+#[path = "ff_live_ts_tests.rs"]
+mod live_ts_tests;
 
 #[cfg(test)]
 #[path = "ff_source_teardown_tests.rs"]
