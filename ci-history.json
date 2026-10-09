@@ -1,0 +1,8 @@
+{"updated":"2026-10-09T08:57:19Z",
+"ci":[],
+"sim":[
+{"id":37907603922,"at":"2026-10-09T08:51:56Z","sha":"d76ffbbd1","title":"Live TV from Tunarr with channel surfing; lenient streaming; Go to Show; top-bar clock","pr":null,"conclusion":"failure","attempt":1,"jobs":{"macOS tests against bundled FFmpeg and ASS":289,"Linux simulator build + launch":306,"Windows launcher syntax":12},"failed":["macOS simulator build + launch"]}
+],
+"nightly":[],
+"cancelled":{},
+"daily":[]}
