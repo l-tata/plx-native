@@ -20,5 +20,6 @@ pub mod curlio; // the HTTPS media plane: a remote file pulled by byte range ove
 #[macro_use]
 pub mod ff; // THE demuxer -- the FFmpeg 9.0 this app BUNDLES and pins (majors 63/63/61), dlopen'd by absolute path beside the binary, never the television's
 pub mod hls; // strict parser/auth/timeline for the measured one-variant PMS HLS shape
+pub mod live; // Live TV: a Tunarr channel's stream probe (codecs + frame rate) and the channel the player is on
 pub mod player; // buffer-feed video engine (was playback.c) -- step 5
 pub mod route; // play_movie route selection (direct-play vs transcode) -- step 3

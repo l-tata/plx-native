@@ -52,7 +52,7 @@ on:
         type: string
         default: ''
       telemetry:
-        description: 'Which telemetry credential pair to compile in — production or development.'
+        description: 'Which telemetry credential pair to compile in — production, development, or none (a fork with no telemetry backend; refused in the upstream repository).'
         type: string
         required: true
       artifact:
@@ -132,7 +132,14 @@ jobs:
           esac
           case "$TELEMETRY" in
             production|development) ;;
-            *) echo "::error::telemetry must be production or development, got '$TELEMETRY'"; exit 1 ;;
+            # `none` is for a FORK, which has no project to report to and must not borrow
+            # upstream's: the build compiles in no endpoint and uploads no debug files, and the
+            # verify step below proves the binary carries none. Upstream keeps failing closed — it
+            # can never select this, whatever a repository variable says.
+            none)
+              [ "$GITHUB_REPOSITORY" != GLinnik21/plx-native ] \
+                || { echo "::error::telemetry 'none' is for forks; GLinnik21/plx-native always ships its endpoints"; exit 1; } ;;
+            *) echo "::error::telemetry must be production, development or none, got '$TELEMETRY'"; exit 1 ;;
           esac
           # A manifest is keyed to the app id it was generated for, and only two installs have a
           # Homebrew Channel listing: stable (the webosbrew catalogue's) and nightly (the
@@ -294,6 +301,15 @@ jobs:
             echo "telemetry fingerprints (sha256, first 16):"
             printf '  sentry  %s\n' "$(printf %s "$PLX_SENTRY_DSN"  | sha256sum | cut -c1-16)"
             printf '  posthog %s\n' "$(printf %s "$PLX_POSTHOG_KEY" | sha256sum | cut -c1-16)"
+          elif [ "$TELEMETRY" = none ]; then
+            [ -z "$PLX_SENTRY_DSN$PLX_POSTHOG_KEY$PLX_SENTRY_DSN_DEV$PLX_POSTHOG_KEY_DEV" ] \
+              || { echo "::error::telemetry endpoints are present in a telemetry: none build"; exit 1; }
+            # The stamp's `tel:` is a hash of the four values whether or not they are empty, so the
+            # proof is the bytes: no Sentry DSN and no PostHog key anywhere in the binary (the
+            # patterns `ci/gen-release-audit.py` reads endpoints with).
+            python3 -c 'import re,sys; b=open("pkg/plxnative","rb").read(); sys.exit(1 if re.search(rb"https://[0-9a-f]{8,}@[A-Za-z0-9.-]*ingest\.[a-z]{2}\.sentry\.io/\d+|phc_[A-Za-z0-9]{20,}", b) else 0)' \
+              || { echo "::error::a telemetry: none build carries a telemetry endpoint"; exit 1; }
+            echo "telemetry: none — no endpoint compiled in"
           else
             [ -n "$PLX_SENTRY_DSN_DEV" ] || { echo '::error::PLX_SENTRY_DSN_DEV is required for a development-telemetry build.'; exit 1; }
             [ -n "$PLX_POSTHOG_KEY_DEV" ] || { echo '::error::PLX_POSTHOG_KEY_DEV is required for a development-telemetry build.'; exit 1; }
@@ -345,6 +361,8 @@ jobs:
           TELEMETRY: ${{ inputs.telemetry }}
           UPLOAD: ${{ inputs.upload-debug-files }}
         run: |
+          # A telemetry: none build reports to no project, so it has nowhere to upload to.
+          if [ "$TELEMETRY" = none ]; then UPLOAD=false; fi
           if [ "$UPLOAD" = true ]; then
             if [ -z "$SENTRY_AUTH_TOKEN" ]; then
               echo "::error::SENTRY_AUTH_TOKEN is not set — refusing to ship unsymbolicatable crash reports."
@@ -359,7 +377,7 @@ jobs:
           # documentation states about armv7.
           npx --yes @sentry/cli@3.7.0 debug-files check pkg/plxnative.debug
           if [ "$UPLOAD" != true ]; then
-            echo "Skipping the Sentry upload: upload-debug-files is '$UPLOAD' (a pull request's nightly dry run)."
+            echo "Skipping the Sentry upload: upload is '$UPLOAD' (a pull request's nightly dry run, or a telemetry: none build)."
             exit 0
           fi
           npx --yes @sentry/cli@3.7.0 debug-files upload \

@@ -31,6 +31,7 @@ test-support = ["plx_base/test-support", "plx_machine/test-support", "plx_platfo
 plx_base = { path = "../base" }
 plx_machine = { path = "../machine" }
 plx_platform = { path = "../platform" }
+plx_net = { path = "../net" }
 plx_plex = { path = "../plex" }
 plx_telemetry = { path = "../telemetry" }
 # `rc`: Home cards are `Arc<PmsMovie>`, which the derived (de)serializers must be able to carry.

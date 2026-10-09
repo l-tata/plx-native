@@ -211,9 +211,9 @@ Nothing. A release build compiles out the whole `/tmp` trigger surface, the remo
 
 ## Scope
 
-Movies and TV shows from a Plex Media Server your account can reach. No music, no photos, no live TV, no DVR.
+Movies and TV shows from a Plex Media Server your account can reach, and Live TV from your own Tunarr server (not Plex's Live TV). No music, no photos, no DVR.
 
-There is deliberately nowhere on the television to type a server address — configure servers on a phone or PC, and the app offers what your Plex account already knows about.
+There is deliberately nowhere on the television to type a Plex server address — configure servers on a phone or PC, and the app offers what your Plex account already knows about. The one address the television takes is a Tunarr server's, when the network search does not find it.
 
 ## The bundled FFmpeg
 

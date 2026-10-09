@@ -62,7 +62,7 @@ pub const WORD: &str = "player";
 pub const SHAPE: &str =
     "PlayerScreen{hud:{focus:i32,btn:i32,tab:i32,until:u32,dismissed:bool,visible_at_press:bool,\
      offer:Option<(u32,i64)>,was_standin:bool},scrub:{dir:i32,hold:bool,reveal:bool,drag:bool,\
-     ns:i64,commit_at:u32},origin:Option<u32>,repair_alert:{open:bool,confirm:bool,scroll:u32}}";
+     ns:i64,commit_at:u32},origin:Option<u32>,repair_alert:{open:bool,confirm:bool,scroll:u32},live_typed:str,live_typed_at:u32,live_surf:Option<u64>,live_surf_at:u32}";
 
 /// **The page this playback was launched from**, as the container's own identity.
 ///
@@ -154,7 +154,23 @@ pub struct PlayerScreen {
     failure_up: bool,
     /// The transport clocks' prewarm memo — a render resource, not logical state (`prepare`).
     clock_warm: plx_appkit::player_hud::ClockWarm,
+    /// **A channel number being keyed in on a live channel** and when its last digit arrived. It
+    /// tunes after [`LIVE_DIGIT_MS`] without another digit, or at once on OK.
+    live_typed: String,
+    live_typed_at: u32,
+    /// **The surf list's highlight** — the lineup row OK would tune — while the viewer browses
+    /// channels with UP/DOWN over the one that keeps playing; `None` while the list is closed. It
+    /// closes on OK, BACK, a channel change, or [`LIVE_SURF_MS`] without a key (`live_surf_at`).
+    live_surf: Option<usize>,
+    live_surf_at: u32,
 }
+
+/// How long a typed channel number waits for its next digit before it tunes.
+pub const LIVE_DIGIT_MS: u32 = 1_500;
+/// How long the live banner stays up after a channel change or a key.
+pub const LIVE_BANNER_MS: u32 = 5_000;
+/// How long the surf list stays open without a key.
+pub const LIVE_SURF_MS: u32 = 8_000;
 
 impl PlayerScreen {
     pub fn new(entry: EntryId) -> Self {
@@ -179,6 +195,10 @@ impl PlayerScreen {
             failure_sel: 0,
             failure_up: false,
             clock_warm: Default::default(),
+            live_typed: String::new(),
+            live_typed_at: 0,
+            live_surf: None,
+            live_surf_at: 0,
         }
     }
 
@@ -381,6 +401,15 @@ impl PlayerScreen {
         mix(plx_media::player::subtitle_cue_id(pos) as u64);
         mix(plx_media::player::active_bitmap_key(pos).unwrap_or(0) as u64);
         mix(u64::from(hud_up));
+        // A live channel's banner: which channel, whether it is tuned, the typed digits, and the
+        // wall-clock minute its progress bar and span are drawn from.
+        if let Some(live) = plx_media::route::live(ps) {
+            mix(live.index as u64);
+            mix(u64::from(live.facts.is_some()) | (u64::from(live.failed) << 1));
+            mix((plx_base::wallclock::now_ms() / 60_000) as u64);
+        }
+        mix(self.live_typed.len() as u64);
+        mix(self.live_surf.map_or(u64::MAX, |i| i as u64));
         mix(u64::from(
             self.row
                 .since_play_ms(now)
@@ -433,7 +462,155 @@ impl PlayerScreen {
     /// Is the transport actually DRAWN this frame? Whenever the captions lift for it, unless the
     /// repair alert has the screen.
     fn hud_drawn(&self, ps: &plx_media::route::PlaybackSession, now: u32) -> bool {
-        self.subs_lift(ps, now) && !self.repair_alert.visible()
+        // A live channel draws its banner instead of the transport, and declares none of the
+        // transport's stops: there is nothing on it to scrub, open or press.
+        plx_media::route::live(ps).is_none() && self.subs_lift(ps, now) && !self.repair_alert.visible()
+    }
+
+    /// **The live banner is up**: the HUD's own timer, or a channel that is still tuning or
+    /// failed to tune (both must stay on screen until something changes).
+    fn live_banner_up(&self, ps: &plx_media::route::PlaybackSession, now: u32) -> Option<plx_appkit::live_banner::Phase> {
+        let live = plx_media::route::live(ps)?;
+        let phase = if live.failed {
+            plx_appkit::live_banner::Phase::Unavailable
+        } else if live.facts.is_none() {
+            plx_appkit::live_banner::Phase::Tuning
+        } else {
+            plx_appkit::live_banner::Phase::Playing
+        };
+        (phase != plx_appkit::live_banner::Phase::Playing || self.hud_up(ps, now)).then_some(phase)
+    }
+
+    /// A key on a live channel (the failure read-out, when the engine failed, still takes its
+    /// keys first — see the `Input` arm). CH▲/▼ change channel at once; UP/DOWN open the surf list
+    /// and move its highlight while the channel keeps playing, and OK tunes the highlighted one;
+    /// digits key in a channel number; LEFT returns to the previous channel; OK otherwise raises
+    /// the banner (or retries a failed tune); BACK closes the list, else BACK/STOP leave for the
+    /// page the channel was started from.
+    fn handle_live_key<H: AppLike>(
+        &mut self,
+        ps: &plx_media::route::PlaybackSession,
+        key: consts::Key,
+        sym: u32,
+        wcode: u32,
+        edge: Edge,
+        now: u32,
+        fx: &mut Effects<'_, H>,
+    ) -> Handled {
+        use crate::registry::LiveTvReq;
+        if edge == Edge::Up {
+            return Handled::Yes;
+        }
+        let ask = |fx: &mut Effects<'_, H>, req: LiveTvReq| fx.push(Fx::App(AppFx::LiveTv(req)));
+        let failed = plx_media::route::live(ps).is_some_and(|l| l.failed);
+        let live = plx_media::route::live(ps);
+        if let Some(dir) = consts::page_dir(sym, wcode) {
+            // CH▲ is "page up", which on a channel list is the NEXT channel.
+            if edge == Edge::Down {
+                self.live_surf = None;
+                ask(fx, LiveTvReq::Step(-dir));
+            }
+            self.hud.extend(now, LIVE_BANNER_MS);
+            self.publish();
+            return Handled::Yes;
+        }
+        // The digit is the key's ASCII `sym`: in `wcode` (a scancode) 48–57 are punctuation
+        // (`consts::is_bound`'s doc, `docs/remote-keys.md` §9).
+        if let Some(d) = Some(sym).filter(|v| (48..=57).contains(v)) {
+            if edge == Edge::Down {
+                if now.wrapping_sub(self.live_typed_at) > LIVE_DIGIT_MS {
+                    self.live_typed.clear();
+                }
+                if self.live_typed.len() < 6 {
+                    self.live_typed.push(d as u8 as char);
+                }
+                self.live_typed_at = now;
+                plx_machine::idle::invalidate();
+            }
+            return Handled::Yes;
+        }
+        match key {
+            consts::Key::Up | consts::Key::Down if edge == Edge::Down => {
+                // The first press opens the list on the channel that is playing; the next ones
+                // walk it, wrapping like the channel keys.
+                if let Some(live) = live {
+                    let delta = if matches!(key, consts::Key::Up) { -1 } else { 1 };
+                    self.live_surf = match self.live_surf {
+                        None => Some(live.index),
+                        Some(i) => live.lineup.step(i, delta).or(Some(i)),
+                    };
+                    self.live_surf_at = now;
+                    plx_machine::idle::invalidate();
+                }
+                self.hud.extend(now, LIVE_BANNER_MS);
+            }
+            consts::Key::Left { .. } | consts::Key::Right { .. } if edge == Edge::Down && self.live_surf.is_some() => {
+                self.live_surf = None;
+                plx_machine::idle::invalidate();
+            }
+            consts::Key::Left { .. } if edge == Edge::Down => {
+                ask(fx, LiveTvReq::Previous);
+                self.hud.extend(now, LIVE_BANNER_MS);
+            }
+            consts::Key::Ok if edge == Edge::Down && self.live_surf.is_some() => {
+                let pick = self.live_surf.take();
+                if let (Some(i), Some(live)) = (pick, live) {
+                    if i != live.index {
+                        if let Some(ch) = live.lineup.channels.get(i) {
+                            ask(fx, LiveTvReq::Typed(ch.number.clone()));
+                        }
+                    }
+                }
+                self.hud.extend(now, LIVE_BANNER_MS);
+                plx_machine::idle::invalidate();
+            }
+            consts::Key::Ok if edge == Edge::Down => {
+                if !self.live_typed.is_empty() {
+                    ask(fx, LiveTvReq::Typed(std::mem::take(&mut self.live_typed)));
+                } else if failed {
+                    ask(fx, LiveTvReq::Retry);
+                }
+                self.hud.dismissed = false;
+                self.hud.extend(now, LIVE_BANNER_MS);
+            }
+            consts::Key::Back if edge == Edge::Down && self.live_surf.is_some() => {
+                self.live_surf = None;
+                plx_machine::idle::invalidate();
+            }
+            consts::Key::Back | consts::Key::Stop if edge == Edge::Down => {
+                if !self.live_typed.is_empty() {
+                    self.live_typed.clear();
+                    plx_machine::idle::invalidate();
+                } else {
+                    Self::ask(fx, PlayerReq::Exit);
+                }
+            }
+            // EXIT is the remote's own; the loop's arm ends the process.
+            consts::Key::Exit => return Handled::No,
+            _ => {
+                if edge == Edge::Down {
+                    self.hud.dismissed = false;
+                    self.hud.extend(now, LIVE_BANNER_MS);
+                }
+            }
+        }
+        self.publish();
+        Handled::Yes
+    }
+
+    /// A typed channel number whose next digit never came: tune it. A surf list left alone closes.
+    fn step_live_digits<H: AppLike>(&mut self, now: u32, fx: &mut Effects<'_, H>) {
+        if self.live_surf.is_some() && now.wrapping_sub(self.live_surf_at) > LIVE_SURF_MS {
+            self.live_surf = None;
+            plx_machine::idle::invalidate();
+        }
+        if !self.live_typed.is_empty() && now.wrapping_sub(self.live_typed_at) > LIVE_DIGIT_MS {
+            let typed = std::mem::take(&mut self.live_typed);
+            fx.push(Fx::App(AppFx::LiveTv(crate::registry::LiveTvReq::Typed(typed))));
+            self.hud.extend(now, LIVE_BANNER_MS);
+            self.publish();
+            plx_machine::idle::invalidate();
+        }
     }
 }
 
@@ -558,6 +735,7 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Machine<H> for PlayerScreen 
                 // armed by a real release must not then be answered twice.
                 self.step_scrub_hold(tick.ms, fx);
                 self.step_tap_commit(tick.ms, fx);
+                self.step_live_digits(tick.ms, fx);
                 self.publish();
                 Handled::Yes
             }
@@ -572,7 +750,11 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Machine<H> for PlayerScreen 
                 let ps = H::session(cx);
                 match &input.kind {
                     InputKind::Key { key, sym, wcode, edge, .. } => {
-                        self.handle_key(ps, consts::classify_input(*key, *sym, *wcode), *edge, input.at.ms, fx, H::metadata(cx))
+                        let classified = consts::classify_input(*key, *sym, *wcode);
+                        if plx_media::route::live(ps).is_some() && !plx_appkit::player_hud::transport_hidden(ps) {
+                            return self.handle_live_key(ps, classified, *sym, *wcode, *edge, input.at.ms, fx);
+                        }
+                        self.handle_key(ps, classified, *edge, input.at.ms, fx, H::metadata(cx))
                     }
                     InputKind::Click { hit, x, .. } => {
                         self.handle_click(ps, *hit, *x, input.at.ms, fx)
@@ -622,6 +804,9 @@ impl PlayerScreen {
         self.failure_sel = idx;
         match action {
             A::PlayAutomatically => Self::ask(fx, PlayerReq::PlayAutomatically),
+            // A live channel has no Plex request to resolve again: re-tune it instead.
+            A::TryAgain if plx_media::route::live(ps).is_some() =>
+                fx.push(Fx::App(AppFx::LiveTv(crate::registry::LiveTvReq::Retry))),
             A::TryAgain => Self::ask(fx, PlayerReq::RetryPlayback),
             A::ChangeQuality => Self::ask(fx, PlayerReq::OpenOverlay(overlay::OverlayKind::More { quality: true })),
             A::Repair => {
@@ -1289,6 +1474,11 @@ impl LogicalState for PlayerScreen {
             c.u32(o.entry.0);
         });
         c.bool(self.repair_alert.is_open()).bool(self.repair_alert.choice() == plx_ui::decision_alert::Choice::Destructive).u32(self.repair_scroll);
+        c.str(&self.live_typed).u32(self.live_typed_at);
+        c.option(self.live_surf.as_ref(), |c, i| {
+            c.u64(*i as u64);
+        });
+        c.u32(self.live_surf_at);
     }
     fn probe(&self, out: &mut String) {
         out.push_str(WORD);
@@ -1352,6 +1542,17 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Screen<H> for PlayerScreen {
         if hud_drawn {
             self.draw_hud(ps, now, f.measure, H::metadata(f.cx));
         }
+        if let (Some(live), Some(phase)) = (plx_media::route::live(ps), self.live_banner_up(ps, now)) {
+            if !plx_appkit::player_hud::transport_hidden(ps) {
+                plx_appkit::live_banner::draw(live, phase, plx_base::wallclock::now_ms(), f.measure);
+            }
+        }
+        if let (Some(live), Some(hi)) = (plx_media::route::live(ps), self.live_surf) {
+            if !plx_appkit::player_hud::transport_hidden(ps) {
+                plx_appkit::live_banner::draw_surf(&live.lineup, hi, live.index, plx_base::wallclock::now_ms(), f.measure);
+            }
+        }
+        plx_appkit::live_banner::draw_typed(&self.live_typed, f.measure);
         // The read-out is NOT transport chrome — it is drawn whether or not the HUD is up, so a
         // terminal `Error` (which is not `is_busy()`, so it does not pin the HUD) keeps its message
         // instead of vanishing with the 4.5 s linger. AFTER the transport, so it is never dimmed by

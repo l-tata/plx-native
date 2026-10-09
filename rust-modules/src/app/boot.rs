@@ -952,6 +952,12 @@ pub(crate) unsafe fn construct(
     }
     #[cfg(not(test))]
     plx_platform::i18n::initialize(session.language, controlled);
+    // The set's own zone, for the clock and the guide when `localtime` reads UTC
+    // (`plx_base::wallclock`). Not on a controlled replay, which asks no bus anything.
+    #[cfg(not(test))]
+    if !controlled {
+        plx_base::wallclock::set_system_offset(plx_platform::tv::system_utc_offset_s());
+    }
     let forced_login = !controlled && crate::dev::scenarios::login_forced();
     let dev_primary = (!forced_login && !dev_token.is_empty()).then(|| {
         let origin = crate::dev::scenarios::pms_origin()
@@ -991,6 +997,10 @@ pub(crate) unsafe fn construct(
     plx_media::route::restore_next_episode_mode(session.next_episode_mode());
     plx_media::route::restore_skip_interval(session.skip_interval());
     plx_media::route::restore_deck_press(session.deck_press());
+    // Live TV's Tunarr server is an install-wide preference too: adopted now, loaded only when the
+    // Live TV page asks (`LiveTvCmd::Restore` starts no worker).
+    let origin = crate::dev::scenarios::livetv_origin().unwrap_or_else(|| session.livetv_source().to_owned());
+    bridge.livetv_run(plx_data::livetv::LiveTvCmd::Restore { origin });
     // The subtitle tone rides the same file and the same moment: a preference, restored once.
     plx_media::player::restore_subtitle_tone(session.subtitle_tone());
     plx_media::player::restore_audio_enhancements(session.audio_enhancements());
@@ -1550,8 +1560,11 @@ pub(crate) unsafe fn construct(
         last_route_reported,
         ptr,
         menu_play_await: None,
+        livetv: Default::default(),
         prev,
         refresh_hubs_at,
+        hubs_asked_at: t0,
+        clock_minute: 0,
         plaintext_upgrade: Default::default(),
         ev,
         remote,

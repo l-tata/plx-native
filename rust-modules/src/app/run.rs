@@ -1569,7 +1569,12 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
         // show has another episode queued and the Next episode preference is not Off, else leave
         // the player (back to the detail page or home, whichever is behind), instead of freezing
         // on the last frame.
-        if playback_may_run(app) && super::bridge::player(&app.pages).is_some() && plx_media::player::ended() {
+        if playback_may_run(app) && super::bridge::player(&app.pages).is_some() && plx_media::player::ended()
+            && plx_media::route::live(&app.player.session).is_some()
+        {
+            // A live channel does not END: its stream dropped. Re-tune instead of leaving.
+            super::livetv::stream_ended(app, fr.now);
+        } else if playback_may_run(app) && super::bridge::player(&app.pages).is_some() && plx_media::player::ended() {
             let handed_off_to_up_next = finish_playback(&mut app.player.session,
                 &mut app.adapters.player,
                 &mut app.refresh_hubs_at,
@@ -1619,6 +1624,7 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
             && !matches!(app.route(), AppArg::Player)
         {
             app.refresh_hubs_at = 0;
+            app.hubs_asked_at = fr.now;
             super::bridge::execute_endpoint_outcomes(
                 &mut app.pages,
                 app.bridge.hubs_run(plx_data::stores::hubs::HubsCmd::RefetchHubs).endpoints,
@@ -1628,6 +1634,23 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
             // Bridge-owned Browse store through `Bridge::browse_run`.
             app.bridge.browse_run(plx_data::stores::browse::BrowseCmd::HubsInvalidateAll);
             log("home: hubs refresh queued after playback");
+        }
+        // The top bar's clock repaints when its minute turns, on the pages that draw the bar.
+        if super::bridge::clock_minute_moved(&mut app.clock_minute, plx_base::wallclock::now_ms())
+            && super::bridge::Bridge::draws_chrome_for(&app.route())
+        {
+            plx_machine::idle::invalidate();
+        }
+        // Home left open (or come back to after the set slept) refetches its hubs once they are
+        // stale, so Continue Watching and On Deck follow what was watched elsewhere — the
+        // official client's behaviour, and the one refresh the shelves had no trigger for.
+        if matches!(app.route(), AppArg::Home) && hubs_stale(fr.now, app.hubs_asked_at) {
+            app.hubs_asked_at = fr.now;
+            super::bridge::execute_endpoint_outcomes(
+                &mut app.pages,
+                app.bridge.hubs_run(plx_data::stores::hubs::HubsCmd::RefetchHubs).endpoints,
+            );
+            log("home: hubs refresh queued (stale)");
         }
         // (The lost-keyup safety net and the CLIENT-SIDE LONG-PRESS REPEAT stood here — the one
         // hold-to-move path for every discrete focus list, driven by `App::held_key` at 110 ms so
@@ -2293,6 +2316,11 @@ pub(crate) unsafe fn update(app: &mut App, fr: &mut Frame) {
         super::bridge::execute_endpoint_outcomes(&mut app.pages, upgrades);
         app.bridge.person_pump();
         app.bridge.collection_pump();
+        // Live TV: the guide's load and the LAN search land here, and the tuner's stream probe
+        // and re-tune schedule run. Route-unconditional: a guide landing while the player is up
+        // still refreshes the banner's listing.
+        app.bridge.livetv_pump();
+        super::livetv::pump(app, fr.now);
         if let Some(target) = app.bridge.take_detail_refresh() {
             refresh_content(&mut app.pages, &mut app.bridge, target);
         }
@@ -2671,6 +2699,9 @@ pub(crate) unsafe fn report(app: &mut App, fr: &mut Frame) {
                 AppArg::Content(plx_screens::registry::ContentArg::Collection(_)) =>
                     crate::focusprobe::Screen::Collection,
                 AppArg::Search => crate::focusprobe::Screen::Search,
+                // Live TV keeps its cursor in its own instance, like Search, so the line carries
+                // the page's own probe (`LiveTvScreen`'s `LogicalState::probe`).
+                AppArg::LiveTv => crate::focusprobe::Screen::Search,
                 // The same words the heartbeat's `overlay=` uses, and — since phase 9 — from the
                 // same place: the SURFACE that is up. There is no second table; see
                 // `heartbeat_word_tests::focusprobe_player_overlay_delegates_to_the_shared_overlay_word_function`.
@@ -3102,8 +3133,11 @@ mod lifecycle_regression_tests {
             last_route_reported: Default::default(),
             ptr: Pointer::IDLE,
             menu_play_await: Default::default(),
+            livetv: Default::default(),
             prev: Default::default(),
             refresh_hubs_at: Default::default(),
+            hubs_asked_at: Default::default(),
+            clock_minute: Default::default(),
             plaintext_upgrade: Default::default(),
             ev: [0; 128],
             remote: Default::default(),
@@ -4566,6 +4600,28 @@ mod lifecycle_regression_tests {
             rig.app.route().id(),
         );
         assert_eq!(rig.app.pages.nav.top_page().map(|e| e.id), Some(origin));
+    }
+}
+
+/// How long Home's hubs are trusted before Home refetches them on its own.
+const HUBS_STALE_MS: u32 = 15 * 60 * 1000;
+
+/// Have the hubs gone unrefreshed for [`HUBS_STALE_MS`] at frame time `now`? Wrapping, like every
+/// frame-clock comparison here.
+fn hubs_stale(now: u32, asked_at: u32) -> bool {
+    now.wrapping_sub(asked_at) >= HUBS_STALE_MS
+}
+
+#[cfg(test)]
+mod hubs_stale_tests {
+    use super::*;
+
+    #[test]
+    fn home_refetches_after_a_quarter_hour_and_not_before() {
+        assert!(!hubs_stale(1_000, 1_000));
+        assert!(!hubs_stale(1_000 + HUBS_STALE_MS - 1, 1_000));
+        assert!(hubs_stale(1_000 + HUBS_STALE_MS, 1_000));
+        assert!(hubs_stale(HUBS_STALE_MS / 2, u32::MAX - HUBS_STALE_MS / 2), "across the clock's wrap");
     }
 }
 

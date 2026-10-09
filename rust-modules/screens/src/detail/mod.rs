@@ -223,8 +223,8 @@ pub struct DetailScreen {
     cast: Shelf,
     tabs: TabStrip,
     season_pop: CtlPop<1>,
-    ctl_pop: CtlPop<5>,
-    disc_unfurl: [Spring; 3],
+    ctl_pop: CtlPop<{ hero::HERO_MAX }>,
+    disc_unfurl: [Spring; hero::DISCS],
     season_metrics: season::Metrics,
     about_rows: about::Rows,
     /// The page's own keyed ground. Deliberately a bare [`AmbientWash`] and not the shared
@@ -446,7 +446,7 @@ impl DetailScreen {
             tabs: TabStrip::new(),
             season_pop: CtlPop::new(),
             ctl_pop: CtlPop::new(),
-            disc_unfurl: [Spring::at(0.0); 3],
+            disc_unfurl: [Spring::at(0.0); hero::DISCS],
             season_metrics: season::Metrics::new(),
             about_rows: about::Rows::new(),
             ground,
@@ -2690,6 +2690,7 @@ impl DetailScreen {
                         hero::HeroCtl::Trailer => plx_ui::icons::Icon::Trailer,
                         hero::HeroCtl::MarkWatched => plx_ui::icons::Icon::Check,
                         hero::HeroCtl::MarkUnwatched => plx_ui::icons::Icon::Minus,
+                        hero::HeroCtl::GoToShow => plx_ui::icons::Icon::Show,
                         _ => unreachable!(),
                     };
                     let mut button = CircleButton::new(c"".as_ptr())
@@ -3683,6 +3684,7 @@ impl DetailScreen {
             trailer: false,
             alt: self.alt_available(meta),
             mark,
+            show: self.detail(meta).is_some_and(hero::goes_to_show),
         }
     }
 
@@ -3864,6 +3866,10 @@ impl DetailScreen {
                         }),
                     );
                 }
+            }
+            hero::HeroCtl::GoToShow => {
+                let Some(d) = self.detail(meta).filter(|d| hero::goes_to_show(d)) else { return };
+                self.content(fx, ContentReq::PushShow { sid: d.sid, rk: d.show_rk.clone(), season: d.season });
             }
             hero::HeroCtl::MarkWatched | hero::HeroCtl::MarkUnwatched => {
                 if let Some(d) = self.detail(meta) {

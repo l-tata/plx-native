@@ -455,12 +455,12 @@ impl SubtitleBitmaps {
 // ---- HUD geometry (shared by draw_hud + the pointer hit-tests in app.rs) ----
 // scrubber (and title, and the bottom tab pills) left margin — the app's own, not a second copy of
 // it: this was a literal 90 and so stayed put when `MARGIN_X` moved to the overscan-safe 96
-const SB_X: f32 = plx_ui::consts::MARGIN_X;
+pub(crate) const SB_X: f32 = plx_ui::consts::MARGIN_X;
 pub const fn sb_w() -> f32 {
     SCR_W - 2.0 * SB_X
 }
-const SB_Y: f32 = SCR_H - 198.0;
-const SB_H: f32 = 8.0;
+pub(crate) const SB_Y: f32 = SCR_H - 198.0;
+pub(crate) const SB_H: f32 = 8.0;
 const BTN_S: f32 = 64.0; // right-side control button size (mockup ≈ 68)
 const BTN_GAP: f32 = 22.0;
 const BTN_Y: f32 = SCR_H - 288.0;

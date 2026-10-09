@@ -260,7 +260,7 @@ impl SearchScreen {
             let request = match tab {
                 0 => SearchReq::Tab(HomeTab::Home), 1 => SearchReq::Tab(HomeTab::Movies),
                 2 => SearchReq::Tab(HomeTab::Shows), 3 => return Handled::Yes,
-                4 => SearchReq::Account, _ => return Handled::No,
+                4 => SearchReq::Account, 5 => SearchReq::Tab(HomeTab::LiveTv), _ => return Handled::No,
             };
             self.keyboard(false, true, fx);
             fx.push(Fx::App(AppFx::Search(request)));

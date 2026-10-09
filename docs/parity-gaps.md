@@ -4,8 +4,8 @@ Audited 2026-07-29 against reference screenshots of the **official webOS Plex cl
 home, show/episode detail, movie detail, library grid, card context menu) and **Plex HTPC** (player
 HUD, Quality picker, queue overlay, Settings tree). Branch `home-ui-polish`, working tree included.
 
-**Scope: movies and TV shows only.** Music, photos, Live TV/DVR and podcasts are out of scope and
-are not counted as gaps. Plex Discover / "Movies & Shows on Plex" is movie/show content but is an
+**Scope: movies and TV shows only.** Music, photos, Plex's Live TV/DVR and podcasts are out of scope and
+are not counted as gaps (Live TV comes from Tunarr instead, `docs/live-tv-plan.md`). Plex Discover / "Movies & Shows on Plex" is movie/show content but is an
 *adjacent catalog* (plex.tv, not the user's server) and is tagged as such throughout.
 
 **Method.** Two fan-out audits (14 + 12 agents): one auditor per product domain read our source and

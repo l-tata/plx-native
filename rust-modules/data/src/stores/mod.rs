@@ -47,6 +47,7 @@ pub mod browse;
 mod content_arg;
 pub use content_arg::ContentArg;
 pub mod hubs;
+pub mod livetv;
 pub mod metadata;
 pub mod person;
 pub mod collection;
@@ -70,6 +71,8 @@ pub struct Stores {
     /// The player's subtitle search & download (`crate::subsearch`). Appended last.
     pub subtitle_search: subsearch::SubSearchStore,
     pub viewstate: std::cell::RefCell<viewstate::ViewStateStore>,
+    /// Live TV: the configured Tunarr server's channels and guide (`crate::livetv`). Appended last.
+    pub livetv: livetv::LiveTvStore,
 }
 
 impl Default for Stores {
@@ -85,6 +88,7 @@ impl Default for Stores {
             search: search::SearchStore::default(),
             subtitle_search: subsearch::SubSearchStore::default(),
             viewstate: std::cell::RefCell::new(viewstate::ViewStateStore::default()),
+            livetv: livetv::LiveTvStore::default(),
         }
     }
 }
@@ -122,6 +126,12 @@ impl Stores {
     pub fn subtitle_search_view(&self) -> crate::subsearch::SubSearchView<'_> {
         self.subtitle_search.view()
     }
+
+    pub fn livetv_run(&mut self, cmd: crate::livetv::LiveTvCmd) -> bool { self.livetv.run(cmd) }
+
+    pub fn livetv_pump(&mut self) -> bool { self.livetv.pump() }
+
+    pub fn livetv_view(&self) -> crate::livetv::LiveTvView<'_> { self.livetv.view() }
 
     pub fn person_pump(&mut self) -> bool {
         self.person.pump(&self.landgate)
@@ -241,6 +251,7 @@ impl Stores {
             StoreId::Search => self.search.gen(),
             StoreId::SubtitleSearch => self.subtitle_search.gen(),
             StoreId::ViewState => self.viewstate.borrow().gen(),
+            StoreId::LiveTv => self.livetv.gen(),
         }
     }
 
@@ -267,6 +278,9 @@ impl Stores {
         if let Some(generation) = self.subtitle_search.take_notice() {
             notices.push((StoreId::SubtitleSearch, generation));
         }
+        if let Some(generation) = self.livetv.take_notice() {
+            notices.push((StoreId::LiveTv, generation));
+        }
         if let Some(generation) = self.viewstate.borrow().take_notice() {
             notices.push((StoreId::ViewState, generation));
         }
@@ -287,6 +301,8 @@ pub enum StoreId {
     Collection,
     /// Appended for the same reason: every earlier store keeps its recorded ordinal.
     SubtitleSearch,
+    /// Appended for the same reason.
+    LiveTv,
 }
 
 /// Route-scoped background work, distinct from a user command. Polling an idle store must not
@@ -312,7 +328,7 @@ impl StoreWork {
 }
 
 impl StoreId {
-    pub const ALL: [StoreId; 8] = [
+    pub const ALL: [StoreId; 9] = [
         StoreId::Browse,
         StoreId::Hubs,
         StoreId::Metadata,
@@ -321,6 +337,7 @@ impl StoreId {
         StoreId::ViewState,
         StoreId::Collection,
         StoreId::SubtitleSearch,
+        StoreId::LiveTv,
     ];
 
     /// The library's ordinal for this store (spec §5.1: the library never names `StoreId`).
@@ -342,6 +359,7 @@ impl StoreId {
             StoreId::SubtitleSearch => "subsearch",
             StoreId::Person => "person",
             StoreId::ViewState => "viewstate",
+            StoreId::LiveTv => "livetv",
         }
     }
 }
@@ -358,6 +376,7 @@ pub enum StoreCmd {
     Collection(collection::CollectionCmd),
     ViewState(viewstate::ViewStateCmd),
     SubtitleSearch(subsearch::SubSearchCmd),
+    LiveTv(crate::livetv::LiveTvCmd),
 }
 
 impl StoreCmd {
@@ -371,6 +390,7 @@ impl StoreCmd {
             StoreCmd::Collection(_) => StoreId::Collection,
             StoreCmd::ViewState(_) => StoreId::ViewState,
             StoreCmd::SubtitleSearch(_) => StoreId::SubtitleSearch,
+            StoreCmd::LiveTv(_) => StoreId::LiveTv,
         }
     }
 }
@@ -670,6 +690,6 @@ mod tests {
         for id in StoreId::ALL {
             assert_eq!(StoreId::from_ord(id.ord()), Some(id));
         }
-        assert_eq!(StoreId::from_ord(StoreOrd(8)), None);
+        assert_eq!(StoreId::from_ord(StoreOrd(9)), None);
     }
 }

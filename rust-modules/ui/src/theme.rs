@@ -1177,6 +1177,25 @@ pub const PILL_KEYLINE_BG: [f32; 4] = scrim_black(0.55);
 /// Filled metadata chip (the About column's CC/SDH/AD accessibility badges). A COOL tint rather than
 /// plain white at a weight, so a chip reads as a plate rather than as a gap in the panel.
 pub const BADGE_FILL: [f32; 4] = with_a(COOL_150, 0.20);
+
+// ---- Live TV guide (`screens::livetv`) ----------------------------------------------------------
+
+/// A listed airing's plate in the guide grid — the same weight as an idle tab plate: a cell is a
+/// selectable slot on the page's own ground, not a control standing on its own.
+pub const GUIDE_CELL: [f32; 4] = with_a(WHITE, 0.08);
+/// The airing on NOW, a rung brighter than the rest of its row, so "what is on" reads across the
+/// whole grid without focus.
+pub const GUIDE_CELL_NOW: [f32; 4] = with_a(WHITE, 0.14);
+/// The elapsed part of an on-now airing, washed over its plate (the guide's progress).
+pub const GUIDE_CELL_ELAPSED: [f32; 4] = with_a(WHITE, 0.08);
+/// The guide's NOW marker and the live banner's progress fill — the resume bar's amber, because it
+/// is the same fact ("how far in"), told about wall time instead of a file.
+pub const GUIDE_NOW: [f32; 4] = RESUME_FILL;
+/// The `LIVE` badge on the player's banner. Red is broadcast's own convention for "on air"; it is a
+/// state mark, never a failure colour (failures stay `TEXT_SECONDARY`, ui/CLAUDE.md rule 4).
+pub const LIVE_BADGE: [f32; 4] = RED_400;
+/// Ink on [`LIVE_BADGE`].
+pub const LIVE_BADGE_INK: [f32; 4] = WHITE;
 /// No-op texture tint (structural: draw an RGBA texture unmodified).
 pub const TINT_WHITE: [f32; 4] = WHITE;
 

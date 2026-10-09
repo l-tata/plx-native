@@ -11,24 +11,30 @@ use plx_data::stores::browse::{DirectoryView, SecKind};
 pub(crate) enum Pill {
     Home,
     Section(SecKind),
+    /// Drawn just before Search, and only while a Tunarr server is configured.
+    LiveTv,
     Search,
 }
 
-pub(crate) fn tab_count(directory: DirectoryView<'_>) -> usize {
-    1 + directory.tab_count() + 1
+/// How many pills the strip draws: Home, one per library type, Live TV when `livetv`, Search.
+pub(crate) fn tab_count(directory: DirectoryView<'_>, livetv: bool) -> usize {
+    1 + directory.tab_count() + usize::from(livetv) + 1
 }
 
-pub(crate) fn pill_at(directory: DirectoryView<'_>, i: usize) -> Pill {
-    pill_in(i, tab_count(directory) - 1, |tab| directory.tab_kind(tab))
+pub(crate) fn pill_at(directory: DirectoryView<'_>, livetv: bool, i: usize) -> Pill {
+    pill_in(i, tab_count(directory, livetv) - 1, livetv, |tab| directory.tab_kind(tab))
 }
 
 fn pill_in(
     i: usize,
     search: usize,
+    livetv: bool,
     kind_at: impl Fn(usize) -> Option<SecKind>,
 ) -> Pill {
     if i == search {
         Pill::Search
+    } else if livetv && i + 1 == search {
+        Pill::LiveTv
     } else if let Some(section) = i.checked_sub(1) {
         kind_at(section).map(Pill::Section).unwrap_or(Pill::Home)
     } else {
@@ -36,19 +42,21 @@ fn pill_in(
     }
 }
 
-pub(crate) fn pill_of(directory: DirectoryView<'_>, pill: Pill) -> Option<usize> {
-    let search = tab_count(directory) - 1;
-    pill_index(pill, search, |kind| directory.tab_of_kind(kind))
+pub(crate) fn pill_of(directory: DirectoryView<'_>, livetv: bool, pill: Pill) -> Option<usize> {
+    let search = tab_count(directory, livetv) - 1;
+    pill_index(pill, search, livetv, |kind| directory.tab_of_kind(kind))
 }
 
 fn pill_index(
     pill: Pill,
     search: usize,
+    livetv: bool,
     tab_of: impl Fn(SecKind) -> Option<usize>,
 ) -> Option<usize> {
     match pill {
         Pill::Home => Some(0),
         Pill::Section(kind) => tab_of(kind).map(|i| i + 1),
+        Pill::LiveTv => livetv.then(|| search - 1),
         Pill::Search => Some(search),
     }
 }
@@ -56,6 +64,11 @@ fn pill_index(
 #[derive(Default)]
 pub(crate) struct ChromeSnapshot {
     tabs_generation: Option<u32>,
+    /// Whether the labels below carry the Live TV pill — the second input they are built from.
+    livetv: bool,
+    /// Bumped on every label rebuild: the strip re-lays itself out on a change of generation, and
+    /// the Live TV pill appearing is a change the directory's own generation cannot see.
+    label_gen: u32,
     profile_generation: Option<u32>,
     session_watch: plx_plex::plex::session::VisibleSessionWatch,
     labels: Vec<String>,
@@ -68,14 +81,16 @@ pub(crate) struct ChromeSnapshot {
 }
 
 impl ChromeSnapshot {
-    pub(crate) fn refresh(&mut self, measure: &dyn Measure, directory: DirectoryView<'_>) {
-        self.refresh_with_profile(measure, directory, None);
+    pub(crate) fn refresh(&mut self, measure: &dyn Measure, directory: DirectoryView<'_>, livetv: bool) {
+        self.refresh_with_profile(measure, directory, livetv, None);
     }
 
-    pub(crate) fn refresh_with_profile(&mut self, measure: &dyn Measure, directory: DirectoryView<'_>,
+    pub(crate) fn refresh_with_profile(&mut self, measure: &dyn Measure, directory: DirectoryView<'_>, livetv: bool,
         captured: Option<(&plx_plex::plex::session::CurrentProfile, &plx_plex::plex::session::Session)>) {
         let generation = directory.tabs_gen();
-        if self.tabs_generation != Some(generation) {
+        if self.tabs_generation != Some(generation) || self.livetv != livetv {
+            self.livetv = livetv;
+            self.label_gen = self.label_gen.wrapping_add(1);
             self.labels.clear();
             self.keys.clear();
             self.labels.push(plx_platform::i18n::msg::browse_chrome_home().into());
@@ -87,6 +102,10 @@ impl ChromeSnapshot {
                     SecKind::Movie => 1,
                     SecKind::Show => 2,
                 });
+            }
+            if livetv {
+                self.labels.push(plx_platform::i18n::msg::livetv_tab().into());
+                self.keys.push(STRIP_BASE + 5);
             }
             self.labels.push(String::new());
             self.keys.push(STRIP_BASE + 3);
@@ -110,12 +129,16 @@ impl ChromeSnapshot {
     }
 
     pub(crate) fn labels(&self) -> TabLabels<'_> {
-        TabLabels { generation: self.tabs_generation.unwrap_or(0), labels: &self.labels }
+        TabLabels { generation: self.label_gen, labels: &self.labels }
     }
 
     pub(crate) fn library_selection(&self, kind: SecKind) -> u32 {
         let elem = STRIP_BASE + match kind { SecKind::Movie => 1, SecKind::Show => 2 };
         self.keys.iter().position(|key| *key == elem).unwrap_or(0) as u32
+    }
+
+    pub(crate) fn livetv_selection(&self) -> u32 {
+        self.keys.iter().position(|key| *key == STRIP_BASE + 5).unwrap_or(0) as u32
     }
 
     pub(crate) fn search_selection(&self) -> u32 {
@@ -186,7 +209,7 @@ mod tests {
         let mut snapshot = ChromeSnapshot::default();
         let directory = directory(&[]);
         plx_plex::plex::session::install_transient_for_test(true);
-        snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view());
+        snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view(), false);
         assert_eq!(snapshot.name.to_str().unwrap(), "Sign in");
         plx_plex::plex::session::save(&plx_plex::plex::session::Session {
             client_id: "synthetic-client".into(), account_token: "synthetic-token".into(),
@@ -194,7 +217,7 @@ mod tests {
                 title: "Synthetic owner".into(), admin: true, ..Default::default()
             }], ..Default::default()
         });
-        snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view());
+        snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view(), false);
         assert_eq!(snapshot.name.to_str().unwrap(), "Synthetic owner");
     }
 
@@ -218,7 +241,7 @@ mod tests {
         let mut snapshot = ChromeSnapshot {
             profile_generation: Some(plx_plex::plex::session::current_gen()), ..Default::default()
         };
-        snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view());
+        snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view(), false);
         assert_eq!(snapshot.keys, vec![STRIP_BASE, STRIP_BASE + 1, STRIP_BASE + 2, STRIP_BASE + 3]);
         assert_eq!(&snapshot.labels[..3], &["Home", "Movies", "TV Shows"]);
         let mut members = Vec::new();
@@ -228,24 +251,49 @@ mod tests {
     }
 
     #[test]
+    fn a_configured_live_tv_server_adds_its_pill_before_search() {
+        let directory = directory(&[SecKind::Movie]);
+        let mut snapshot = ChromeSnapshot {
+            profile_generation: Some(plx_plex::plex::session::current_gen()), ..Default::default()
+        };
+        snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view(), false);
+        let before = snapshot.labels().generation;
+        snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view(), true);
+        assert_eq!(snapshot.keys, vec![STRIP_BASE, STRIP_BASE + 1, STRIP_BASE + 5, STRIP_BASE + 3]);
+        assert_eq!(snapshot.labels[2], "Live TV");
+        assert_ne!(snapshot.labels().generation, before, "the strip re-lays itself out");
+        assert_eq!(snapshot.livetv_selection(), 2);
+        snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view(), false);
+        assert_eq!(snapshot.keys, vec![STRIP_BASE, STRIP_BASE + 1, STRIP_BASE + 3]);
+    }
+
+    #[test]
     fn every_projected_pill_round_trips_by_stable_section_identity() {
         use plx_data::stores::browse::SecKind::{Movie, Show};
         let kinds = [Movie, Show];
         let at = |i| kinds.get(i).copied();
         let search = kinds.len() + 1;
-        assert_eq!(pill_in(0, search, at), Pill::Home);
-        assert_eq!(pill_in(1, search, at), Pill::Section(Movie));
-        assert_eq!(pill_in(2, search, at), Pill::Section(Show));
-        assert_eq!(pill_in(search, search, at), Pill::Search);
-        assert_eq!(pill_in(search + 1, search, at), Pill::Home);
+        assert_eq!(pill_in(0, search, false, at), Pill::Home);
+        assert_eq!(pill_in(1, search, false, at), Pill::Section(Movie));
+        assert_eq!(pill_in(2, search, false, at), Pill::Section(Show));
+        assert_eq!(pill_in(search, search, false, at), Pill::Search);
+        assert_eq!(pill_in(search + 1, search, false, at), Pill::Home);
         let pos = |kind| kinds.iter().position(|&candidate| candidate == kind);
         for i in 0..=search {
-            assert_eq!(pill_index(pill_in(i, search, at), search, pos), Some(i));
+            assert_eq!(pill_index(pill_in(i, search, false, at), search, false, pos), Some(i));
         }
-        assert_eq!(pill_index(Pill::Section(Show), search, |_| None), None,
+        assert_eq!(pill_index(Pill::Section(Show), search, false, |_| None), None,
             "a type the captured strip no longer contains borrows no other position");
-        assert_eq!(pill_in(1, 3, |_| None), Pill::Home,
+        assert_eq!(pill_in(1, 3, false, |_| None), Pill::Home,
             "an unfilled section slot falls back to the one fixed destination");
+        // With Live TV configured its pill sits just before Search, and every pill still round trips.
+        let search = kinds.len() + 2;
+        assert_eq!(pill_in(search - 1, search, true, at), Pill::LiveTv);
+        assert_eq!(pill_in(search, search, true, at), Pill::Search);
+        for i in 0..=search {
+            assert_eq!(pill_index(pill_in(i, search, true, at), search, true, pos), Some(i));
+        }
+        assert_eq!(pill_index(Pill::LiveTv, kinds.len() + 1, false, pos), None, "no pill without a server");
     }
 
     #[test]

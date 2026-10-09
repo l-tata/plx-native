@@ -390,6 +390,65 @@ pub fn system_locale() -> crate::tv::LocaleReply {
     crate::tv::LocaleReply::NoPlatform
 }
 
+/// The set's own UTC offset, in seconds east, from the system service's clock
+/// (`luna://com.palm.systemservice/time/getSystemTime`, whose reply carries `offset` in MINUTES
+/// east of UTC beside `timezone`). A jailed native process's `localtime` can read UTC on a set
+/// configured for another zone, so the clock and the guide ask here. `None` when the bus refuses
+/// or the reply has no offset. Same 600 ms boot budget as [`system_locale`].
+#[cfg(all(not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
+pub fn system_utc_offset_s() -> Option<i32> {
+    let raw = ls2::register().map_err(ls2::Fail::from).and_then(|client| {
+        client.call(
+            "luna://com.palm.systemservice/time/getSystemTime",
+            "{}",
+            std::time::Duration::from_millis(600),
+        )
+    });
+    match raw {
+        Ok(raw) => {
+            let offset = parse_system_time_offset(&raw);
+            plx_base::eventlog::log(&format!("clock: system offset {offset:?}s"));
+            offset
+        }
+        Err(_) => {
+            plx_base::eventlog::log("clock: system time service unavailable");
+            None
+        }
+    }
+}
+
+#[cfg(any(feature = "hostsim", test, feature = "test-support"))]
+pub fn system_utc_offset_s() -> Option<i32> {
+    None
+}
+
+/// `getSystemTime`'s `offset` (minutes east of UTC), as seconds. Refuses a reply that says it
+/// failed, has no numeric offset, or names an offset no zone has (beyond ±14 h).
+pub fn parse_system_time_offset(raw: &str) -> Option<i32> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    if v.get("returnValue").and_then(serde_json::Value::as_bool) == Some(false) {
+        return None;
+    }
+    let minutes = v.get("offset")?.as_i64()?;
+    (minutes.abs() <= 14 * 60).then(|| i32::try_from(minutes * 60).ok()).flatten()
+}
+
+#[cfg(test)]
+mod system_time_tests {
+    use super::parse_system_time_offset;
+
+    #[test]
+    fn the_offset_is_minutes_east_and_a_refusal_is_none() {
+        let reply = r#"{"returnValue":true,"utc":1791576600,"offset":-420,"timezone":"America/Los_Angeles","TZ":"PDT"}"#;
+        assert_eq!(parse_system_time_offset(reply), Some(-7 * 3600));
+        assert_eq!(parse_system_time_offset(r#"{"offset":330}"#), Some(5 * 3600 + 1800));
+        assert_eq!(parse_system_time_offset(r#"{"returnValue":false,"offset":60}"#), None);
+        assert_eq!(parse_system_time_offset(r#"{"returnValue":true}"#), None);
+        assert_eq!(parse_system_time_offset(r#"{"offset":10000}"#), None, "no zone is that far");
+        assert_eq!(parse_system_time_offset("not json"), None);
+    }
+}
+
 #[cfg(all(not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
 fn launch_home() -> bool {
     let payload = format!("{{\"id\":\"{HOME_APP_ID}\"}}");

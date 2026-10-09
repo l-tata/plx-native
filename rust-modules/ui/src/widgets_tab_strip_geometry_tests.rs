@@ -265,3 +265,22 @@ fn a_stale_pill_index_clamps_instead_of_panicking() {
     );
     assert_eq!(tab_scroll_target(&[], 0, 12.0), 0.0);
 }
+
+/// **The clock never meets the tab track, and its slot holds the widest time it prints.** The
+/// strip's side clearance is symmetric, so the widest track the row ever lays out has to end
+/// before the clock's capsule on the right as it does after the chip on the left.
+#[test]
+fn the_clock_sits_right_of_the_widest_track_and_fits_its_slot() {
+    for n in 1..=16usize {
+        let w = widths_for(n);
+        let track_r = (crate::consts::SCR_W + tab_view_w(&w)) * 0.5 + TAB_TRACK_PAD;
+        assert!(track_r < CLOCK_FRAME.x, "n={n}: the track ends at {track_r}, over a clock starting at {}", CLOCK_FRAME.x);
+    }
+    assert!(CLOCK_FRAME.x + CLOCK_FRAME.w <= crate::consts::SCR_W - crate::consts::MARGIN_X);
+    assert_eq!((CLOCK_FRAME.y, CLOCK_FRAME.h), (TOP_BAR_Y - TAB_TRACK_PAD, TAB_PILL_H + 2.0 * TAB_TRACK_PAD), "the track's own band");
+    use plx_machine::machine::Measure as _;
+    for widest in ["00:00\u{a0}PM", "00:00"] {
+        let w = crate::fixture::FixtureMeasure.width_str(widest, theme::size::BODY, true);
+        assert!(w <= CLOCK_TEXT_W, "{widest:?} measures {w}, past the {CLOCK_TEXT_W} slot");
+    }
+}

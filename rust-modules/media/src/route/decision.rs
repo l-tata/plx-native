@@ -376,6 +376,11 @@ pub struct PlaybackSession {
     /// machine still owns the engine, this says what the session may write. See
     /// [`preview_request`].
     resolved_as_preview: bool,
+    /// **The Live TV channel this playback is**, when it is one (`crate::live`). A channel has no
+    /// Plex item behind it — no `cur_rk`, no transcode session, no timeline reporter — so this is
+    /// the one field that says what is on screen. [`install_live_stream`] sets it; every Plex plan
+    /// ([`apply_plan`]) and [`end_live`] clears it.
+    live: Option<crate::live::LiveSession>,
 }
 
 /// What the server actually did with a requested Plex Pass audio enhancement (issue #266) — as
@@ -457,6 +462,7 @@ impl PlaybackSession {
         now_ms: 0,
         preview: false,
         resolved_as_preview: false,
+        live: None,
     };
 }
 
@@ -529,6 +535,7 @@ impl PlaybackSession {
             queue: _,
             preview: _,
             resolved_as_preview,
+            live,
         } = self;
         PlaybackSession {
             direct_play_mode: *direct_play_mode,
@@ -583,6 +590,7 @@ impl PlaybackSession {
             // A screen copy is not the live preview. The loop reads the real session.
             preview: false,
             resolved_as_preview: *resolved_as_preview,
+            live: live.clone(),
         }
     }
 }
@@ -5289,6 +5297,52 @@ pub fn sink_max_raster(ps: &PlaybackSession) -> (u16, u16) {
     }
 }
 
+/// The Live TV channel this playback is, if it is one.
+pub fn live(ps: &PlaybackSession) -> Option<&crate::live::LiveSession> {
+    ps.live.as_ref()
+}
+
+/// **Install a Live TV channel as the playback** — the channel's URL, the declaration its probe
+/// measured, and the [`crate::live::LiveSession`] the banner and the channel keys read.
+///
+/// Like [`set_stream_declaration`] (which it uses), this touches neither `cur_rk`/`cur_sid` nor
+/// `tsession`: a channel has no Plex item, so the `/:/timeline` reporter stays unspawned, nothing
+/// is scrobbled and `is_transcoding()` stays false. The previous Plex request is dropped too, so a
+/// failure read-out's *Try again* cannot resolve the film that played before the channel; Live
+/// TV's own retry re-tunes (`app::livetv`). `false` when the declaration was refused, which a
+/// probe's spellings never are.
+pub fn install_live_stream(ps: &mut PlaybackSession, session: crate::live::LiveSession, url: &str) -> bool {
+    let facts = session.facts.unwrap_or(crate::live::StreamFacts::TUNARR_DEFAULT);
+    if !set_stream_declaration(ps, facts.vcodec, facts.acodec, facts.fps, plx_data::metadata::Dovi::default(), false) {
+        return false;
+    }
+    clear_play_verdict(ps);
+    ps.request = None;
+    ps.cur_rk.clear();
+    ps.cur_sid = ServerId::UNSET;
+    ps.tsession.clear();
+    ps.up_next = None;
+    ps.queue.clear();
+    // The channel's raster is not known before the first frame; 1080p is what Tunarr's default
+    // transcode config produces and what the H.264 envelope declares for it.
+    set_stream_source_raster(ps, 1920, 1080);
+    set_url(ps, url);
+    ps.live = Some(session);
+    true
+}
+
+/// Mark the channel as being TUNED (or re-tuned): the session is kept for the banner, the URL is
+/// withdrawn so nothing restarts the previous channel's stream behind the probe.
+pub fn set_live_tuning(ps: &mut PlaybackSession, session: crate::live::LiveSession) {
+    clear_url(ps);
+    ps.live = Some(session);
+}
+
+/// The playback is no longer a Live TV channel.
+pub fn end_live(ps: &mut PlaybackSession) {
+    ps.live = None;
+}
+
 /// The SOURCE raster for a stream the app did not select — the pipeline tier's
 /// `plxnative-playurl` carries it as `source_raster`, the same field its Auto fixtures already
 /// used to size the actuator catalog. One fact, one field: [`sink_max_raster`] reads it from the
@@ -8188,6 +8242,7 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
             now_ms,
             preview,
             resolved_as_preview: preview,
+            live: None,
         };
     } };
     if let (plx_plex::plex::TranscodeDelivery::FixedHls { .. }, Some(rung)) = (

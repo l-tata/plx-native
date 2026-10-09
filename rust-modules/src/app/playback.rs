@@ -688,6 +688,9 @@ pub(crate) fn exit_player(
     pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
 ) {
     plx_media::route::cancel_play(ps); // BACK during a load: supersede, drop the landing
+    // Leaving a live channel ends it: the tuner's pending probe and re-tune schedule read this and
+    // stand down (`app::livetv::pump`).
+    plx_media::route::end_live(ps);
     close_player_overlays(pages);
     plx_media::player::stop_bufferfeed(ps, pa);
     // `stop_bufferfeed` reports/clears a real engine through `report::ended`, but a refusal or a

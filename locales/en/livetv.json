@@ -1,0 +1,108 @@
+{
+  "livetv.tab": {
+    "value": "Live TV",
+    "description": "Live TV: the top tab strip's pill that opens the channel guide"
+  },
+  "livetv.setup.title": {
+    "value": "Live TV",
+    "description": "Live TV setup page: title"
+  },
+  "livetv.setup.body": {
+    "value": "Watch the channels on your Tunarr server. PlxNative can look for it on this network, or you can type its address.",
+    "description": "Live TV setup page: explanation under the title. Tunarr is a product name; keep it."
+  },
+  "livetv.setup.search": {
+    "value": "Search the network",
+    "description": "Live TV setup: button that searches the local network for a Tunarr server"
+  },
+  "livetv.setup.searching": {
+    "value": "Searching the network…",
+    "description": "Live TV setup: the search button while the network search runs"
+  },
+  "livetv.setup.none_found": {
+    "value": "No Tunarr server answered on this network.",
+    "description": "Live TV setup: shown after a network search found nothing"
+  },
+  "livetv.setup.address": {
+    "value": "Enter address",
+    "description": "Live TV setup: button that opens the on-screen keyboard to type the Tunarr server address"
+  },
+  "livetv.setup.address_hint": {
+    "value": "Type Tunarr's IP address. Without a port, :8000 is used",
+    "description": "Live TV setup: placeholder text in the address field while it is empty"
+  },
+  "livetv.setup.retry": {
+    "value": "Try again",
+    "description": "Live TV setup: retry loading the configured server"
+  },
+  "livetv.setup.turn_off": {
+    "value": "Turn off Live TV",
+    "description": "Live TV setup: forget the configured server and hide Live TV"
+  },
+  "livetv.setup.back": {
+    "value": "Back to the guide",
+    "description": "Live TV setup: return to the channel guide without changing the server"
+  },
+  "livetv.setup.failed": {
+    "value": "Couldn’t load the guide from {server}.",
+    "description": "Live TV setup: the configured server could not be loaded. {server} is its address.",
+    "args": {
+      "server": "str"
+    }
+  },
+  "livetv.loading": {
+    "value": "Loading the guide",
+    "description": "Live TV: shown while the channel guide loads"
+  },
+  "livetv.empty": {
+    "value": "This Tunarr server has no channels yet.",
+    "description": "Live TV: the server answered but lists no channels"
+  },
+  "livetv.no_info": {
+    "value": "No guide information",
+    "description": "Live TV guide: a channel time slot with no listing"
+  },
+  "livetv.guide_missing": {
+    "value": "The guide isn’t available. Channels still play.",
+    "description": "Live TV guide: the channel list loaded but the program guide did not"
+  },
+  "livetv.change_server": {
+    "value": "Change server",
+    "description": "Live TV guide: button that opens the setup page to pick another Tunarr server"
+  },
+  "livetv.live": {
+    "value": "LIVE",
+    "description": "Live TV player: the badge marking a live channel. A short mark, all caps."
+  },
+  "livetv.tuning": {
+    "value": "Tuning…",
+    "description": "Live TV player: shown while a channel starts"
+  },
+  "livetv.unavailable": {
+    "value": "This channel isn’t available right now. Press OK to try again.",
+    "description": "Live TV player: a channel could not be started"
+  },
+  "livetv.next": {
+    "value": "Next: {title}",
+    "description": "Live TV player: the program after the current one. {title} is its name.",
+    "args": {
+      "title": "str"
+    }
+  },
+  "settings.livetv.section": {
+    "value": "Live TV",
+    "description": "Settings: section heading for Live TV"
+  },
+  "settings.livetv.title": {
+    "value": "Live TV",
+    "description": "Settings: row that opens Live TV setup"
+  },
+  "settings.livetv.detail": {
+    "value": "Channels from your Tunarr server.",
+    "description": "Settings: description under the Live TV row. Tunarr is a product name."
+  },
+  "settings.livetv.off": {
+    "value": "Off",
+    "description": "Settings: the Live TV row's value while no Tunarr server is set up"
+  }
+}

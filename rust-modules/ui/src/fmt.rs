@@ -337,3 +337,55 @@ pub fn rating_suffix(scale: RatingScale) -> &'static str {
         RatingScale::Percent => "",
     }
 }
+
+/// **A wall-clock time of day**, for the guide's "8:00 PM – 8:30 PM": `epoch_ms` in the
+/// television's local zone (`plx_base::wallclock`), on the clock the set is configured for — the
+/// TV's own 12/24-hour setting when it states one, else the format locale's convention (12-hour for
+/// US English, 24-hour everywhere this app is translated to).
+pub fn wall_time(epoch_ms: i64) -> String {
+    let (h, m) = plx_base::wallclock::local_hm(epoch_ms);
+    hm(h, m, twelve_hour())
+}
+
+/// `h:mm` on the chosen clock. Pure: [`wall_time`] decides the clock.
+pub fn hm(h: u32, m: u32, twelve: bool) -> String {
+    if twelve {
+        let (h12, half) = match h % 24 {
+            0 => (12, "AM"),
+            h @ 1..=11 => (h, "AM"),
+            12 => (12, "PM"),
+            h => (h - 12, "PM"),
+        };
+        format!("{h12}:{m:02}\u{a0}{half}")
+    } else {
+        format!("{:02}:{m:02}", h % 24)
+    }
+}
+
+/// Whether wall times print on the 12-hour clock — see [`wall_time`].
+pub fn twelve_hour() -> bool {
+    let locale = plx_platform::i18n::current();
+    match locale.clock() {
+        plx_platform::i18n::Clock::H12 => true,
+        plx_platform::i18n::Clock::H24 => false,
+        plx_platform::i18n::Clock::Locale => {
+            let f = locale.format_locale();
+            f == "en" || f.starts_with("en-US") || f.starts_with("en-CA")
+        }
+    }
+}
+
+#[cfg(test)]
+mod wall_time_tests {
+    use super::hm;
+
+    #[test]
+    fn both_clocks_spell_the_hour_the_way_their_users_read_it() {
+        assert_eq!(hm(0, 5, true), "12:05\u{a0}AM");
+        assert_eq!(hm(11, 59, true), "11:59\u{a0}AM");
+        assert_eq!(hm(12, 0, true), "12:00\u{a0}PM");
+        assert_eq!(hm(20, 30, true), "8:30\u{a0}PM");
+        assert_eq!(hm(20, 30, false), "20:30");
+        assert_eq!(hm(7, 0, false), "07:00");
+    }
+}

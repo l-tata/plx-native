@@ -636,6 +636,17 @@ pub struct Session {
     /// committed replay fixtures included — serializes exactly as it did before.
     #[serde(default, deserialize_with = "de_soft_deck_press", skip_serializing_if = "is_default_deck_press")]
     pub deck_press: DeckPress,
+    /// **The Tunarr server Live TV reads** — its origin (`http://192.0.2.20:8000`), empty when
+    /// Live TV is not set up. Install-wide like [`Session::playback_quality`]: a tuner on the LAN
+    /// is a fact about the television's network, not about whoever is watching. Skipped when empty
+    /// so a session predating the field serializes exactly as it did before; soft-parsed, so a
+    /// malformed value costs the setting, never the credentials.
+    #[serde(default, deserialize_with = "de_soft_string", skip_serializing_if = "String::is_empty")]
+    pub livetv_source: String,
+    /// The Live TV channel last tuned (its guide number), so the guide opens on it. Empty until a
+    /// channel has played; soft-parsed and omitted while empty, like [`Self::livetv_source`].
+    #[serde(default, deserialize_with = "de_soft_string", skip_serializing_if = "String::is_empty")]
+    pub livetv_channel: String,
     /// **Device-wide ambient memory**: the last hero `UltraBlurColors` envelope Home actually
     /// rendered on this television, so a route in the Settings/first-run family that opens
     /// BEFORE Home has fetched anything this boot — first-run consent moved ahead of the
@@ -748,6 +759,10 @@ struct CanonicalSessionPreferences {
     skip_interval: SkipInterval,
     #[serde(default, deserialize_with = "de_soft_deck_press", skip_serializing_if = "is_default_deck_press")]
     deck_press: DeckPress,
+    #[serde(default, deserialize_with = "de_soft_string", skip_serializing_if = "String::is_empty")]
+    livetv_source: String,
+    #[serde(default, deserialize_with = "de_soft_string", skip_serializing_if = "String::is_empty")]
+    livetv_channel: String,
     #[serde(default, deserialize_with = "de_soft_vec", skip_serializing_if = "Vec::is_empty")]
     plaintext_consent: Vec<PlaintextConsent>,
     #[serde(default, deserialize_with = "de_soft_vec", skip_serializing_if = "Vec::is_empty")]
@@ -786,6 +801,8 @@ impl Default for CanonicalSessionPreferences {
             next_episode_mode: NextEpisodeMode::Countdown,
             skip_interval: SkipInterval::Seconds10,
             deck_press: DeckPress::Details,
+            livetv_source: String::new(),
+            livetv_channel: String::new(),
             plaintext_consent: Vec::new(),
             server_key_pins: Vec::new(),
             audio_enhancements: crate::plex::AudioEnhancements::NONE,
@@ -838,6 +855,8 @@ fn split_public(session: &Session) -> Result<plx_platform::storage::state::Publi
         next_episode_mode: session.next_episode_mode,
         skip_interval: session.skip_interval,
         deck_press: session.deck_press,
+        livetv_source: session.livetv_source.clone(),
+        livetv_channel: session.livetv_channel.clone(),
         plaintext_consent: session.plaintext_consent.clone(),
         server_key_pins: session.server_key_pins.clone(),
         audio_enhancements: session.audio_enhancements,
@@ -912,6 +931,8 @@ pub fn join_canonical(
         next_episode_mode: preferences.next_episode_mode,
         skip_interval: preferences.skip_interval,
         deck_press: preferences.deck_press,
+        livetv_source: preferences.livetv_source.clone(),
+        livetv_channel: preferences.livetv_channel.clone(),
         plaintext_consent: preferences.plaintext_consent,
         server_key_pins: preferences.server_key_pins,
         audio_enhancements: preferences.audio_enhancements,
@@ -945,6 +966,8 @@ fn public_session(public: &plx_platform::storage::state::PublicPayload) -> Sessi
         next_episode_mode: preferences.next_episode_mode,
         skip_interval: preferences.skip_interval,
         deck_press: preferences.deck_press,
+        livetv_source: preferences.livetv_source.clone(),
+        livetv_channel: preferences.livetv_channel.clone(),
         plaintext_consent: preferences.plaintext_consent,
         server_key_pins: preferences.server_key_pins,
         audio_enhancements: preferences.audio_enhancements,
@@ -2348,6 +2371,18 @@ fn is_default_next_episode_mode(mode: &NextEpisodeMode) -> bool {
     *mode == NextEpisodeMode::default()
 }
 
+/// A free-text preference: anything but a JSON string degrades to empty (the setting is lost, the
+/// session is not).
+fn de_soft_string<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Ok(v) = serde_json::Value::deserialize(d) else {
+        return Ok(String::new());
+    };
+    Ok(v.as_str().map(str::to_owned).unwrap_or_default())
+}
+
 /// The skip interval is a preference too: a spelling this build does not know degrades to 10 s.
 fn de_soft_skip_interval<'de, D>(d: D) -> Result<SkipInterval, D::Error>
 where
@@ -2612,6 +2647,26 @@ impl Session {
 
     pub fn deck_press(&self) -> DeckPress {
         self.deck_press
+    }
+
+    pub fn livetv_source(&self) -> &str {
+        &self.livetv_source
+    }
+
+    pub fn with_livetv_source(&self, origin: &str) -> Self {
+        let mut next = self.clone();
+        next.livetv_source = origin.to_owned();
+        next
+    }
+
+    pub fn livetv_channel(&self) -> &str {
+        &self.livetv_channel
+    }
+
+    pub fn with_livetv_channel(&self, number: &str) -> Self {
+        let mut next = self.clone();
+        next.livetv_channel = number.to_owned();
+        next
     }
 
     pub fn with_deck_press(&self, mode: DeckPress) -> Self {
@@ -5731,6 +5786,41 @@ mod deck_press_tests {
 
 /// `Session::skip_interval`: soft-parse, omit-at-default (so committed replay fixtures and every
 /// session written before the field existed serialize unchanged) and round-trip.
+#[cfg(test)]
+mod livetv_source_tests {
+    use super::*;
+
+    #[test]
+    fn absent_or_malformed_is_not_set_up() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"livetv_source": null}),
+            serde_json::json!({"livetv_source": 8000}),
+            serde_json::json!({"livetv_source": ["http://x"]}),
+        ] {
+            let session: Session = serde_json::from_value(value.clone())
+                .unwrap_or_else(|e| panic!("{value}: a bad preference must not fail the session: {e}"));
+            assert_eq!(session.livetv_source(), "", "{value}");
+        }
+    }
+
+    #[test]
+    fn unset_is_not_serialized_and_a_source_round_trips_through_both_formats() {
+        let session = Session::default();
+        assert!(!serde_json::to_string(&session).unwrap().contains("livetv_source"));
+        let prefs = serde_json::to_string(&split_public(&session).unwrap().preferences).unwrap();
+        assert!(!prefs.contains("livetv_source"), "{prefs}");
+
+        let session = Session::default().with_livetv_source("http://192.0.2.20:8000").with_livetv_channel("12");
+        let round: Session = serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
+        assert_eq!(round.livetv_source(), "http://192.0.2.20:8000");
+        let (public, protected) = split_canonical(&session).unwrap();
+        assert_eq!(join_canonical(&public, &protected).unwrap().livetv_source(), "http://192.0.2.20:8000");
+        assert_eq!(public_session(&public).livetv_source(), "http://192.0.2.20:8000");
+        assert_eq!(public_session(&public).livetv_channel(), "12", "the last channel rides with the server");
+    }
+}
+
 #[cfg(test)]
 mod skip_interval_tests {
     use super::*;

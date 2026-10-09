@@ -2076,6 +2076,37 @@ struct AvioState {
     /// a segment body is already complete before feed.
     bounce: Vec<u8>,
     bounce_pos: usize,
+    /// When the current transport stall began on a progressive part, and how many times it has
+    /// been reconnected since — see [`progressive_patience`]. `None` while bytes flow.
+    stalled_since: Option<std::time::Instant>,
+    reconnects: u32,
+}
+
+/// **How long a progressive (direct-play or remux) stream is given to come back** after its
+/// transport failed — the socket's 15 s `SO_RCVTIMEO` or curl's 30 s low-speed limit fired, or the
+/// connection dropped. Within it the part is reopened at the byte the demuxer was reading, with a
+/// pause between attempts, and playback continues from there; only a stall that outlasts it is a
+/// failure. The pipeline holds several seconds of decoded reserve and the HUD shows buffering in
+/// the meantime, so a server that stalls for a minute (a disk spinning up, a NAS under a scrub, a
+/// congested Wi-Fi link on a high-bitrate file) costs a pause instead of the playback.
+///
+/// HLS candidates and the ABR cursor keep their own reserve-funded clocks (`transport_watchdog`,
+/// `acquisition`): this patience applies only where neither is armed.
+pub const PROGRESSIVE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(120);
+/// The pause between two reconnects of a stalled progressive part.
+const PROGRESSIVE_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Does a transport failure on this source get [`PROGRESSIVE_PATIENCE`]? A progressive part whose
+/// size is known (so a byte `Range` can resume it exactly), with no HLS clock armed.
+/// Only a stream that has already delivered body bytes is resumed: a part that never answered is
+/// a refused route (the failure read-out's business), not a stall.
+fn progressive_patience(size: i64, hls_clocked: bool, body_bytes: u64) -> bool {
+    size > 0 && !hls_clocked && body_bytes > 0
+}
+
+/// Whether a stall that began at `since` may still be retried at `now`.
+fn within_patience(since: std::time::Instant, now: std::time::Instant) -> bool {
+    now.saturating_duration_since(since) < PROGRESSIVE_PATIENCE
 }
 
 // TEST ONLY: a deterministic stand-in for the two `Instant::elapsed()` calls that measure
@@ -2482,7 +2513,12 @@ extern "C" fn read_cb(op: *mut c_void, dst: *mut u8, n: c_int) -> c_int {
             }
             if r < 0 {
                 // Teardown was handled above through the AU flag and remains EOF. A negative
-                // result here is therefore a real transport/range failure.
+                // result here is therefore a real transport/range failure — which a progressive
+                // part survives for a while by reconnecting where it was (`PROGRESSIVE_PATIENCE`).
+                let hls_clocked = s.transport_watchdog.is_some() || s.acquisition.is_some();
+                if progressive_patience(s.size, hls_clocked, s.body_bytes) && resume_stalled_progressive(op, s) {
+                    continue;
+                }
                 s.io_failed = true;
                 return AVERROR_IO;
             }
@@ -2494,6 +2530,9 @@ extern "C" fn read_cb(op: *mut c_void, dst: *mut u8, n: c_int) -> c_int {
             }
             if let Some(watchdog) = &mut s.transport_watchdog {
                 watchdog.reset();
+            }
+            if s.stalled_since.take().is_some() {
+                crate::player::log(&format!("ff: stalled stream recovered after {} reconnect(s)", s.reconnects));
             }
             s.body_active_us = s
                 .body_active_us
@@ -2507,6 +2546,44 @@ extern "C" fn read_cb(op: *mut c_void, dst: *mut u8, n: c_int) -> c_int {
             return r;
         }
     }
+}
+
+/// Reconnect a progressive part whose transport just failed, at the byte the demuxer was reading,
+/// pausing between attempts until it answers or [`PROGRESSIVE_PATIENCE`] runs out. `true` when it
+/// is reading again (the caller retries the read); `false` on teardown or when the patience is
+/// spent (the caller reports the failure).
+unsafe fn resume_stalled_progressive(op: *mut c_void, s: &mut AvioState) -> bool {
+    let since = *s.stalled_since.get_or_insert_with(std::time::Instant::now);
+    while within_patience(since, std::time::Instant::now()) {
+        // Pause first: the failure just happened, and reconnecting into the same outage at once
+        // only burns an attempt. Sliced so a teardown is never held for the whole pause.
+        let pause_until = std::time::Instant::now() + PROGRESSIVE_RETRY_PAUSE;
+        while std::time::Instant::now() < pause_until {
+            if crate::aq::aq_is_aborted(s.aq) {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if crate::aq::aq_is_aborted(s.aq) {
+            return false;
+        }
+        s.reconnects = s.reconnects.saturating_add(1);
+        let at = s.off;
+        crate::player::log(&format!(
+            "ff: stalled stream reconnecting at off={at} attempt={} stalled_ms={}",
+            s.reconnects,
+            since.elapsed().as_millis()
+        ));
+        if seek_cb(op, at, SEEK_SET) == at {
+            return true;
+        }
+    }
+    crate::player::log(&format!(
+        "ff: stalled stream gave up after {} s and {} reconnect(s)",
+        PROGRESSIVE_PATIENCE.as_secs(),
+        s.reconnects
+    ));
+    false
 }
 
 extern "C" fn seek_cb(op: *mut c_void, offset: i64, whence: c_int) -> i64 {
@@ -3820,6 +3897,8 @@ unsafe fn hls_input(
             acquisition: Some(acquisition),
             bounce: Vec::new(),
             bounce_pos: 0,
+            stalled_since: None,
+            reconnects: 0,
         }),
         avio: std::ptr::null_mut(),
         fmt: std::ptr::null_mut(),
@@ -7743,6 +7822,8 @@ pub fn demux(
                     acquisition: None,
                     bounce: Vec::new(),
                     bounce_pos: 0,
+                    stalled_since: None,
+                    reconnects: 0,
                 });
                 let buf = av_malloc(65536) as *mut u8;
                 if buf.is_null() {
@@ -8346,6 +8427,28 @@ mod source_teardown_tests;
 #[cfg(test)]
 #[path = "ff_hls_reserve_tests.rs"]
 mod hls_reserve_tests;
+
+#[cfg(test)]
+mod progressive_patience_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_sized_unclocked_stream_that_has_played_is_resumed() {
+        assert!(progressive_patience(1 << 30, false, 4096), "a direct-play part mid-stream");
+        assert!(!progressive_patience(-1, false, 4096), "a progressive transcode has no byte to resume at");
+        assert!(!progressive_patience(1 << 30, true, 4096), "HLS keeps its reserve-funded clocks");
+        assert!(!progressive_patience(1 << 30, false, 0), "a part that never answered is a refusal, not a stall");
+    }
+
+    #[test]
+    fn the_patience_is_two_minutes_from_the_first_failure() {
+        let since = std::time::Instant::now();
+        assert!(within_patience(since, since));
+        assert!(within_patience(since, since + PROGRESSIVE_PATIENCE - std::time::Duration::from_millis(1)));
+        assert!(!within_patience(since, since + PROGRESSIVE_PATIENCE));
+        assert!(PROGRESSIVE_PATIENCE >= std::time::Duration::from_secs(60), "much more lenient than the 15 s socket timeout");
+    }
+}
 
 #[cfg(test)]
 #[path = "ff_stall_guard_tests.rs"]

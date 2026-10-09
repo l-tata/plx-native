@@ -960,6 +960,7 @@ enum RootId {
     Privacy,
     Legal,
     About,
+    LiveTv,
 }
 
 /// The first key of the per-server switches: past every fixed [`RootId`] key.
@@ -977,6 +978,7 @@ impl FormId for RootId {
             RootId::Privacy => 7,
             RootId::Legal => 8,
             RootId::About => 9,
+            RootId::LiveTv => 10,
             // the base; `root_form` adds the position (`item_keyed`)
             RootId::Plaintext(_) => PLAINTEXT_KEY_BASE,
         })
@@ -993,6 +995,8 @@ enum Action {
     TrailerAutoplay,
     /// A server's "connect without encryption" switch.
     Plaintext(ServerMachineId),
+    /// Live TV: close Settings and open the Live TV page's setup.
+    LiveTv,
 }
 
 /// The Settings root: a table of destinations, every row a door (no band; rule 9 in full).
@@ -1079,6 +1083,8 @@ struct RootInputs {
     /// Unencrypted-connection switches, in row order — empty when signed out or when nobody has
     /// an answered/offered plaintext question.
     plaintext: Vec<PlaintextRowInput>,
+    /// The configured Tunarr server's origin, empty when Live TV is off.
+    livetv: String,
 }
 
 /// The Settings root as a [`Form`], built from plain arguments rather than `&self` — see
@@ -1121,6 +1127,18 @@ fn root_form(inputs: &RootInputs) -> Form<RootId, Action, SettingsPage> {
                 .detail(plx_platform::i18n::msg::settings_audio_detail())
                 .chevron(true),
         );
+    // Live TV: the Tunarr server, shown by its host (server-owned text), or Off.
+    let livetv_host = inputs.livetv.split_once("://").map_or(inputs.livetv.as_str(), |(_, rest)| rest);
+    let livetv_row = Row::new(plx_platform::i18n::msg::settings_livetv_title())
+        .detail(plx_platform::i18n::msg::settings_livetv_detail())
+        .chevron(true);
+    let livetv_row = if livetv_host.is_empty() {
+        livetv_row.value(plx_platform::i18n::msg::settings_livetv_off())
+    } else {
+        livetv_row.value(livetv_host).server_value()
+    };
+    let livetv = FormSection::new(plx_platform::i18n::msg::settings_livetv_section())
+        .item(RootId::LiveTv, RowKind::Button, Action::LiveTv, livetv_row);
     let system = FormSection::new(plx_platform::i18n::msg::settings_system_section())
         .item(
             RootId::Language,
@@ -1197,6 +1215,7 @@ fn root_form(inputs: &RootInputs) -> Form<RootId, Action, SettingsPage> {
         .section(system)
         .section(plaintext)
         .section(privacy)
+        .section(livetv)
         .section(about)
 }
 
@@ -1238,10 +1257,12 @@ impl RootPage {
         self.state.auto_sign_in = auto_sign_in;
         self.state.trailer_autoplay = trailer_autoplay;
         self.state.language = plx_platform::i18n::saved_preference();
+        let livetv = sess.livetv_source().to_owned();
         let plaintext = if signed_in { self.plaintext_inputs() } else { Vec::new() };
         let form = root_form(&RootInputs {
             signed_in, multi_user, library_count: directory.pinned_count() as i64,
             auto_sign_in, trailer_autoplay, language: self.state.language, plaintext,
+            livetv,
         });
         let keep = self.form.selected_id().cloned();
         self.form.table.compact = false;
@@ -1330,6 +1351,9 @@ impl RootPage {
         };
         match action {
             Action::Door => {}
+            Action::LiveTv => {
+                fx.push(Fx::App(AppFx::LiveTv(super::registry::LiveTvReq::OpenSetup)));
+            }
             Action::AutoSignIn => {
                 let on = !self.state.auto_sign_in;
                 if let Ok(ticket) = plx_plex::plex::session::queue_update_ticket(move |current|

@@ -1985,6 +1985,8 @@ fn avio_state_for(
         acquisition: Some(runtime),
         bounce: Vec::new(),
         bounce_pos: 0,
+        stalled_since: None,
+        reconnects: 0,
     }
 }
 

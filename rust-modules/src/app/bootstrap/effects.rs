@@ -28,7 +28,7 @@ fn home_command(command: &plx_screens::registry::HomeCmd) -> Value {
         HomeCmd::FocusGrid { row,col } => json!({"focus_grid":[row,col]}),
         HomeCmd::Hero => json!("hero"),
         HomeCmd::FocusStrip(tab) => json!({"focus_strip":match tab {
-            HomeTab::Home => "home", HomeTab::Movies => "movies", HomeTab::Shows => "shows", HomeTab::Search => "search" }}),
+            HomeTab::Home => "home", HomeTab::Movies => "movies", HomeTab::Shows => "shows", HomeTab::Search => "search", HomeTab::LiveTv => "livetv" }}),
         HomeCmd::Flip(delta) => json!({"flip":delta}),
         HomeCmd::SelectHero(index) => json!({"select_hero":index}),
         HomeCmd::PinHero(index) => json!({"pin_hero":index}),
@@ -169,6 +169,7 @@ fn content_request(request: &plx_screens::registry::ContentReq) -> Result<Value,
     use plx_screens::registry::{ContentPanel, ContentReq};
     Ok(match request {
         ContentReq::Push(arg) => json!({"push":content(arg)}),
+        ContentReq::PushShow { sid, rk, season } => json!({"push_show":{"sid":sid.raw(),"rk":rk,"season":season}}),
         ContentReq::Present(arg) => json!({"present":content(arg)}),
         ContentReq::Back => json!("back"),
         ContentReq::PreviewStart { sid, rk, part, vcodec, acodec, title } =>

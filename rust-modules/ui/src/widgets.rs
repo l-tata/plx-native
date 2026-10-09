@@ -2342,6 +2342,31 @@ pub const CHIP_FRAME: Rect = Rect::new(
     CHIP_D,
 );
 
+/// The clock capsule's air either side of its text.
+pub const CLOCK_PAD_X: f32 = theme::space::MD;
+/// The clock's text slot: wider than the widest time it prints (`00:00 PM` at body size, bold), so
+/// the capsule never resizes as the minutes change — and a constant, so the tab strip can keep
+/// clear of it the way it keeps clear of the chip ([`TAB_SIDE_CLEAR`]).
+pub const CLOCK_TEXT_W: f32 = 168.0;
+/// The clock capsule: the right end of the top band, mirroring the profile chip's capsule at the
+/// left (the track's own height and inset).
+pub const CLOCK_FRAME: Rect = Rect::new(
+    crate::consts::SCR_W - crate::consts::MARGIN_X - (CLOCK_TEXT_W + 2.0 * CLOCK_PAD_X),
+    TOP_BAR_Y - TAB_TRACK_PAD,
+    CLOCK_TEXT_W + 2.0 * CLOCK_PAD_X,
+    CHIP_D + 2.0 * TAB_TRACK_PAD,
+);
+
+/// **The top bar's clock** — the time of day at the right end of the tab band, as the official
+/// client shows it. The capsule is the track's flat material (`TAB_TRACK_TOP`/`BOT`, the chip's and
+/// the track's own fallback), so it reads over any backdrop without a glass surface of its own.
+pub fn top_clock(p: Painter, text: &CStr) {
+    let r = CLOCK_FRAME;
+    let boost = theme::GLASS_RIM_LIGHT[3] - theme::GLASS_RIM[3];
+    p.rect_rimmed(r, r.h * 0.5, theme::TAB_TRACK_TOP, theme::TAB_TRACK_BOT, theme::GLASS_RIM, boost);
+    Label::new(text.as_ptr(), theme::size::BODY, theme::TEXT_PRIMARY).bold().h(HAlign::Center).draw(p, r);
+}
+
 /// **The focused capsule's rect — the ONE expression, drawn and priced from the same place.**
 ///
 /// [`profile_chip_with`] draws this and [`CHIP_CAP_MAX_R`] prices it, and until 2026-08-21 they were two
@@ -5533,9 +5558,14 @@ pub const TOP_BAR_BOTTOM: f32 = TOP_BAR_Y + TAB_PILL_H + TAB_TRACK_PAD; // 130
 /// context margin, exactly as the season tabs use their advance.
 const TAB_GAP: f32 = 16.0;
 /// How wide the pill strip may grow before it starts scrolling. The row stays CENTERED, but it
-/// must never reach the profile chip (a focus stop of its own at `MARGIN_X`), so the viewport is
-/// the screen less a symmetric chip-clearing margin, less the track's own inset on both ends.
-const TAB_SIDE_CLEAR: f32 = CHIP_FRAME.x + CHIP_D + theme::space::MD;
+/// must never reach the profile chip (a focus stop of its own at `MARGIN_X`) nor the clock at the
+/// other end ([`CLOCK_FRAME`]), so the viewport is the screen less a symmetric margin clearing the
+/// wider of the two, less the track's own inset on both ends.
+const TAB_SIDE_CLEAR: f32 = {
+    let chip = CHIP_FRAME.x + CHIP_D;
+    let clock = crate::consts::SCR_W - CLOCK_FRAME.x;
+    (if chip > clock { chip } else { clock }) + theme::space::MD
+};
 const TAB_VIEW_MAX: f32 = crate::consts::SCR_W - 2.0 * (TAB_SIDE_CLEAR + TAB_TRACK_PAD);
 /// **The shared top bar's outermost drawn chrome, for the overscan audit**
 /// ([`crate::consts::SAFE`]) — the one band Home, the Library and Search all wear, i.e. the

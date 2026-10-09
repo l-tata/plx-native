@@ -85,7 +85,9 @@ PY
     && ok "the release note quotes this hash" || bad "the note's hash is not the published artifact's"
 
   # Who built it. A person's name here means the gates did not run.
-  UP=$(gh api "repos/GLinnik21/plx-native/releases/tags/$TAG" --jq '[.assets[].uploader.login] | unique | join(",")' 2>/dev/null)
+  # The repository the release was published to: Actions sets GITHUB_REPOSITORY, so a fork's own
+  # release run asks its own repository rather than upstream's (where the tag does not exist).
+  UP=$(gh api "repos/${GITHUB_REPOSITORY:-GLinnik21/plx-native}/releases/tags/$TAG" --jq '[.assets[].uploader.login] | unique | join(",")' 2>/dev/null)
   [ "$UP" = "github-actions[bot]" ] && ok "assets uploaded by CI" \
     || bad "assets uploaded by '$UP' — hand-published, so the build/verify gates were skipped"
 

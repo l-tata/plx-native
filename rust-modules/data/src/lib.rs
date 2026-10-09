@@ -14,6 +14,7 @@
 
 pub mod browse; // Library browse: per-section paged catalog (sparse store + off-thread page fetches)
 pub mod collection; // collection page model: tag resolution, header metadata and paged members
+pub mod livetv; // Live TV: a Tunarr server's HDHomeRun lineup and XMLTV guide, joined (docs/live-tv-plan.md)
 pub mod metadata; // item detail data layer (detail page): full metadata + seasons/episodes + cast + related
 pub mod person; // person/actor page data layer: the header handed in by the cast row + /library/people/{id}/media
 pub mod pms; // the Home catalog: hubs merged across every source

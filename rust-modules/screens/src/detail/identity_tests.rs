@@ -82,7 +82,7 @@ fn body(entry: EntryId, rk: &str) -> DetailScreen {
         related: plx_ui::cards::Shelf::new(entry, &plx_ui::cards::RowStyle::HOME), collection: plx_ui::cards::Shelf::new(entry, &plx_ui::cards::RowStyle::HOME),
         extras: plx_ui::cards::Shelf::new(entry, &plx_ui::cards::RowStyle::EPISODE),
         cast: plx_ui::cards::Shelf::new(entry, &plx_ui::cards::RowStyle::CAST), tabs: TabStrip::new(), season_pop: CtlPop::new(),
-        ctl_pop: CtlPop::new(), disc_unfurl: [Spring::at(0.0); 3],
+        ctl_pop: CtlPop::new(), disc_unfurl: [Spring::at(0.0); hero::DISCS],
         season_metrics: season::Metrics::new(), about_rows: about::Rows::new(),
         ground: AmbientWash::flat(theme::SURFACE_APP), selected: None, spin_ms: 0.0,
         spin_phase: plx_machine::motion::Phase::default(),

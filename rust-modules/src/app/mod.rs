@@ -127,6 +127,7 @@ mod window_activity;
 pub(crate) mod events;
 pub(crate) mod lifecycle;
 pub(crate) mod playback;
+pub(crate) mod livetv;
 mod preferences;
 pub(crate) mod input;
 pub(crate) mod bridge;
@@ -292,8 +293,15 @@ pub(crate) struct App {
     /// already finished by then). See `input::menu_play_tick`, driven every frame beside
     /// `pump_detail()` (`app/run.rs`).
     pub(crate) menu_play_await: Option<MenuPlayAwait>,
+    /// **Live TV's tuner** (`app::livetv`): the stream probe in flight and the re-tune schedule.
+    pub(crate) livetv: livetv::LiveTuner,
     pub(crate) prev: u32,
     pub(crate) refresh_hubs_at: u32,
+    /// When the hubs were last asked for (frame-clock ms) by the post-playback refresh or the
+    /// staleness refresh (`run::hubs_stale`).
+    pub(crate) hubs_asked_at: u32,
+    /// The wall-clock minute the top bar's clock last showed (`bridge::clock_minute_moved`).
+    pub(crate) clock_minute: i64,
     /// The HTTPS retry for servers on a plaintext grant (`plex::grant::UpgradeRetry`), stepped
     /// every frame beside the view-state pump (`app/run.rs`).
     pub(crate) plaintext_upgrade: plx_plex::plex::grant::UpgradeRetry,

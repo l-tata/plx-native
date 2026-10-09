@@ -1,7 +1,7 @@
 # screens/ — the application's owned screens (read before adding or changing one)
 
 Every `Screen` impl the dispatcher mounts, steps, focuses and draws lives here, across
-this directory and the `detail/`, `home/`, `library/`, `player/` and `search/` families. This is
+this directory and the `detail/`, `home/`, `library/`, `livetv/`, `player/` and `search/` families. This is
 the APPLICATION half of the restructure; the library half is `../ui/`, whose
 [`CLAUDE.md`](../../ui/src/CLAUDE.md) carries the token rules, the architecture and the rendering
 policy. Read that one first — its four rules bind here too.

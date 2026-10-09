@@ -224,6 +224,8 @@ fn a_seek_reopen_follows_a_relative_302_and_keeps_its_range() {
         acquisition: None,
         bounce: Vec::new(),
         bounce_pos: 0,
+        stalled_since: None,
+        reconnects: 0,
     };
     let at = seek_cb(&mut state as *mut AvioState as *mut c_void, 2, SEEK_SET);
     let kept_path = match &state.src {

@@ -366,7 +366,9 @@ jobs:
       # The PRODUCTION telemetry endpoints, compiled in from `vars` rather than `secrets`
       # DELIBERATELY — see build-package.yml's own comment on the point. Only SENTRY_AUTH_TOKEN,
       # passed as a secret below, can read or delete the project.
-      telemetry: production
+      # A fork with no telemetry backend sets the repository variable PLX_RELEASE_TELEMETRY to
+      # `none`; build-package.yml refuses that value in GLinnik21/plx-native itself.
+      telemetry: ${{ vars.PLX_RELEASE_TELEMETRY || 'production' }}
       artifact: release-assets
       homebrew-manifest: true
       source-asset: true

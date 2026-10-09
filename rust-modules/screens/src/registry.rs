@@ -64,6 +64,32 @@ pub enum AppFx {
     Player(PlayerReq),
     /// The item context menu's committed row (phase 10) — see [`ItemMenuReq`].
     ItemMenu(ItemMenuReq),
+    /// What the Live TV page and the player's live banner ask of the loop — see [`LiveTvReq`].
+    LiveTv(LiveTvReq),
+}
+
+/// **What Live TV asks of the loop.** Tuning stops whatever is playing, runs the channel's stream
+/// probe on a worker and starts the engine when it lands (`app::livetv`) — the playback session's
+/// `&mut`, the adapter and the navigation, none of which a screen may name (§2.1). So the page and
+/// the banner decide, and the loop performs, exactly as [`PlayerReq`] does for the transport.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LiveTvReq {
+    /// Tune this channel of the store's lineup (an index into `LiveTvView::lineup`).
+    Tune { index: usize },
+    /// The player's CH▲ / CH▼: the channel this many steps from the one playing, wrapping.
+    Step(i32),
+    /// Back to the channel watched before this one.
+    Previous,
+    /// A channel number typed on the remote's digits.
+    Typed(String),
+    /// Tune the playing channel again (a failed tune, a stream that ended).
+    Retry,
+    /// Settings > Live TV: close Settings and open the Live TV page on its setup face.
+    OpenSetup,
+    /// The Live TV page's strip pills and its BACK: the same page-level navigation Search asks for.
+    Tab(HomeTab),
+    Account,
+    Back,
 }
 
 /// A private live receipt. Requests contain account credentials and are intentionally unsupported
@@ -238,6 +264,8 @@ pub enum HomeTab {
     Movies,
     Shows,
     Search,
+    /// Drawn only while a Tunarr server is configured (`LiveTvView::configured`).
+    LiveTv,
 }
 
 /// Addressed bootstrap/diagnostic intentions. They use the same owned step and focus engine as
@@ -838,6 +866,9 @@ pub const PAGE_MEMORY_SHAPE: &str = "PageMemory{None,Detail:{spot:Spot{section:i
 /// Effects cross the screen/loop boundary; screens do not poll one another's pending latches.
 pub enum ContentReq {
     Push(ContentArg),
+    /// Push a show's page opened on one season — *Go to Show* from an episode's page, which lands
+    /// where the episode is, the way the hold menu's row of the same name does.
+    PushShow { sid: plx_plex::plex::ServerId, rk: String, season: i64 },
     Present(ContentArg),
     Back,
     Play { play: PlayIntent, resume_ns: i64 },
@@ -1023,6 +1054,12 @@ pub trait SearchLike: AppLike<Memory = PageMemory> + Sized {
     fn search<'a>(cx: &Cx<'a, Self>) -> plx_data::search::view::SearchView<'a>;
 }
 
+/// A host that publishes the Live TV store's view (the configured Tunarr server's lineup and
+/// guide) for this frame.
+pub trait LiveTvLike: AppLike<Memory = PageMemory> + Sized {
+    fn livetv<'a>(cx: &Cx<'a, Self>) -> plx_data::livetv::LiveTvView<'a>;
+}
+
 /// A host that publishes all three retained Library views captured at the frame split.
 pub trait LibraryLike: AppLike<Memory = PageMemory> + Sized {
     fn listing<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::ListingView<'a>;
@@ -1078,6 +1115,9 @@ pub enum AppMsg {
         /// synchronously start the request before publishing that phase as logical state.
         refresh: DetailRefreshPhase,
     },
+    /// Open the Live TV page on its setup face (Settings > Live TV) — delivered to a mounted Live
+    /// TV page so a page already on the stack shows setup rather than its guide.
+    LiveTvSetup,
     /// The *Also available* surface committed a row: open that copy's own page. The SURFACE names
     /// the destination and the PAGE navigates, which is `LibraryMenu`'s shape (`LibrarySelect`) and
     /// what keeps "what a press means on the Detail page" in one place instead of two.
@@ -1155,6 +1195,8 @@ impl<H: Host<Elem = u32, Fx = AppFx, Msg = AppMsg>> AppLike for H {}
 /// field), so a changed spelling silently disarms a scene rather than failing anything visible.
 pub mod word {
     pub const HOME: &str = "home";
+    /// The Live TV page (`screens::livetv`) — a `route=` word, like Search's.
+    pub const LIVETV: &str = "livetv";
     /// The profile menu (`screens::account_menu`). An `overlay=` word since phase 10 — it was a
     /// `route=` word (`Route::Account`) while the menu was a legacy popover with a route of its
     /// own, and `tests/manifest.json`'s `home-acct-glass` scene was re-keyed with it.
@@ -1499,6 +1541,10 @@ pub enum AppArg {
     /// Playback. Its panels are NOT here — they are entries on the player page's own
     /// `ModalStack` ([`Self::PlayerOverlay`]), and the container owns which one is up.
     Player,
+    /// **Live TV**: the configured Tunarr server's guide, or its setup when there is none. A PEER
+    /// of Home, the Library and Search, reached from the strip's Live TV pill (drawn only while a
+    /// server is configured) and from Settings > Live TV.
+    LiveTv,
     /// A page with an ITEM IDENTITY — a detail page, a person page, a filmography. Two of these
     /// are two entries (`person → detail → person` is three), which is the whole reason the
     /// identity rides on the argument instead of being a variant of a page alphabet.
@@ -1510,7 +1556,7 @@ pub enum AppArg {
     FirstRunConsent(u8),
 }
 
-pub const ARG_SHAPE: &str = "AppArg{Login,Profiles,Onboard,Home,Library,Search,Player,Content:{Detail{sid:u32,rk:str},Person{sid:u32,key:str,guid:str,name:str,thumb:str},Filmography{sid:u32,key:str},Collection{sid:u32,rk:str,sec:i64,tag:i64,name:str}},Settings:SettingsPage{Root,Playback,AudioSubtitles,Favourites,Privacy,Legal,About,Document(u8),Preview(u8),ConsentStage(u8),Language,Contribute},FirstRunConsent(u8),LibraryMenu{host:u32,target:{epoch:u32,sid:u32,section:u64},kind:u32,anchor:[u32;4]},\
+pub const ARG_SHAPE: &str = "AppArg{Login,Profiles,Onboard,Home,Library,Search,Player,LiveTv,Content:{Detail{sid:u32,rk:str},Person{sid:u32,key:str,guid:str,name:str,thumb:str},Filmography{sid:u32,key:str},Collection{sid:u32,rk:str,sec:i64,tag:i64,name:str}},Settings:SettingsPage{Root,Playback,AudioSubtitles,Favourites,Privacy,Legal,About,Document(u8),Preview(u8),ConsentStage(u8),Language,Contribute},FirstRunConsent(u8),LibraryMenu{host:u32,target:{epoch:u32,sid:u32,section:u64},kind:u32,anchor:[u32;4]},\
      PlayerOverlay{Tracks(tab:i32),Info,Chapters,More(quality:bool)},\
      AltSources{host:u32,sid:u32,rk:str,anchor:[u32;4]},\
      TracksPanel{page:i32},AboutPanel,PersonBio,CollectionAbout,AccountMenu,\
@@ -1547,6 +1593,8 @@ impl LogicalState for AppArg {
             Self::Library => { c.u32(0).u32(6); }
             Self::Search => { c.u32(0).u32(9); }
             Self::Player => { c.u32(0).u32(10); }
+            // 11: the next page tag, allocated forward like every other.
+            Self::LiveTv => { c.u32(0).u32(11); }
             Self::Content(arg) => { c.u32(1); arg.write(c); }
             Self::Settings(page) => { c.u32(2); page.write(c); }
             Self::FirstRunConsent(stage) => { c.u32(3).u8(*stage); }
@@ -1563,7 +1611,7 @@ impl plx_ui::screen::ScreenArg for AppArg {
     /// them fade the bar with the page.
     fn chrome(&self) -> Chrome {
         match self {
-            AppArg::Home | AppArg::Library | AppArg::Search => Chrome::TabBar,
+            AppArg::Home | AppArg::Library | AppArg::Search | AppArg::LiveTv => Chrome::TabBar,
             AppArg::Login
             | AppArg::Profiles
             | AppArg::Onboard
@@ -1616,6 +1664,8 @@ impl plx_ui::screen::ScreenArg for AppArg {
             AppArg::Library => 7,
             AppArg::Search => 10,
             AppArg::Player => 11,
+            // 25, allocated forward.
+            AppArg::LiveTv => 25,
             // The ROOT payload is a boot address, not an identity: one Settings surface and one
             // consent question, whichever page each happens to have been rooted at.
             AppArg::Settings(_) => 12,
@@ -1702,7 +1752,7 @@ pub struct AppMounter {
 /// it for its own host exactly as the dispatcher instantiates everything else.
 impl<H> Mounter<H> for AppMounter
 where
-    H: plx_machine::machine::Host<Arg = AppArg> + HomeLike + LibraryLike + SearchLike + PlayerLike + AuthLike + PersonLike + CollectionLike + MetadataLike,
+    H: plx_machine::machine::Host<Arg = AppArg> + HomeLike + LibraryLike + SearchLike + PlayerLike + AuthLike + PersonLike + CollectionLike + MetadataLike + LiveTvLike,
 {
     fn mount(
         &mut self,
@@ -1808,6 +1858,7 @@ where
                 if let PageMemory::Search(memory) = &ret.memory { page.restore(memory); }
                 Box::new(page)
             }
+            AppArg::LiveTv => Box::new(crate::livetv::LiveTvScreen::new(entry, id)),
             // Phase 9: the player is an OWNED screen — the instance that holds the HUD, the scrub
             // gesture, the held-key timer, the control row's springs and the Up Next countdown,
             // and that answers `RenderStrategy::VideoPlane`. Its transport is pinned from the
@@ -1923,6 +1974,7 @@ pub fn every_surface_arg() -> Vec<AppArg> {
             | AppArg::Library
             | AppArg::Search
             | AppArg::Player
+            | AppArg::LiveTv
             | AppArg::Content(_) => {
                 panic!("a page argument is not a surface: its word is `route=`")
             }
@@ -1979,6 +2031,7 @@ pub const SCREEN_SHAPES: &[&str] = &[
     "LocalizationSettingsV4{Root:{language:system|en|es|be},Language:{selected:system|en|es|be,focus:u32,busy:bool,failed:bool},Contribute:QrLink,LoginReportAlert:{send:bool,scroll_target_bits:u32},ConsentDisclosure:{scroll_target_bits:u32,scroll_owner:answer_band},ConsentDeleteDisclosure:{scroll_target_bits:u32},BandPart:MeasuredRowOrColumn}",
     crate::preferences::SHAPE,
     crate::preferences::PICKER_SHAPE,
+    crate::livetv::SHAPE,
 ];
 
 /// The pin over [`SCREEN_SHAPES`] — bump it in the same edit that adds an entry, and say why.
@@ -2087,7 +2140,14 @@ pub const SCREEN_SHAPES: &[&str] = &[
 // Person adopts `cards::Stack` (cards-stack PR 5): its logical state gains the stack's motion canon
 // (`stack:Stack{scroll,target,sections}`), the same as Collection's; the previous pin was
 // 0xbc1d_d51d_5b11_1273.
-const SCREEN_SHAPES_PIN: u64 = 0xdb39_f424_a0be_5fd2;
+// Live TV (the Tunarr guide page): `crate::livetv::SHAPE` joins the array, `ARG_SHAPE` gains
+// `LiveTv`, and the player's logical state gains the live channel-number entry; the previous pin was
+// 0xdb39_f424_a0be_5fd2.
+// Live TV remembers the last channel: `LiveTvScreen` gains `remembered:str,seated:bool`; the
+// previous pin was 0x9abb_00af_1328_f006.
+// Surfing a live channel: `PlayerScreen` gains `live_surf:Option<u64>,live_surf_at:u32`; the
+// previous pin was 0xca0b_b38c_342f_5aae.
+const SCREEN_SHAPES_PIN: u64 = 0x44ad_9627_b6a6_d3ad;
 
 #[cfg(test)]
 mod arg_tests {

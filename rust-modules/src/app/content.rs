@@ -475,6 +475,7 @@ pub(crate) fn content_requests(app: &mut App, fr: &Frame) {
     home_requests(app, fr.now);
     library_requests(app, fr.now);
     search_requests(app);
+    super::livetv::requests(app, fr.now);
     // The player's overlays are surfaces on its own stack, so what they decide reaches the
     // loop the same way every other owned screen's decision does — as requests, drained here,
     // after the dispatcher and before the frame's own arms (`playback::player_requests`).
@@ -515,6 +516,11 @@ pub(crate) fn content_requests(app: &mut App, fr: &Frame) {
                 // being re-read at the commit: the user can still move focus during the dip, and
                 // BACK must return them to where they pressed.
                 bridge::nav_push_with_return(&mut app.pages, AppArg::Content(arg), ret);
+            }
+            ContentReq::PushShow { sid, rk, season } => {
+                halt_preview(app);
+                let season = (season > 0).then(|| std::os::raw::c_int::try_from(season).ok()).flatten();
+                bridge::open_detail(&mut app.pages, &mut app.bridge, sid, &rk, season, Some(ret));
             }
             ContentReq::Present(arg) => {
                 halt_preview(app);
