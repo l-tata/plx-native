@@ -807,6 +807,12 @@ impl Client {
         }
     }
 
+    /// Any body-less verb → its HTTP status, `None` when nothing answered (`DELETE /playlists/{id}`).
+    #[track_caller]
+    pub(super) fn send_status(&self, path_no_token: &str, method: Method) -> Option<i32> {
+        self.send(path_no_token, method, &[]).map(|reply| reply.status)
+    }
+
     /// PUT (no body) — returns the HTTP status (all `select_streams` reads), or `-1` when the
     /// request never completed. `-1` is the value the `stream.rs` wrapper this replaced always
     /// returned for a transport failure, and it is kept because a caller reading a status must not

@@ -40,6 +40,15 @@ pub struct Program {
     pub art: String,
     pub audience_rating: f64,
     pub watched: bool,
+    /// The library section the programme is in.
+    pub section: i64,
+    pub directors: Vec<String>,
+    pub actors: Vec<String>,
+    pub collections: Vec<String>,
+    pub labels: Vec<String>,
+    /// Unix seconds; 0 when the server did not say.
+    pub added_at: i64,
+    pub last_viewed_at: i64,
 }
 
 impl Program {

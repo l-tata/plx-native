@@ -365,6 +365,8 @@ pub struct Metadata {
     pub view_offset: i64, // ms; resume point
     #[serde(rename = "lastViewedAt", default, deserialize_with = "de_i64")]
     pub last_viewed_at: i64, // unix secs; drives Continue Watching recency sort
+    #[serde(rename = "addedAt", default, deserialize_with = "de_i64")]
+    pub added_at: i64, // unix secs; when the server added the item (virtual channels' "new" signal)
     /// Collection rows use this as their tag id (distinct from `ratingKey`).
     #[serde(default, deserialize_with = "de_i64")]
     pub index: i64, // season/episode number
@@ -412,6 +414,11 @@ pub struct Metadata {
     pub writer: Vec<Tag>,
     #[serde(rename = "Role", default)]
     pub role: Vec<Tag>,
+    /// The collections and labels a listing row names (virtual channels' rules and suggestions).
+    #[serde(rename = "Collection", default)]
+    pub collection: Vec<Tag>,
+    #[serde(rename = "Label", default)]
+    pub label: Vec<Tag>,
     #[serde(rename = "Chapter", default)]
     pub chapter: Vec<Chapter>,
     #[serde(rename = "Marker", default)]

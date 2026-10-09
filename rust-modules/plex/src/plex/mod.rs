@@ -30,6 +30,8 @@ mod servers;
 mod hubs;
 mod library;
 pub mod collections;
+mod playlists; // a virtual channel's playlist: create, edit, replace items, delete
+pub use playlists::PLAYLIST_ITEMS_MAX;
 /// Agent-backed subtitle search & download. `docs/pms-api.md` §8 is the verified contract; the
 /// bundled OpenAPI spec is wrong about this endpoint and must not be read as authority for it.
 pub mod subtitles;
