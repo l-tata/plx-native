@@ -24,7 +24,7 @@ const ENTRY: EntryId = EntryId(9);
 
 fn item(rk: &str) -> PmsMovie { PmsMovie { rk: rk.into(), title: rk.into(), ..Default::default() } }
 fn set() -> CollectionRef {
-    CollectionRef { sid: plx_plex::plex::ServerId::UNSET, rk: "50001".into(), sec: 1, tag: 7, name: "Set".into() }
+    CollectionRef { sid: plx_plex::plex::ServerId::UNSET, rk: "50001".into(), sec: 1, tag: 7, name: "Set".into(), playlist: false }
 }
 
 pub(crate) struct Harness {

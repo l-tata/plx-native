@@ -130,9 +130,12 @@ impl ServerId {
     pub const fn from_raw(v: u16) -> ServerId {
         ServerId(v)
     }
-    /// Slot index, `None` for UNSET — the one place the reserved value is turned away.
+    /// Slot index, `None` for UNSET and for any id past [`MAX_SERVERS`] — the one place an id that
+    /// can name no slot is turned away. The second half is not hypothetical: the image store keys
+    /// art that lives outside Plex under a raw id no registry slot can have (`ui::tex::PLAIN_URL`),
+    /// and the slot masks here are `1u32 << index`, which overflows for any such id.
     fn index(self) -> Option<usize> {
-        self.is_set().then_some(self.0 as usize)
+        (self.is_set() && (self.0 as usize) < MAX_SERVERS).then_some(self.0 as usize)
     }
 }
 
@@ -1517,6 +1520,17 @@ mod tests {
 
     fn reg(machine_id: &str, host: &str, token: &str) -> ServerId {
         register_with_client_id(machine_id, host, 32400, token, "test-client-id")
+    }
+
+    #[test]
+    fn an_id_past_the_slot_ceiling_resolves_to_nothing_and_does_not_panic() {
+        let _g = fresh();
+        reg("synthetic-machine", "127.0.0.1", "synthetic-token");
+        for raw in [MAX_SERVERS as u16, u16::MAX - 1] {
+            let id = ServerId::from_raw(raw);
+            assert!(id.is_set());
+            assert!(client_for(id).is_none(), "{raw}");
+        }
     }
 
     #[test]

@@ -6,7 +6,10 @@
 //! * [`hdhr`] — the HDHomeRun HTTP surface, parsed.
 //! * [`xmltv`] — the guide, parsed as a stream over a window of time.
 //! * [`guide`] — the two joined: [`guide::Lineup`], the model every Live TV surface reads.
+//! * [`on_now`] — Home's live shelf: one card per channel, the last-tuned first.
 //! * [`source`] — the blocking reads and the LAN search, run by the store's workers.
+//! * [`plexmatch`] — whether an airing is in the viewer's Plex library, so the guide can offer it
+//!   from the start.
 //!
 //! [`LiveTvState`] is the store's logical state; `stores::livetv` puts the command vocabulary and
 //! the machine in front of it, like every other store. The configured server's address is an
@@ -15,12 +18,16 @@
 
 pub mod guide;
 pub mod hdhr;
+pub mod plexmatch;
+pub mod on_now;
 pub mod source;
 pub mod xmltv;
 
 use guide::Lineup;
 use hdhr::Device;
+use plexmatch::{Hit, Scope, Want};
 use source::{FetchError, Found};
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 
@@ -53,6 +60,31 @@ pub enum Discovery {
 
 type LoadResult = Result<(Device, Lineup, Option<FetchError>), FetchError>;
 
+/// Whether an airing is in the viewer's Plex library ([`plexmatch`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlexMatch {
+    /// A lookup is in flight.
+    Looking,
+    /// Not found, or not confidently: the guide offers nothing.
+    None,
+    Found(Hit),
+}
+
+/// Lookups in flight at once: one. A guide walk asks for a title every ~600 ms of dwell, and a
+/// lookup is up to a handful of searches per server; a second worker would only race the first to
+/// the same servers. A refused ask is asked again by the page while the cursor rests.
+const MATCH_IN_FLIGHT: usize = 1;
+/// Answers kept before the cache is emptied wholesale (a day of guide is a few hundred titles).
+const MATCH_CACHE_MAX: usize = 512;
+
+/// The Plex-match cache and its one worker.
+#[derive(Default)]
+struct Matches {
+    scope: Option<Scope>,
+    answers: HashMap<String, PlexMatch>,
+    pending: Vec<(String, Receiver<Option<Hit>>)>,
+}
+
 /// The store's logical state. Workers own nothing here: they answer through a channel the pump
 /// drains on the frame thread.
 pub struct LiveTvState {
@@ -68,6 +100,7 @@ pub struct LiveTvState {
     epoch: u64,
     load: Option<(u64, Receiver<LoadResult>)>,
     search: Option<Receiver<Vec<Found>>>,
+    matches: Matches,
     revision: u64,
 }
 
@@ -84,6 +117,7 @@ impl Default for LiveTvState {
             epoch: 0,
             load: None,
             search: None,
+            matches: Matches::default(),
             revision: 0,
         }
     }
@@ -104,6 +138,9 @@ pub enum LiveTvCmd {
     RefreshIfStale,
     /// Search the LAN for Tunarr.
     Discover,
+    /// Look `want` up in the viewer's Plex library, unless it already has been (for this roster
+    /// and profile) or is being.
+    Match(Want),
     /// Drop everything, the configured server included (tests).
     Reset,
 }
@@ -142,6 +179,21 @@ impl<'a> LiveTvView<'a> {
     /// Is a load in flight (first load or reload)?
     pub fn loading(&self) -> bool {
         self.state.load.is_some()
+    }
+    /// What is known about `key` ([`Want::key`]) in the viewer's Plex library — `None` until it is
+    /// asked, and for an answer found under another roster or profile.
+    pub fn plex_match(&self, key: &str) -> Option<&'a PlexMatch> {
+        let m = &self.state.matches;
+        if m.scope.as_ref() != Some(&Scope::current()) {
+            return None;
+        }
+        m.answers.get(key)
+    }
+    /// Is `hit` an answer this store found (for the current roster and profile)? What the loop
+    /// checks before it opens an item a page asked for, so a stale or forged request opens nothing.
+    pub fn knows_match(&self, hit: &Hit) -> bool {
+        let m = &self.state.matches;
+        m.scope.as_ref() == Some(&Scope::current()) && m.answers.values().any(|a| *a == PlexMatch::Found(hit.clone()))
     }
     /// Moves whenever anything above moves.
     pub fn revision(&self) -> u64 {
@@ -189,6 +241,7 @@ impl LiveTvState {
                 stale && self.start_load()
             }
             LiveTvCmd::Discover => self.start_search(),
+            LiveTvCmd::Match(want) => self.start_match(want),
             LiveTvCmd::Reset => {
                 *self = LiveTvState { revision: self.revision, epoch: self.epoch + 1, ..LiveTvState::default() };
                 true
@@ -252,6 +305,63 @@ impl LiveTvState {
         true
     }
 
+    fn start_match(&mut self, want: Want) -> bool {
+        let scope = Scope::current();
+        let m = &mut self.matches;
+        if m.scope.as_ref() != Some(&scope) {
+            // Another roster or profile: every answer (and every lookup in flight) is stale.
+            m.scope = Some(scope);
+            m.answers.clear();
+            m.pending.clear();
+        }
+        let key = want.key();
+        if m.answers.contains_key(&key) || m.pending.len() >= MATCH_IN_FLIGHT || crate::stores::tape::active() {
+            return false;
+        }
+        if m.answers.len() >= MATCH_CACHE_MAX {
+            m.answers.retain(|_, v| *v == PlexMatch::Looking);
+        }
+        let (tx, rx) = mpsc::channel();
+        let spawned = plx_base::task::spawn_small("livetv-plexmatch", move || {
+            let _ = tx.send(plexmatch::lookup(&want));
+            plx_machine::idle::wake();
+        });
+        if !spawned {
+            return false;
+        }
+        m.answers.insert(key.clone(), PlexMatch::Looking);
+        m.pending.push((key, rx));
+        true
+    }
+
+    /// Land the Plex-match lookups that finished. `true` when an answer arrived.
+    fn pump_matches(&mut self) -> bool {
+        let mut changed = false;
+        let m = &mut self.matches;
+        m.pending.retain(|(key, rx)| match rx.try_recv() {
+            Ok(found) => {
+                m.answers.insert(key.clone(), found.map_or(PlexMatch::None, PlexMatch::Found));
+                changed = true;
+                false
+            }
+            Err(TryRecvError::Empty) => true,
+            Err(TryRecvError::Disconnected) => {
+                m.answers.insert(key.clone(), PlexMatch::None);
+                changed = true;
+                false
+            }
+        });
+        changed
+    }
+
+    /// Answer `want` without a worker (tests).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_match_for_test(&mut self, want: &Want, answer: PlexMatch) {
+        self.matches.scope = Some(Scope::current());
+        self.matches.answers.insert(want.key(), answer);
+        self.revision += 1;
+    }
+
     /// Drain the workers. `true` when a landing changed anything.
     pub fn pump(&mut self, now_ms: i64) -> bool {
         let mut changed = false;
@@ -290,6 +400,7 @@ impl LiveTvState {
                 }
             }
         }
+        changed |= self.pump_matches();
         if changed {
             self.revision += 1;
             plx_machine::idle::invalidate();
@@ -451,6 +562,42 @@ mod tests {
         assert!(s.view().lineup().is_empty());
         assert_eq!(*s.view().status(), Status::Unconfigured);
         assert!(!s.run(LiveTvCmd::Forget, 0), "nothing left to forget");
+    }
+
+    #[test]
+    fn a_plex_match_is_asked_once_and_lands_through_the_pump() {
+        let _g = plx_base::testlock::serial();
+        plx_plex::plex::reset_servers_for_test();
+        let mut s = LiveTvState::default();
+        let want = Want::Film { title: "Sintel".into(), year: None };
+        assert_eq!(s.view().plex_match(&want.key()), None, "never asked");
+        assert!(s.run(LiveTvCmd::Match(want.clone()), 0));
+        assert_eq!(s.view().plex_match(&want.key()), Some(&PlexMatch::Looking));
+        assert!(!s.run(LiveTvCmd::Match(want.clone()), 0), "asked once");
+        let other = Want::Film { title: "Big Buck Bunny".into(), year: None };
+        assert!(!s.run(LiveTvCmd::Match(other.clone()), 0), "one lookup in flight at a time");
+        // No servers are registered, so the real worker answers "not found" at once.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !s.pump(0) {
+            assert!(std::time::Instant::now() < deadline, "the lookup never landed");
+            std::thread::yield_now();
+        }
+        assert_eq!(s.view().plex_match(&want.key()), Some(&PlexMatch::None));
+        assert!(s.run(LiveTvCmd::Match(other), 0), "the slot is free again");
+    }
+
+    #[test]
+    fn a_plex_answer_from_another_profile_is_not_shown() {
+        let mut s = LiveTvState::default();
+        let want = Want::Film { title: "Sintel".into(), year: None };
+        s.set_match_for_test(&want, PlexMatch::Found(Hit { sid: plx_plex::plex::ServerId::from_raw(0), rk: "1".into() }));
+        assert!(matches!(s.view().plex_match(&want.key()), Some(PlexMatch::Found(_))));
+        let hit = Hit { sid: plx_plex::plex::ServerId::from_raw(0), rk: "1".into() };
+        assert!(s.view().knows_match(&hit));
+        assert!(!s.view().knows_match(&Hit { rk: "2".into(), ..hit.clone() }), "only what was found");
+        s.matches.scope = Some(Scope { roster: u32::MAX, profile: "someone-else".into() });
+        assert_eq!(s.view().plex_match(&want.key()), None);
+        assert!(!s.view().knows_match(&hit), "nor under another profile");
     }
 
     #[test]

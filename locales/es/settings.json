@@ -169,6 +169,10 @@
   "settings.playback.next_episode.countdown": "Cuenta atrás de A continuación",
   "settings.playback.next_episode.after_credits": "Después de los créditos",
   "settings.playback.next_episode.off": "Desactivado",
+  "settings.playback.auto_skip": "Saltar introducción y créditos",
+  "settings.playback.auto_skip.off": "Desactivado",
+  "settings.playback.auto_skip.intro": "Saltar introducción",
+  "settings.playback.auto_skip.intro_credits": "Saltar introducción y créditos",
   "settings.playback.deck_press": "Continuar viendo",
   "settings.playback.deck_press.details": "Abrir detalles",
   "settings.playback.deck_press.play": "Reproducir",
@@ -191,6 +195,7 @@
   "settings.playback.subtitle_size.copy": "El tamaño del texto de los subtítulos. Los subtítulos de imagen y con estilo mantienen el suyo. También en Estilo, dentro del menú Subtítulos del reproductor.",
   "settings.playback.subtitle_position.copy": "A qué altura aparecen los subtítulos en la imagen. Los de imagen y con estilo mantienen su posición. También en Estilo, dentro del menú Subtítulos del reproductor.",
   "settings.playback.next_episode.copy": "Cuenta atrás de A continuación muestra un botón Siguiente episodio al empezar los créditos. Después de los créditos los deja terminar e inicia el siguiente episodio. Desactivado cierra el reproductor.",
+  "settings.playback.auto_skip.copy": "Salta las introducciones, y también los créditos si lo eliges, en cuanto empiezan. Izquierda o el botón Volver en pantalla regresa al principio. Los créditos nunca se saltan mientras la cuenta atrás de A continuación lleva al siguiente episodio.",
   "settings.playback.deck_press.copy": "Abrir detalles muestra la página de la película o del episodio al pulsar OK en una tarjeta de Continuar viendo. Reproducir la inicia o la reanuda al instante. El menú de la tarjeta, que se abre manteniendo pulsado OK, siempre ofrece la otra opción.",
   "settings.playback.skip_interval.copy": "Cuánto salta el reproductor con cada pulsación de Izquierda o Derecha.",
   "settings.playback.enable_force": "Forzar",
@@ -293,5 +298,12 @@
   "settings.consent.placeholder.random_id": "id aleatorio",
   "settings.consent.placeholder.project_key": "clave del proyecto",
   "settings.consent.placeholder.app_version": "versión de la app",
-  "settings.consent.placeholder.webos_codename_short": "nombre en clave de webOS"
+  "settings.consent.placeholder.webos_codename_short": "nombre en clave de webOS",
+  "settings.playback.screensaver": "Salvapantallas",
+  "settings.playback.screensaver.off": "Desactivado",
+  "settings.playback.screensaver.min2": "Tras 2 minutos",
+  "settings.playback.screensaver.min5": "Tras 5 minutos",
+  "settings.playback.screensaver.min10": "Tras 10 minutos",
+  "settings.playback.screensaver.min20": "Tras 20 minutos",
+  "settings.playback.screensaver.copy": "Si no pulsas nada durante un rato en una página de navegación, la pantalla pasa a una presentación de ilustraciones de tu biblioteca con la hora. Cualquier botón devuelve la página. Nunca empieza durante la reproducción."
 }

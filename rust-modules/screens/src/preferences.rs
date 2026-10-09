@@ -19,7 +19,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::mpsc::{self, Receiver};
 use plx_plex::plex::account::{AudioPreferences, PreferenceError, PreferenceRequest, PreferenceSnapshot, PreferenceUpdate};
-use plx_media::route::{DeckPress, DirectPlayMode, NextEpisodeMode, Quality, SkipInterval, SubtitlePosition, SubtitleSize};
+use plx_media::route::{AutoSkip, DeckPress, Screensaver, DirectPlayMode, NextEpisodeMode, Quality, SkipInterval, SubtitlePosition, SubtitleSize};
 use plx_ui::form::{Form, FormId, FormSection, FormTable, RowKey, RowKind};
 use plx_ui::frame::Budget;
 use plx_machine::machine::{Canon, Cx, Delivery, Edge, Effects, EntryId, FocusKey, Fx, GroupId,
@@ -47,6 +47,8 @@ impl PickerKind {
         Self::NextEpisode => plx_platform::i18n::msg::settings_playback_next_episode(),
         Self::DeckPress => plx_platform::i18n::msg::settings_playback_deck_press(),
         Self::SkipInterval => plx_platform::i18n::msg::settings_playback_skip_interval(),
+        Self::AutoSkip => plx_platform::i18n::msg::settings_playback_auto_skip(),
+        Self::Screensaver => plx_platform::i18n::msg::settings_playback_screensaver(),
         Self::AudioLanguage => plx_platform::i18n::msg::settings_audio_language(), Self::SubtitleMode => plx_platform::i18n::msg::settings_audio_subtitles(),
         Self::SubtitleLanguage => plx_platform::i18n::msg::settings_audio_subtitle_language(), Self::ForcedSubtitles => plx_platform::i18n::msg::settings_audio_forced_subtitles(),
     }}
@@ -60,12 +62,14 @@ impl PickerKind {
         Self::NextEpisode => plx_platform::i18n::msg::settings_playback_next_episode_copy(),
         Self::DeckPress => plx_platform::i18n::msg::settings_playback_deck_press_copy(),
         Self::SkipInterval => plx_platform::i18n::msg::settings_playback_skip_interval_copy(),
+        Self::AutoSkip => plx_platform::i18n::msg::settings_playback_auto_skip_copy(),
+        Self::Screensaver => plx_platform::i18n::msg::settings_playback_screensaver_copy(),
         Self::AudioLanguage | Self::SubtitleMode | Self::SubtitleLanguage | Self::ForcedSubtitles => plx_platform::i18n::msg::settings_audio_account_note(),
     }}
     /// The field-list page this field belongs to.
     fn kind(self) -> Kind {
         match self {
-            Self::Quality | Self::DirectPlay | Self::SubtitleSize | Self::SubtitlePosition | Self::NextEpisode | Self::DeckPress | Self::SkipInterval => Kind::Playback,
+            Self::Quality | Self::DirectPlay | Self::SubtitleSize | Self::SubtitlePosition | Self::NextEpisode | Self::DeckPress | Self::SkipInterval | Self::AutoSkip | Self::Screensaver => Kind::Playback,
             Self::AudioLanguage | Self::SubtitleMode | Self::SubtitleLanguage | Self::ForcedSubtitles => Kind::AudioSubtitles,
         }
     }
@@ -81,7 +85,7 @@ impl Kind {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Value { Quality(Quality), DirectPlay(DirectPlayMode), SubtitleSize(SubtitleSize), SubtitlePosition(SubtitlePosition), NextEpisode(NextEpisodeMode), DeckPress(DeckPress), SkipInterval(SkipInterval), Language(String), Mode(i64), Forced(i64) }
+enum Value { Quality(Quality), DirectPlay(DirectPlayMode), SubtitleSize(SubtitleSize), SubtitlePosition(SubtitlePosition), NextEpisode(NextEpisodeMode), DeckPress(DeckPress), SkipInterval(SkipInterval), AutoSkip(AutoSkip), Screensaver(Screensaver), Language(String), Mode(i64), Forced(i64) }
 
 /// The hashed half of a transaction: what the page shows while a load or save is in flight.
 struct Io { busy: bool, status: String }
@@ -211,6 +215,8 @@ impl Txn {
             Value::NextEpisode(mode) => PreferenceCmd::NextEpisode { mode, reply },
             Value::DeckPress(mode) => PreferenceCmd::DeckPress { mode, reply },
             Value::SkipInterval(interval) => PreferenceCmd::SkipInterval { interval, reply },
+            Value::AutoSkip(mode) => PreferenceCmd::AutoSkip { mode, reply },
+            Value::Screensaver(mode) => PreferenceCmd::Screensaver { mode, reply },
             _ => return,
         };
         self.pending = Some(Pending::Local(rx)); io.busy = true; self.saving = true;
@@ -284,6 +290,8 @@ impl FormId for RowId {
             Self::Field(PickerKind::NextEpisode) => 4,
             Self::Field(PickerKind::SkipInterval) => 5,
             Self::Field(PickerKind::DeckPress) => 7,
+            Self::Field(PickerKind::AutoSkip) => 8,
+            Self::Field(PickerKind::Screensaver) => 9,
             Self::Retry => 6,
         })
     }
@@ -321,6 +329,8 @@ pub struct PreferencesPage {
     next_episode: NextEpisodeMode,
     deck_press: DeckPress,
     skip_interval: SkipInterval,
+    auto_skip: AutoSkip,
+    screensaver: Screensaver,
 }
 impl PreferencesPage {
     pub fn new(entry: EntryId, kind: Kind) -> Self {
@@ -330,7 +340,8 @@ impl PreferencesPage {
             copy: String::new(), txn: Txn::new(false),
             look: (plx_media::route::subtitle_size(), plx_media::route::subtitle_position()),
             next_episode: plx_media::route::next_episode_mode(), deck_press: plx_media::route::deck_press(),
-            skip_interval: plx_media::route::skip_interval() };
+            skip_interval: plx_media::route::skip_interval(), auto_skip: plx_media::route::auto_skip(),
+            screensaver: plx_media::route::screensaver() };
         s.rebuild(None);
         s
     }
@@ -358,6 +369,8 @@ impl PreferencesPage {
         self.next_episode = plx_media::route::next_episode_mode();
         self.deck_press = plx_media::route::deck_press();
         self.skip_interval = plx_media::route::skip_interval();
+        self.auto_skip = plx_media::route::auto_skip();
+        self.screensaver = plx_media::route::screensaver();
         self.copy = copy_text(Subject::Page(self.state.kind), &self.state.io.status, self.state.direct_play).into_owned();
         let inputs = FieldListInputs {
             kind: self.state.kind, quality: self.state.quality, direct_play: self.state.direct_play,
@@ -390,7 +403,7 @@ impl PreferencesPage {
 /// Which fields `kind`'s list shows: Audio & Subtitles has none until a snapshot has loaded.
 fn fields_of(inputs: &FieldListInputs<'_>) -> &'static [PickerKind] {
     match inputs.kind {
-        Kind::Playback => &[PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::NextEpisode, PickerKind::DeckPress, PickerKind::SkipInterval],
+        Kind::Playback => &[PickerKind::Quality, PickerKind::DirectPlay, PickerKind::SubtitleSize, PickerKind::SubtitlePosition, PickerKind::NextEpisode, PickerKind::AutoSkip, PickerKind::DeckPress, PickerKind::SkipInterval, PickerKind::Screensaver],
         Kind::AudioSubtitles if inputs.prefs.is_some() => &[PickerKind::AudioLanguage, PickerKind::SubtitleMode, PickerKind::SubtitleLanguage, PickerKind::ForcedSubtitles],
         _ => &[],
     }
@@ -406,6 +419,8 @@ fn resolve_value(field: PickerKind, quality: Quality, direct_play: DirectPlayMod
         PickerKind::NextEpisode => Value::NextEpisode(plx_media::route::next_episode_mode()),
         PickerKind::DeckPress => Value::DeckPress(plx_media::route::deck_press()),
         PickerKind::SkipInterval => Value::SkipInterval(plx_media::route::skip_interval()),
+        PickerKind::AutoSkip => Value::AutoSkip(plx_media::route::auto_skip()),
+        PickerKind::Screensaver => Value::Screensaver(plx_media::route::screensaver()),
         // A deprecated code (`pb`) resolves to its replacement so the picker checks that entry.
         PickerKind::AudioLanguage => Value::Language(prefs.and_then(|p| p.stated_language.as_deref()).map(plx_plex::plex::languages::canonical).unwrap_or_default().to_string()),
         PickerKind::SubtitleLanguage => Value::Language(prefs.and_then(|p| p.subtitle_language.as_deref()).map(plx_plex::plex::languages::canonical).unwrap_or_default().to_string()),
@@ -430,6 +445,10 @@ fn field_options(field: PickerKind, quality: Quality, direct_play: DirectPlayMod
             .map(|m| (deck_press_label(m).into(), Value::DeckPress(m))).collect(),
         PickerKind::SkipInterval => SkipInterval::LADDER.into_iter()
             .map(|i| (skip_interval_label(i), Value::SkipInterval(i))).collect(),
+        PickerKind::AutoSkip => AutoSkip::LADDER.into_iter()
+            .map(|m| (auto_skip_label(m).into(), Value::AutoSkip(m))).collect(),
+        PickerKind::Screensaver => Screensaver::LADDER.into_iter()
+            .map(|m| (screensaver_label(m).into(), Value::Screensaver(m))).collect(),
         PickerKind::SubtitleMode => [(plx_platform::i18n::msg::settings_audio_manual(), 0), (plx_platform::i18n::msg::settings_audio_foreign(), 1), (plx_platform::i18n::msg::settings_audio_always(), 2)]
             .into_iter().map(|(label, mode)| (label.into(), Value::Mode(mode))).collect(),
         PickerKind::ForcedSubtitles => [plx_platform::i18n::msg::settings_audio_prefer_regular(), plx_platform::i18n::msg::settings_audio_prefer_forced(), plx_platform::i18n::msg::settings_audio_only_forced(), plx_platform::i18n::msg::settings_audio_only_regular()]
@@ -515,6 +534,23 @@ fn deck_press_label(mode: DeckPress) -> &'static str {
         DeckPress::Play => plx_platform::i18n::msg::settings_playback_deck_press_play(),
     }
 }
+fn screensaver_label(mode: Screensaver) -> &'static str {
+    match mode {
+        Screensaver::Off => plx_platform::i18n::msg::settings_playback_screensaver_off(),
+        Screensaver::Minutes2 => plx_platform::i18n::msg::settings_playback_screensaver_min2(),
+        Screensaver::Minutes5 => plx_platform::i18n::msg::settings_playback_screensaver_min5(),
+        Screensaver::Minutes10 => plx_platform::i18n::msg::settings_playback_screensaver_min10(),
+        Screensaver::Minutes20 => plx_platform::i18n::msg::settings_playback_screensaver_min20(),
+    }
+}
+
+fn auto_skip_label(mode: AutoSkip) -> &'static str {
+    match mode {
+        AutoSkip::Off => plx_platform::i18n::msg::settings_playback_auto_skip_off(),
+        AutoSkip::Intro => plx_platform::i18n::msg::settings_playback_auto_skip_intro(),
+        AutoSkip::IntroAndCredits => plx_platform::i18n::msg::settings_playback_auto_skip_intro_credits(),
+    }
+}
 fn skip_interval_label(interval: SkipInterval) -> String {
     plx_platform::i18n::msg::settings_playback_skip_interval_seconds(interval.seconds())
 }
@@ -561,7 +597,9 @@ impl Machine<InnerHost> for PreferencesPage {
                     || self.look != (plx_media::route::subtitle_size(), plx_media::route::subtitle_position())
                     || self.next_episode != plx_media::route::next_episode_mode()
                     || self.deck_press != plx_media::route::deck_press()
-                    || self.skip_interval != plx_media::route::skip_interval() {
+                    || self.skip_interval != plx_media::route::skip_interval()
+                    || self.auto_skip != plx_media::route::auto_skip()
+                    || self.screensaver != plx_media::route::screensaver() {
                     self.rebuild_keeping();
                     // An empty loading table had no engine seat. Give its first landing (or
                     // Retry row) one so OK works immediately, without moving an existing

@@ -1585,6 +1585,71 @@ pub struct Detail {
     /// Rating key of the picker winner inside [`Self::extras`]. Empty when there is none.
     #[serde(default)]
     pub trailer_rk: String,
+    /// Every `Media[]` VERSION of a leaf item, in server order — the detail page's version chooser
+    /// offers it when there is more than one. Empty for a show container and for a leaf with one
+    /// version (nothing to choose); omitted from the serialized form when empty, so fixtures
+    /// recorded before it existed are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<MediaVersion>,
+}
+
+/// **One `Media[]` version of an item** — what the version picker labels ("4K · HEVC · HDR10 ·
+/// 62 GB") and what playing it needs (its `Part[0].key` and codecs). `docs/pms-api.md` §4: an
+/// item can carry several (a 4K HDR and a 1080p copy), and taking `Media[0]` blindly is the
+/// default, not a choice — this is what makes it one.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MediaVersion {
+    /// PMS's `videoResolution` class (`"4k"`, `"1080"`, …), raw — the label formats it
+    pub video_resolution: String,
+    pub width: i64,
+    pub height: i64,
+    pub vcodec: String,
+    pub acodec: String,
+    pub hdr: HdrFormat,
+    /// bytes, summed over the version's parts (0 = unknown)
+    pub size: i64,
+    /// kbps
+    pub bitrate: i64,
+    /// `Part[0].key` — the direct-play part of this version
+    pub part: String,
+}
+
+/// The dynamic range of a version's video, as its label names it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum HdrFormat {
+    #[default]
+    Sdr,
+    Hdr10,
+    Hlg,
+    DolbyVision,
+}
+
+/// Every version of `it`, in server order. Dolby Vision wins over the transfer it rides (a
+/// Profile 8 file also says smpte2084), PQ is HDR10, HLG is HLG.
+pub fn media_versions(it: &plx_plex::plex::Metadata) -> Vec<MediaVersion> {
+    it.media
+        .iter()
+        .map(|m| {
+            let video = m.part.first().and_then(|p| p.stream.iter().find(|s| s.stream_type == 1));
+            let hdr = match video {
+                Some(v) if v.dovi_present != 0 => HdrFormat::DolbyVision,
+                Some(v) if v.color_trc == "smpte2084" => HdrFormat::Hdr10,
+                Some(v) if v.color_trc == "arib-std-b67" => HdrFormat::Hlg,
+                _ => HdrFormat::Sdr,
+            };
+            MediaVersion {
+                video_resolution: m.video_resolution.clone(),
+                width: m.width,
+                height: m.height,
+                vcodec: m.video_codec.clone(),
+                acodec: m.audio_codec.clone(),
+                hdr,
+                size: m.part.iter().map(|p| p.size.max(0)).sum(),
+                bitrate: m.bitrate,
+                part: m.part.first().map(|p| p.key.clone()).unwrap_or_default(),
+            }
+        })
+        .collect()
 }
 
 impl Detail {
@@ -2107,10 +2172,17 @@ fn fetch_detail(sid: plx_plex::plex::ServerId, rk: &str) -> Option<(Detail, Stri
         ratings: convert_ratings(&it),
         extras: Vec::new(),
         trailer_rk: String::new(),
+        versions: Vec::new(),
     };
     // audio/subtitle streams (movies carry Media/Part/Stream; a show does not — its
     // episodes do, so load_detail backfills a show's streams from its first episode).
     parse_streams(&it, &mut d);
+    // the leaf's OWN versions, and only when there is a choice to make (a show container has
+    // none; its episodes' versions are each episode's page's)
+    let versions = media_versions(&it);
+    if versions.len() > 1 {
+        d.versions = versions;
+    }
     Some((d, it.primary_extra_key.clone()))
 }
 
@@ -2395,6 +2467,12 @@ pub struct PlayingItem {
     /// so this is the one honest source of "the light under the panel" there
     /// (`screen::Scrim::over_video`).
     pub blur: Option<[[f32; 3]; 4]>,
+    /// Every `Media[]` version of the leaf ([`media_versions`]) — the player's Version page lists
+    /// them when there are several.
+    pub versions: Vec<MediaVersion>,
+    /// Which of them this store describes: the streams, frame size, bitrate and Dolby Vision
+    /// fields above are `Media[media_index]`'s (the version being played), not `Media[0]`'s.
+    pub media_index: u32,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -2416,6 +2494,8 @@ impl PlayingItem {
             markers: Vec::new(),
             chapters: Vec::new(),
             blur: None,
+            versions: Vec::new(),
+            media_index: 0,
         }
     }
 }
@@ -2463,6 +2543,8 @@ fn cached_playing(state: &MetadataState, sid: plx_plex::plex::ServerId, rk: &str
             markers: d.markers.clone(),
             chapters: d.chapters.clone(),
             blur: d.has_blur.then_some(d.blur),
+            versions: d.versions.clone(),
+            media_index: 0,
         })
 }
 
@@ -2470,42 +2552,48 @@ fn cached_playing(state: &MetadataState, sid: plx_plex::plex::ServerId, rk: &str
 /// arrive by value: `client_opt()` here would fetch whichever server is CURRENT, and a ratingKey
 /// that also exists there would come back with a different film's stream list.
 pub fn fetch_playing_item(sid: plx_plex::plex::ServerId, rk: &str) -> Option<PlayingItem> {
+    fetch_playing_item_version(sid, rk, 0)
+}
+
+/// [`fetch_playing_item`] for VERSION `media_index` of the item: its streams, frame size and
+/// bitrate come from `Media[media_index]` (falling back to version 0 when the item has fewer).
+pub fn fetch_playing_item_version(sid: plx_plex::plex::ServerId, rk: &str, media_index: u32) -> Option<PlayingItem> {
     if rk.is_empty() {
         return None;
     }
     let it = plx_plex::plex::client_for(sid).and_then(|c| c.metadata(rk));
-    // Markers and chapters hang off the ITEM, streams off its first Part — so a part-less response
-    // still yields both of those instead of discarding all three. `Client::metadata` already sends
-    // `includeChapters=1` (plex/library.rs), so the Chapter[] is on the wire either way: taking it
-    // here costs no request, and dropping it is what hid the Chapters tab on the episode path.
-    let markers = it
-        .as_ref()
-        .map(|it| convert_markers(&it.marker, it.duration))
-        .unwrap_or_default();
-    let chapters = it
-        .as_ref()
-        .map(|it| convert_chapters(&it.chapter))
-        .unwrap_or_default();
-    let st = it
-        .as_ref()
-        .and_then(|it| it.first_part().map(|p| convert_streams(&p.stream)))
+    Some(playing_item_of(sid, rk, it.as_ref(), media_index))
+}
+
+/// The pure half of [`fetch_playing_item_version`]: the store, from a fetched item (or none).
+pub fn playing_item_of(
+    sid: plx_plex::plex::ServerId,
+    rk: &str,
+    it: Option<&plx_plex::plex::Metadata>,
+    media_index: u32,
+) -> PlayingItem {
+    let media_index = match it {
+        Some(m) if (media_index as usize) < m.media.len() => media_index,
+        _ => 0,
+    };
+    // Markers and chapters hang off the ITEM, streams off the played version's first Part — so a
+    // part-less response still yields both of those instead of discarding all three.
+    // `Client::metadata` already sends `includeChapters=1` (plex/library.rs), so the Chapter[] is
+    // on the wire either way: taking it here costs no request, and dropping it is what hid the
+    // Chapters tab on the episode path.
+    let markers = it.map(|it| convert_markers(&it.marker, it.duration)).unwrap_or_default();
+    let chapters = it.map(|it| convert_chapters(&it.chapter)).unwrap_or_default();
+    let media = it.and_then(|it| it.media_at(media_index as usize));
+    let st = media
+        .and_then(|m| m.part.first().map(|p| convert_streams(&p.stream)))
         .unwrap_or_default();
     let (audio, subs, video_fps, dovi) = (st.audio, st.subs, st.fps, st.dovi);
-    let show_rk = it
-        .as_ref()
-        .map(|it| it.grandparent_rating_key.clone())
-        .unwrap_or_default();
-    // the frame size rides the same PRIMARY version the streams come from (route.rs's
-    // direct-play gate tests it against the device bound — see the field doc)
-    let (width, height, bitrate) = it
-        .as_ref()
-        .and_then(|it| it.primary_media().map(|m| (m.width, m.height, m.bitrate)))
-        .unwrap_or((0, 0, 0));
-    let blur = it
-        .as_ref()
-        .and_then(|it| it.ultra_blur_colors)
-        .and_then(|u| u.corners());
-    Some(PlayingItem {
+    let show_rk = it.map(|it| it.grandparent_rating_key.clone()).unwrap_or_default();
+    // the frame size rides the same version the streams come from (route.rs's direct-play gate
+    // tests it against the device bound — see the field doc)
+    let (width, height, bitrate) = media.map(|m| (m.width, m.height, m.bitrate)).unwrap_or((0, 0, 0));
+    let blur = it.and_then(|it| it.ultra_blur_colors).and_then(|u| u.corners());
+    PlayingItem {
         sid,
         rk: rk.to_string(),
         show_rk,
@@ -2519,7 +2607,9 @@ pub fn fetch_playing_item(sid: plx_plex::plex::ServerId, rk: &str) -> Option<Pla
         markers,
         chapters,
         blur,
-    })
+        versions: it.map(media_versions).unwrap_or_default(),
+        media_index,
+    }
 }
 
 /// Retire BOTH descriptions of the item that was playing, together.
@@ -5242,3 +5332,55 @@ mod credits_tests;
 #[cfg(test)]
 #[path = "metadata_demo_fixture_tests.rs"]
 mod demo_fixture_tests;
+
+/// The version picker's data: every `Media[]` version labelled from its own fields, and the
+/// playing-item store built from the PICKED version rather than `Media[0]`.
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    fn two_versions() -> plx_plex::plex::Metadata {
+        serde_json::from_str(
+            r#"{"ratingKey":"9","type":"movie","duration":7200000,"Media":[
+              {"videoCodec":"hevc","audioCodec":"eac3","videoResolution":"4k","width":3840,"height":2160,
+               "bitrate":60000,"Part":[{"key":"/library/parts/1/a.mkv","size":66571993088,"Stream":[
+                 {"id":1,"streamType":1,"codec":"hevc","colorTrc":"smpte2084","frameRate":23.976},
+                 {"id":2,"streamType":2,"codec":"eac3","channels":6}]}]},
+              {"videoCodec":"h264","audioCodec":"aac","videoResolution":"1080","width":1920,"height":1080,
+               "bitrate":8000,"Part":[{"key":"/library/parts/2/b.mp4","size":8589934592,"Stream":[
+                 {"id":3,"streamType":1,"codec":"h264","frameRate":25.0},
+                 {"id":4,"streamType":2,"codec":"aac","channels":2},
+                 {"id":5,"streamType":3,"codec":"srt","languageCode":"eng"}]}]}]}"#,
+        )
+        .expect("a two-version item parses")
+    }
+
+    #[test]
+    fn every_version_is_described_by_its_own_fields() {
+        let v = media_versions(&two_versions());
+        assert_eq!(v.len(), 2);
+        assert_eq!((v[0].video_resolution.as_str(), v[0].vcodec.as_str(), v[0].hdr), ("4k", "hevc", HdrFormat::Hdr10));
+        assert_eq!(v[0].size, 66_571_993_088);
+        assert_eq!(v[0].part, "/library/parts/1/a.mkv");
+        assert_eq!((v[1].video_resolution.as_str(), v[1].vcodec.as_str(), v[1].hdr), ("1080", "h264", HdrFormat::Sdr));
+        assert_eq!((v[1].acodec.as_str(), v[1].bitrate), ("aac", 8000));
+    }
+
+    /// **The playing item is the PICKED version's**: its streams, frame size and bitrate, with the
+    /// version list and index beside them; an index past the last version is version 0.
+    #[test]
+    fn the_playing_item_describes_the_picked_version() {
+        let it = two_versions();
+        let sid = plx_plex::plex::ServerId::from_raw(0);
+        let first = playing_item_of(sid, "9", Some(&it), 0);
+        assert_eq!((first.width, first.bitrate, first.media_index), (3840, 60000, 0));
+        assert_eq!(first.audio.len(), 1);
+        assert!(first.subs.is_empty());
+        let second = playing_item_of(sid, "9", Some(&it), 1);
+        assert_eq!((second.width, second.bitrate, second.media_index), (1920, 8000, 1));
+        assert_eq!(second.audio[0].codec, "aac");
+        assert_eq!(second.subs.len(), 1, "the 1080p copy's own subtitle");
+        assert_eq!(second.versions.len(), 2);
+        assert_eq!(playing_item_of(sid, "9", Some(&it), 7).media_index, 0, "no such version: the first");
+    }
+}

@@ -1,14 +1,13 @@
 //! Retirement of the old persisted last-page bookmark.
 //!
-//! A cold boot now always settles on the route selected by the credential flow: normally Home.
-//! Home's Hero and Continue Watching rows are the product's single resume affordance; reopening a
-//! previous Detail or Library route here would compete with them and make Home's primary content
-//! redundant. This policy does not affect the live app-switch lifecycle in `app.rs`: an in-process
-//! playback can still be suspended and resumed while the app remains alive.
+//! A cold boot settles on the route selected by the credential flow: normally Home. The newer
+//! reopen-where-you-left-off record (`app::resume_place`, `<id>-resume.json`) is a different file
+//! with its own expiry and profile check; it navigates onward from Home after boot and never
+//! replaces the boot route. This module only removes the older format.
 //!
 //! Builds before 2026-09-01 wrote `lastplace.json` beside the persisted session. Keep this tiny
 //! one-shot cleanup until those installations have had a chance to upgrade, so the retired route
-//! and its server identifier do not remain on disk indefinitely. No new bookmark is ever written.
+//! and its server identifier do not remain on disk indefinitely. This module never writes it.
 
 use std::path::{Path, PathBuf};
 

@@ -394,13 +394,19 @@ pub fn layout(r: Rect, name_w: f32, name_h: f32) -> (Rect, Rect) {
 /// the row is a collection with no artwork (`thumb` empty) — an unresolved texture with a path
 /// behind it is merely still loading and keeps the ordinary skeleton.
 pub fn draw(p: Painter, rest: Rect, r: Rect, rad: f32, name: &str) {
-    // A collection with no artwork of its own is ABSENCE, never a wait (`placeholder.rs`): the
+    draw_marked(p, rest, r, rad, name, Icon::Collection);
+}
+
+/// [`draw`] under another mark — the same neutral tile for another row that has a name and no
+/// artwork (a live channel the guide has no logo for wears [`Icon::Show`]).
+pub fn draw_marked(p: Painter, rest: Rect, r: Rect, rad: f32, name: &str, mark: Icon) {
+    // A row with no artwork of its own is ABSENCE, never a wait (`placeholder.rs`): the
     // never-sentinel ground, not counted.
-    // placeholder-exempt: absence, a collection whose server sent no artwork; nothing will arrive
+    // placeholder-exempt: absence, a row whose source sent no artwork; nothing will arrive
     p.rrect_sheened(r, rad, theme::CARD_ABSENT);
     let fit = fitted(name, &NEUTRAL_NAME, rest, neutral_band(rest));
     let (glyph, column) = layout(r, fit.column, fit.height());
-    icons::draw(p, Icon::Collection, glyph, theme::TEXT_TERTIARY);
+    icons::draw(p, mark, glyph, theme::TEXT_TERTIARY);
     draw_lines(p, &fit, column.cx(), column.y + NAME_CAP_DROP * fit.sz as f32, theme::TEXT_SECONDARY);
 }
 

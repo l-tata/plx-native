@@ -8,7 +8,7 @@ use plx_data::stores::collection::CollectionCmd;
 
 fn open(store: &mut plx_data::stores::collection::CollectionStore, rk: &str, tag: i64) {
     store.run(CollectionCmd::Open { target: CollectionTarget { id: plx_plex::plex::collections::CollectionRef {
-        sid: ServerId::UNSET, rk: rk.into(), sec: 8, tag, name: "Fixture Collection".into() },
+        sid: ServerId::UNSET, rk: rk.into(), sec: 8, tag, name: "Fixture Collection".into(), playlist: false },
         want: plx_data::collection::PAGE_SIZE } });
 }
 

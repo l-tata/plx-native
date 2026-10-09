@@ -104,6 +104,15 @@ const RED_500: [f32; 4] = rgb8(0xf5, 0x34, 0x1a);
 const GREEN_400: [f32; 4] = rgb8(0x3e, 0xc9, 0x6b);
 const GREEN_500: [f32; 4] = rgb8(0x2f, 0xae, 0x5b);
 
+// Genre — the broadcast families the Live TV guide tells apart (`GUIDE_GENRE_*`). Mid-lightness,
+// mid-chroma so they read as a thin edge on a dark plate without competing with the amber NOW
+// marker or the red LIVE badge; each is its own hue so six of them in one grid stay six.
+const VIOLET_400: [f32; 4] = rgb8(0xa0, 0x88, 0xf2);
+const BLUE_400: [f32; 4] = rgb8(0x52, 0x9e, 0xf2);
+const PINK_400: [f32; 4] = rgb8(0xf0, 0x82, 0xbe);
+const TEAL_400: [f32; 4] = rgb8(0x36, 0xc0, 0xae);
+const ORANGE_400: [f32; 4] = rgb8(0xf5, 0x8e, 0x48);
+
 // The two ALPHA ramps are `WHITE`/`BLACK` at a measured weight, spelled `with_a(WHITE, .20)` at the
 // role: a new overlay is a weight on that ramp, never a new hue. `NEUTRAL_900` (#0c0c0d) is not a
 // primitive here because its one role — the tab track — is a translucent GRADIENT in this renderer;
@@ -1186,16 +1195,59 @@ pub const GUIDE_CELL: [f32; 4] = with_a(WHITE, 0.08);
 /// The airing on NOW, a rung brighter than the rest of its row, so "what is on" reads across the
 /// whole grid without focus.
 pub const GUIDE_CELL_NOW: [f32; 4] = with_a(WHITE, 0.14);
-/// The elapsed part of an on-now airing, washed over its plate (the guide's progress).
-pub const GUIDE_CELL_ELAPSED: [f32; 4] = with_a(WHITE, 0.08);
+/// The elapsed part of an on-now airing, washed over its plate (the guide's progress): a shade
+/// DARKER than the plate, so the part already aired reads as past and the bright remainder as what
+/// is still to come. (A white weight here stacked on [`GUIDE_CELL_NOW`] was too close to it to read
+/// at couch distance.)
+pub const GUIDE_CELL_ELAPSED: [f32; 4] = scrim_black(0.26);
 /// The guide's NOW marker and the live banner's progress fill — the resume bar's amber, because it
 /// is the same fact ("how far in"), told about wall time instead of a file.
 pub const GUIDE_NOW: [f32; 4] = RESUME_FILL;
+/// Ink on [`GUIDE_NOW`]: the wall-clock time the NOW marker carries at the top of the grid. The
+/// darkest neutral, as on every amber plate.
+pub const GUIDE_NOW_INK: [f32; 4] = NEUTRAL_950;
 /// The `LIVE` badge on the player's banner. Red is broadcast's own convention for "on air"; it is a
 /// state mark, never a failure colour (failures stay `TEXT_SECONDARY`, ui/CLAUDE.md rule 4).
 pub const LIVE_BADGE: [f32; 4] = RED_400;
 /// Ink on [`LIVE_BADGE`].
 pub const LIVE_BADGE_INK: [f32; 4] = WHITE;
+/// A guide cell's genre EDGE — the thin bar down a programme cell's leading edge that says
+/// "film", "sport", "kids", "news", "documentary" or "comedy" across the whole grid at a glance.
+/// One hue per genre (`plx_data::livetv::guide::Genre`); an airing whose categories name none of
+/// them wears no edge at all, so colour is information rather than decoration. Never a fill:
+/// the cell's own plate states focus and NOW.
+pub const GUIDE_GENRE_MOVIE: [f32; 4] = VIOLET_400;
+/// See [`GUIDE_GENRE_MOVIE`]. Green is the pitch.
+pub const GUIDE_GENRE_SPORTS: [f32; 4] = GREEN_400;
+/// See [`GUIDE_GENRE_MOVIE`].
+pub const GUIDE_GENRE_KIDS: [f32; 4] = PINK_400;
+/// See [`GUIDE_GENRE_MOVIE`].
+pub const GUIDE_GENRE_NEWS: [f32; 4] = BLUE_400;
+/// See [`GUIDE_GENRE_MOVIE`].
+pub const GUIDE_GENRE_DOCUMENTARY: [f32; 4] = TEAL_400;
+/// See [`GUIDE_GENRE_MOVIE`].
+pub const GUIDE_GENRE_COMEDY: [f32; 4] = ORANGE_400;
+/// The plate a channel's LOGO stands on (`plx_ui::channel_tile`): a rung above a guide cell, so a
+/// transparent logo reads as set into a tile rather than floating on the page.
+pub const CHANNEL_TILE_PLATE: [f32; 4] = with_a(WHITE, 0.12);
+/// **The tiles of channels with no logo**, one picked per channel from its NAME
+/// (`channel_tile::tint_of`), so a lineup of logo-less channels is a row of told-apart tiles
+/// instead of a column of identical grey ones, and a channel keeps its colour across visits. The
+/// genre hues at a weight that carries [`TEXT_PRIMARY`] initials, plus the warm atmosphere stops
+/// for two quieter ones.
+pub const CHANNEL_TILE_TINTS: [[f32; 4]; 8] = [
+    with_a(VIOLET_400, 0.42),
+    with_a(BLUE_400, 0.42),
+    with_a(TEAL_400, 0.42),
+    with_a(PINK_400, 0.40),
+    with_a(ORANGE_400, 0.40),
+    with_a(GREEN_400, 0.38),
+    ATMOS_UMBER,
+    ATMOS_ASH,
+];
+/// The channel-number BADGE on a channel tile: a dark chip in the tile's corner, so the number
+/// stays legible over any logo.
+pub const CHANNEL_BADGE: [f32; 4] = scrim_black(0.72);
 /// No-op texture tint (structural: draw an RGBA texture unmodified).
 pub const TINT_WHITE: [f32; 4] = WHITE;
 

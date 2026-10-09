@@ -112,13 +112,15 @@ mod tests {
             blur: [[-0.0, f32::from_bits(0x7fc01234), f32::INFINITY]; 4], has_blur: true,
             kind: 3, resume_ms: 12345, show_rk: "10".into(), season_index: 2,
             show_title: "Show".into(), ep_index: 4, unwatched: false, watched: true,
-            aired: "2026-09-08".into(), child_count: i64::MAX,
+            aired: "2026-09-08".into(), child_count: i64::MAX, guid: "plex://episode/1".into(),
         };
         Landing { gen: 7, seq: 19, sid: m.sid, client: None, token_gen: 5,
             build: Some(SourceBuild {
                 cw: vec![CwItem { last_viewed_at: i64::MAX, m: Arc::new(m.clone()) }],
                 shelves: vec![Shelf { title: "Shelf".into(), hub_id: "provider.hub".into(),
-                    key: "/hub/key".into(), items: vec![Arc::new(m)], total: 0 }],
+                    key: "/hub/key".into(), items: vec![Arc::new(m.clone())], total: 0 }],
+                genres: Some(vec![Arc::new(m.clone())]),
+                playlists: Some(vec![Arc::new(m)]),
             }) }
     }
 

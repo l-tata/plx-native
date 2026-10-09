@@ -67,6 +67,17 @@ use serde::Deserialize;
 
 const DISCOVER: &str = "https://discover.provider.plex.tv";
 
+/// The watchlist's host: [`DISCOVER`], or — in a dev build whose plex.tv is the loopback stand-in
+/// (`account::plex_tv_is_stand_in`) — that same stand-in, so the synthetic mock serves the
+/// watchlist the simulator draws and a sim run never reads or writes a real account's list.
+fn watchlist_base() -> &'static str {
+    if super::account::plex_tv_is_stand_in() { super::account::plex_tv() } else { DISCOVER }
+}
+
+/// Watchlist rows asked for at most — a Home shelf's worth with room for the ones the household's
+/// libraries do not hold.
+pub const WATCHLIST_FETCH: i64 = 48;
+
 impl AccountClient {
     /// GET {DISCOVER}/library/people/{guid} — one person's biography record.
     ///
@@ -130,6 +141,82 @@ impl AccountClient {
         ));
         Some(groups)
     }
+}
+
+// ---- the watchlist (Plex Discover) ----------------------------------------------------------------
+
+impl AccountClient {
+    /// GET {DISCOVER}/library/sections/watchlist/all — the account's watchlist, most recently added
+    /// first (the provider's own order).
+    ///
+    /// The rows are **catalog** items, not library ones: `ratingKey` is the provider's id (the last
+    /// segment of the `plex://movie/<id>` guid) and `thumb` an absolute URL on another host. A
+    /// library copy is found by asking each server for the `guid` (`Client::find_by_guid`).
+    ///
+    /// Requires the profile's plex.tv token (an unauthenticated read is a 401). `None` is a FAILURE
+    /// (transport, status or a body with no `MediaContainer`); `Some(vec![])` is an empty list.
+    pub fn watchlist(&self) -> Option<Vec<WatchlistItem>> {
+        let url = format!(
+            "{}/library/sections/watchlist/all?includeGuids=1&X-Plex-Container-Start=0&X-Plex-Container-Size={WATCHLIST_FETCH}",
+            watchlist_base()
+        );
+        let env: WatchlistEnvelope = self.get(&url)?;
+        Some(env.media_container?.metadata)
+    }
+
+    /// PUT {DISCOVER}/actions/addToWatchlist or removeFromWatchlist `?ratingKey=<id>` — `id` is the
+    /// provider's own key ([`watchlist_key`] of the item's guid), never a server's `ratingKey`.
+    /// `Some(true)` when plex.tv accepted it, `Some(false)` when it refused, `None` when nothing
+    /// answered.
+    pub fn watchlist_edit(&self, provider_key: &str, add: bool) -> Option<bool> {
+        if provider_key.is_empty() {
+            return Some(false);
+        }
+        let action = if add { "addToWatchlist" } else { "removeFromWatchlist" };
+        let url = format!("{}/actions/{action}?ratingKey={}", watchlist_base(),
+            super::client::urlenc_str(provider_key));
+        self.put_ok(&url)
+    }
+}
+
+/// The provider's key for a `plex://<kind>/<id>` guid — the `ratingKey` its watchlist actions take.
+/// Empty for anything that is not a Plex agent guid (a legacy `com.plexapp.agents…` or a local
+/// `local://` item has no catalog entry and cannot be watchlisted).
+pub fn watchlist_key(guid: &str) -> &str {
+    guid.strip_prefix("plex://")
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(_, id)| id)
+        .filter(|id| !id.is_empty() && !id.contains('/'))
+        .unwrap_or("")
+}
+
+#[derive(Deserialize, Default)]
+struct WatchlistEnvelope {
+    #[serde(rename = "MediaContainer", default)]
+    media_container: Option<WatchlistContainer>,
+}
+
+#[derive(Deserialize, Default)]
+struct WatchlistContainer {
+    #[serde(rename = "Metadata", default)]
+    metadata: Vec<WatchlistItem>,
+}
+
+/// One watchlist row — the catalog item, as much of it as finding the library copy needs.
+#[derive(Deserialize, Default, Clone, Debug, PartialEq, Eq)]
+pub struct WatchlistItem {
+    /// `plex://movie/<id>` — what every server is asked for.
+    #[serde(default)]
+    pub guid: String,
+    /// The provider's id (the guid's last segment) — what the remove action takes.
+    #[serde(rename = "ratingKey", default)]
+    pub rating_key: String,
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, deserialize_with = "de_i64")]
+    pub year: i64,
 }
 
 // ---- serde DTOs (only the fields the page consumes; all optional to tolerate shape drift) ----
@@ -299,4 +386,32 @@ pub struct CreditItem {
     /// shipped with no posters at all. Nothing was measured before that claim was written down.
     #[serde(default)]
     pub thumb: String,
+}
+
+#[cfg(test)]
+mod watchlist_tests {
+    use super::*;
+
+    #[test]
+    fn the_provider_key_is_the_tail_of_a_plex_guid_and_nothing_else() {
+        assert_eq!(watchlist_key("plex://movie/5d776b59ad5437001f79c6f8"), "5d776b59ad5437001f79c6f8");
+        assert_eq!(watchlist_key("plex://show/abc"), "abc");
+        assert_eq!(watchlist_key("com.plexapp.agents.imdb://tt0111161"), "");
+        assert_eq!(watchlist_key("local://42"), "");
+        assert_eq!(watchlist_key("plex://movie/"), "");
+        assert_eq!(watchlist_key("plex://movie/a/b"), "");
+    }
+
+    #[test]
+    fn a_watchlist_page_parses_its_catalog_rows() {
+        let env: WatchlistEnvelope = serde_json::from_str(
+            r#"{"MediaContainer":{"size":2,"Metadata":[
+                {"guid":"plex://movie/a1","ratingKey":"a1","type":"movie","title":"s1","year":"1999"},
+                {"guid":"plex://show/b2","ratingKey":"b2","type":"show","title":"s2","thumb":"https://x/y.jpg"}]}}"#,
+        ).unwrap();
+        let rows = env.media_container.unwrap().metadata;
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].guid.as_str(), rows[0].year), ("plex://movie/a1", 1999));
+        assert_eq!(rows[1].kind, "show");
+    }
 }

@@ -782,6 +782,7 @@ impl LibraryScreen {
             GridAction::Unwatched { desired } => plx_data::stores::browse::QueryEdit::Unwatched(desired),
             GridAction::Genre { id } => plx_data::stores::browse::QueryEdit::Genre(id),
             GridAction::LibraryType(kind) => plx_data::stores::browse::QueryEdit::LibraryType(kind),
+            GridAction::Filter { field, value } => plx_data::stores::browse::QueryEdit::Filter { field, value },
         }));
         if let Some(target) = selected {
             let query = query.filter(|(address, _)| *address == target).map(|(_, edit)| edit);
@@ -938,6 +939,7 @@ impl LibraryScreen {
                     QueryEdit::Unwatched(desired) => GridAction::Unwatched { desired: *desired },
                     QueryEdit::Genre(id) => GridAction::Genre { id: id.clone() },
                     QueryEdit::LibraryType(kind) => GridAction::LibraryType(*kind),
+                    QueryEdit::Filter { field, value } => GridAction::Filter { field: field.clone(), value: value.clone() },
                 };
                 if matches!(&action, GridAction::Unwatched { desired } if *desired == H::listing(cx).unwatched())
                     && self.pending.section().is_none() && self.address(cx) == Some(target)

@@ -172,6 +172,7 @@ fn content_request(request: &plx_screens::registry::ContentReq) -> Result<Value,
         ContentReq::PushShow { sid, rk, season } => json!({"push_show":{"sid":sid.raw(),"rk":rk,"season":season}}),
         ContentReq::Present(arg) => json!({"present":content(arg)}),
         ContentReq::Back => json!("back"),
+        ContentReq::Shuffle { sid, rk } => json!({"shuffle":{"sid":sid.raw(),"rk":rk}}),
         ContentReq::PreviewStart { sid, rk, part, vcodec, acodec, title } =>
             json!({"preview_start":{"sid":sid.raw(),"rk":rk,"part":part,
                 "vcodec":vcodec,"acodec":acodec,"title":title}}),

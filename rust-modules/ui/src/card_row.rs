@@ -930,7 +930,15 @@ pub fn focused_caption(m: &TileFacts<'_>, is_continue: bool) -> Option<std::ffi:
     if is_continue {
         return cw_caption(m);
     }
-    let s = if m.kind == TileKind::Collection {
+    let s = if m.kind == TileKind::Channel {
+        // A live channel is the channel and the time its programme has left: "12 Films · 25 min left".
+        match m.resume {
+            Some(resume) if !m.show_title.is_empty() =>
+                format!("{} \u{00b7} {}", m.show_title, crate::fmt::time_left(resume.left_ms)),
+            _ if !m.show_title.is_empty() => m.show_title.to_string(),
+            _ => return None,
+        }
+    } else if m.kind == TileKind::Collection {
         // A collection is its size, never a year: the members span several, and PMS sends none.
         crate::fmt::item_count(m.child_count)
     } else if m.kind == TileKind::Episode && m.ep_index > 0 {
@@ -1559,6 +1567,19 @@ mod tests {
         assert_eq!(caption(0, 0).as_deref(), Some("0 items"));
         let film = TileFacts { year: 1999, child_count: 3, ..Default::default() };
         assert_eq!(super::focused_caption(&film, false).unwrap().to_str().unwrap(), "1999");
+    }
+
+    /// A live channel's caption is the channel and what its programme has left; with nothing
+    /// airing, the channel alone.
+    #[test]
+    fn a_channel_caption_names_the_channel_and_the_time_left() {
+        use crate::tile::{Resume, TileFacts, TileKind};
+        let caption = |resume| super::focused_caption(&TileFacts {
+            kind: TileKind::Channel, show_title: "12 Films", resume, ..Default::default()
+        }, false).map(|c| c.into_string().unwrap());
+        let left = crate::fmt::time_left(25 * 60_000);
+        assert_eq!(caption(Some(Resume { frac: 0.5, left_ms: 25 * 60_000 })), Some(format!("12 Films \u{00b7} {left}")));
+        assert_eq!(caption(None).as_deref(), Some("12 Films"));
     }
 
     #[test]

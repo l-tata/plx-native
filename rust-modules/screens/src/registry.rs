@@ -86,6 +86,10 @@ pub enum LiveTvReq {
     Retry,
     /// Settings > Live TV: close Settings and open the Live TV page on its setup face.
     OpenSetup,
+    /// A held OK on a guide airing that is in the viewer's Plex library: open that item's page, to
+    /// watch it from the start. The loop opens it only if the Live TV store found exactly this
+    /// item (`LiveTvView::knows_match`).
+    Detail { sid: plx_plex::plex::ServerId, rk: String },
     /// The Live TV page's strip pills and its BACK: the same page-level navigation Search asks for.
     Tab(HomeTab),
     Account,
@@ -112,6 +116,8 @@ pub enum PreferenceCmd {
     DirectPlay { mode: plx_plex::plex::session::DirectPlayMode, reply: std::sync::mpsc::Sender<bool> },
     NextEpisode { mode: plx_plex::plex::session::NextEpisodeMode, reply: std::sync::mpsc::Sender<bool> },
     SkipInterval { interval: plx_plex::plex::session::SkipInterval, reply: std::sync::mpsc::Sender<bool> },
+    AutoSkip { mode: plx_plex::plex::session::AutoSkip, reply: std::sync::mpsc::Sender<bool> },
+    Screensaver { mode: plx_plex::plex::session::Screensaver, reply: std::sync::mpsc::Sender<bool> },
     DeckPress { mode: plx_plex::plex::session::DeckPress, reply: std::sync::mpsc::Sender<bool> },
     SubtitleSize { size: plx_plex::plex::session::SubtitleSize, reply: std::sync::mpsc::Sender<bool> },
     SubtitlePosition { position: plx_plex::plex::session::SubtitlePosition, reply: std::sync::mpsc::Sender<bool> },
@@ -251,6 +257,9 @@ pub enum HomeReq {
     Play { sid: plx_plex::plex::ServerId, rk: String, resume_ns: i64 },
     Detail { sid: plx_plex::plex::ServerId, rk: String },
     ItemMenu { sid: plx_plex::plex::ServerId, rk: String },
+    /// OK on an On Now card: tune the live channel with this guide number (`LiveTvReq::Tune`'s
+    /// work, keyed by number because Home's rows are not the lineup).
+    Tune { number: String },
     /// BACK from the shelves: fold to the hero and seat the engine in its remembered hero group.
     FoldToHero,
     Account,
@@ -376,6 +385,9 @@ pub enum ItemMenuKind {
     Episode { mark: plx_ui::widgets::PosterMark },
     /// The detail page's season tabs.
     Season { mark: plx_ui::widgets::PosterMark },
+    /// The detail page's Version pill: the leaf's `Media[]` versions, labelled
+    /// (`appkit::info_panel::version_label`), and the one this session plays.
+    Versions { labels: Vec<String>, current: u32 },
 }
 
 /// **Identity, not contents.** `PmsMovie` is a wire DTO with no `PartialEq` of its own, and one
@@ -390,6 +402,7 @@ impl PartialEq for ItemMenuKind {
                 da == db && a.sid == b.sid && a.rk == b.rk && a.kind == b.kind,
             (Self::Episode { mark: a }, Self::Episode { mark: b }) => a == b,
             (Self::Season { mark: a }, Self::Season { mark: b }) => a == b,
+            (Self::Versions { labels: a, current: ca }, Self::Versions { labels: b, current: cb }) => a == b && ca == cb,
             _ => false,
         }
     }
@@ -413,6 +426,7 @@ impl plx_machine::machine::LogicalState for ItemMenuArg {
             ItemMenuKind::Card { row, from_deck } => { c.u32(0).bool(*from_deck).u32(row.kind as u32); }
             ItemMenuKind::Episode { mark } => { c.u32(1).u32(*mark as u32); }
             ItemMenuKind::Season { mark } => { c.u32(2).u32(*mark as u32); }
+            ItemMenuKind::Versions { labels, current } => { c.u32(3).u32(labels.len() as u32).u32(*current); }
         }
         c.u32(self.host.0);
         c.option(self.focus, |c, key| { c.u32(key.entry.0).u32(key.elem); });
@@ -872,6 +886,9 @@ pub enum ContentReq {
     Present(ContentArg),
     Back,
     Play { play: PlayIntent, resume_ns: i64 },
+    /// Play a show shuffled — the hero's Shuffle disc (`route::request_shuffle`; the loop starts the
+    /// queue's first episode once it lands).
+    Shuffle { sid: plx_plex::plex::ServerId, rk: String },
     /// Start a hero preview. Does not push the player route.
     PreviewStart {
         sid: plx_plex::plex::ServerId,
@@ -1009,6 +1026,10 @@ pub enum PlayIntent {
     /// boundary, and once Detail's `selected` becomes an owned per-page snapshot (rather than a
     /// process-wide catalog read) there is no `'static` row left to borrow.
     Movie(plx_data::pms::PmsMovie),
+    /// A playlist, from `item` (its first member): the queue is the playlist's
+    /// (`route::request_play_playlist`), so the rest follows in its order. `title` is the
+    /// playlist's name, the HUD's context line.
+    Playlist { playlist: String, item: plx_data::pms::PmsMovie, title: String },
 }
 
 pub trait ContentLike: AppLike<Memory = PageMemory> {}
@@ -1032,6 +1053,12 @@ pub trait MetadataLike: AppLike + Sized {
     /// that offers no search shows no Search row — so the many test hosts that only need metadata
     /// owe nothing; the production host overrides it with the store's view.
     fn subtitle_search<'a>(_cx: &Cx<'a, Self>) -> Option<plx_data::subsearch::SubSearchView<'a>> {
+        None
+    }
+    /// Is the title with this guid on the profile's watchlist (`HubsView::on_watchlist`)? PROVIDED,
+    /// `None` — a host with no watchlist offers no watchlist control; the production host answers
+    /// from the hub store's published membership.
+    fn on_watchlist(_cx: &Cx<'_, Self>, _guid: &str) -> Option<bool> {
         None
     }
 }
@@ -1556,11 +1583,11 @@ pub enum AppArg {
     FirstRunConsent(u8),
 }
 
-pub const ARG_SHAPE: &str = "AppArg{Login,Profiles,Onboard,Home,Library,Search,Player,LiveTv,Content:{Detail{sid:u32,rk:str},Person{sid:u32,key:str,guid:str,name:str,thumb:str},Filmography{sid:u32,key:str},Collection{sid:u32,rk:str,sec:i64,tag:i64,name:str}},Settings:SettingsPage{Root,Playback,AudioSubtitles,Favourites,Privacy,Legal,About,Document(u8),Preview(u8),ConsentStage(u8),Language,Contribute},FirstRunConsent(u8),LibraryMenu{host:u32,target:{epoch:u32,sid:u32,section:u64},kind:u32,anchor:[u32;4]},\
+pub const ARG_SHAPE: &str = "AppArg{Login,Profiles,Onboard,Home,Library,Search,Player,LiveTv,Content:{Detail{sid:u32,rk:str},Person{sid:u32,key:str,guid:str,name:str,thumb:str},Filmography{sid:u32,key:str},Collection{sid:u32,rk:str,sec:i64,tag:i64,name:str,playlist?:u32}},Settings:SettingsPage{Root,Playback,AudioSubtitles,Favourites,Privacy,Legal,About,Document(u8),Preview(u8),ConsentStage(u8),Language,Contribute},FirstRunConsent(u8),LibraryMenu{host:u32,target:{epoch:u32,sid:u32,section:u64},kind:u32,anchor:[u32;4]},\
      PlayerOverlay{Tracks(tab:i32),Info,Chapters,More(quality:bool)},\
      AltSources{host:u32,sid:u32,rk:str,anchor:[u32;4]},\
      TracksPanel{page:i32},AboutPanel,PersonBio,CollectionAbout,AccountMenu,\
-     ItemMenu{sid:u32,rk:str,kind:{Card{from_deck:bool,type:u32},Episode{mark:u32},Season{mark:u32}},\
+     ItemMenu{sid:u32,rk:str,kind:{Card{from_deck:bool,type:u32},Episode{mark:u32},Season{mark:u32},Versions{count:u32,current:u32}},\
      host:u32,focus:Option<{entry:u32,elem:u32}>,anchor:[u32;4],loaded_episode:bool,from_home:bool}}";
 
 impl LogicalState for AppArg {
@@ -2147,7 +2174,16 @@ pub const SCREEN_SHAPES: &[&str] = &[
 // previous pin was 0x9abb_00af_1328_f006.
 // Surfing a live channel: `PlayerScreen` gains `live_surf:Option<u64>,live_surf_at:u32`; the
 // previous pin was 0xca0b_b38c_342f_5aae.
-const SCREEN_SHAPES_PIN: u64 = 0x44ad_9627_b6a6_d3ad;
+// The guide's genre strip: `LiveTvScreen` gains `filter:str,on_strip:bool,strip_sel:u64`; the
+// previous pin was 0x44ad_9627_b6a6_d3ad.
+// Skip intro & credits: the player HUD carries an automatic skip's undo window
+// (`undo:Option<(u32,i64,u32)>`); the previous pin was 0x3e3d_61d5_5dcb_f811.
+// Version picker: the item menu's argument gains the detail page's version chooser
+// (`Versions{count:u32,current:u32}` in its kind).
+// Library filters: the Library menu's value picker names its field (`LibraryMenu{…field:str…}`).
+// Playlists: a collection page can show a video playlist (`ARG_SHAPE`'s `Collection` gains
+// `playlist?:u32`, written only for a playlist); the previous pin was 0x4d7a_7df3_533c_f2bc.
+const SCREEN_SHAPES_PIN: u64 = 0x9df7_ee6a_d20c_7792;
 
 #[cfg(test)]
 mod arg_tests {
@@ -2244,8 +2280,7 @@ mod arg_tests {
     fn collection_content_arg_has_the_pinned_canonical_field_order() {
         let sid = plx_plex::plex::ServerId::from_raw(7);
         let arg = ContentArg::Collection(plx_plex::plex::collections::CollectionRef {
-            sid, rk: "50077".into(), sec: 8, tag: 77, name: "Fixture".into(),
-        });
+            sid, rk: "50077".into(), sec: 8, tag: 77, name: "Fixture".into(), playlist: false });
         let mut expected = Canon::new();
         expected.u32(3).u32(7).str("50077").u64(8).u64(77).str("Fixture");
         assert_eq!(arg.hash(), expected.finish());
@@ -2255,8 +2290,7 @@ mod arg_tests {
     fn collection_identity_never_compares_a_tag_with_a_rating_key() {
         let sid = plx_plex::plex::ServerId::from_raw(2);
         let by_rk = |rk: &str, tag| ContentArg::Collection(plx_plex::plex::collections::CollectionRef {
-            sid, rk: rk.into(), sec: 4, tag, name: "A".into(),
-        });
+            sid, rk: rk.into(), sec: 4, tag, name: "A".into(), playlist: false });
         // The rule itself is `CollectionRef::same_collection`'s (graded in `plex::collections`);
         // this pins that a page argument asks it rather than a copy.
         assert!(by_rk("50077", 77).same_item(&by_rk("50077", 99)),
@@ -2281,11 +2315,9 @@ mod arg_tests {
     #[test]
     fn collection_is_its_own_page_identity() {
         let a = AppArg::Content(ContentArg::Collection(plx_plex::plex::collections::CollectionRef {
-            sid: plx_plex::plex::ServerId::UNSET, rk: "50001".into(), sec: 1, tag: 1, name: "A".into(),
-        }));
+            sid: plx_plex::plex::ServerId::UNSET, rk: "50001".into(), sec: 1, tag: 1, name: "A".into(), playlist: false }));
         let b = AppArg::Content(ContentArg::Collection(plx_plex::plex::collections::CollectionRef {
-            sid: plx_plex::plex::ServerId::UNSET, rk: "50001".into(), sec: 1, tag: 9, name: "Renamed".into(),
-        }));
+            sid: plx_plex::plex::ServerId::UNSET, rk: "50001".into(), sec: 1, tag: 9, name: "Renamed".into(), playlist: false }));
         assert_eq!(a.id(), ScreenId(23));
         assert!(a.same_instance(&b));
         assert!(!a.same_instance(&AppArg::Content(ContentArg::Detail {

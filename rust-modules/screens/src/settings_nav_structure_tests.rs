@@ -123,8 +123,9 @@ fn every_playback_field_pushes_its_picker() {
     assert_eq!(items.iter().map(|(_, d)| *d).collect::<Vec<_>>(),
         [SettingsPage::Picker(PickerKind::Quality), SettingsPage::Picker(PickerKind::DirectPlay),
          SettingsPage::Picker(PickerKind::SubtitleSize), SettingsPage::Picker(PickerKind::SubtitlePosition),
-         SettingsPage::Picker(PickerKind::NextEpisode), SettingsPage::Picker(PickerKind::DeckPress),
-         SettingsPage::Picker(PickerKind::SkipInterval)]);
+         SettingsPage::Picker(PickerKind::NextEpisode), SettingsPage::Picker(PickerKind::AutoSkip),
+         SettingsPage::Picker(PickerKind::DeckPress),
+         SettingsPage::Picker(PickerKind::SkipInterval), SettingsPage::Picker(PickerKind::Screensaver)]);
     assert_every_nav_item_pushes_exactly_its_dest("playback", &items, &|| consent_opened(SettingsPage::Playback));
 }
 

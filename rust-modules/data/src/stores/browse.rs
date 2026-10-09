@@ -440,6 +440,9 @@ pub enum QueryEdit {
     Sort { key: String, desc: bool },
     Unwatched(bool),
     Genre(Option<String>),
+    /// A further filter (`browse::filters`): `(value, its title)` puts it in force, `None` takes
+    /// the field off.
+    Filter { field: String, value: Option<(String, String)> },
     LibraryType(LibraryType),
 }
 
@@ -461,6 +464,8 @@ pub enum LibraryWork {
     },
     Letters,
     Genres,
+    /// The value list of one further filter field, for the Filter menu's picker.
+    FilterValues(String),
     Hubs {
         may_publish: bool,
     },

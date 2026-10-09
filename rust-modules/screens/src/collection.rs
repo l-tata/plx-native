@@ -26,7 +26,7 @@ use plx_ui::screen::{At, AxisMask, By, Dir, DrawFrame, EdgeRule, ElemKind,
 use plx_ui::text_view::TextView;
 use plx_ui::theme;
 use plx_ui::widgets::{self, Art, PageGround, StatusKind, StatusOverlay};
-use plx_ui::{Env, Painter, Rect};
+use plx_ui::{Env, Painter, Rect, View};
 
 use super::registry::{tile_facts, AppFx, CardKeys, CardPageMemory, CollectionLike, ContentArg,
     ContentLike, ContentPanel, ContentReq, PageMemory};
@@ -66,6 +66,8 @@ const ART_W: f32 = 200.0;
 const ART_H: f32 = 300.0;
 const ART_RES: (std::os::raw::c_int, std::os::raw::c_int) = (200, 300);
 const HEADER_GAP: f32 = theme::space::XL;
+/// A playlist's Play pill's least width — the detail page's Play pill's (`detail::hero`'s `PW`).
+const PLAY_MIN_W: f32 = 168.0;
 /// `left:360px` — the text column, one XL gap past the art.
 const COL_X: f32 = MARGIN_X + ART_W + HEADER_GAP;
 /// `width:1344px`.
@@ -332,6 +334,13 @@ impl Page {
         Rect::new(COL_X, HEADER_TOP - scroll, TEXT_W, ART_H)
     }
 
+    /// A playlist's Play pill: where a collection's summary starts, at the shared control height.
+    fn play_rect(scroll: f32, measure: &dyn plx_machine::machine::Measure) -> Rect {
+        let w = widgets::Button::pill_w_measured(plx_platform::i18n::msg::browse_detail_play_c(),
+            theme::size::BODY, true, false, measure).max(PLAY_MIN_W);
+        Rect::new(COL_X, HEADER_TOP + SUMMARY_DY - scroll, w, widgets::StatusOverlay::CTRL_H)
+    }
+
     /// The collection's art, scrolled with the document.
     fn art_rect(scroll: f32) -> Rect {
         Rect::new(MARGIN_X, HEADER_TOP - scroll, ART_W, ART_H)
@@ -372,6 +381,16 @@ impl Page {
         };
         Label::new(meta.as_ptr(), theme::size::LABEL, theme::TEXT_SECONDARY)
             .v(VAlign::CapTop).draw(p, Rect::new(COL_X, meta_y, TEXT_W, 0.0));
+        if self.id.playlist {
+            // A playlist plays in its order from the head: its Play pill stands where a
+            // collection's summary does (a playlist's own summary is rarely written).
+            widgets::Button::new(plx_platform::i18n::msg::browse_detail_play_c().as_ptr(), theme::size::BODY,
+                Self::play_rect(scroll, measure))
+                .icon(plx_ui::icons::Icon::Play)
+                .focused(focused)
+                .draw(&Env::inert(), p);
+            return;
+        }
         if collection.summary.is_empty() { return; }
         let view = summary_view(&collection.summary, measure);
         let h = view.measure_h(TEXT_W);
@@ -416,7 +435,8 @@ impl<H: ContentLike + CollectionLike> StackPage<H> for Page {
         let collection = self.collection(cx);
         let head = collection.is_some_and(CollectionScreen::shows_head);
         let failed = collection.is_some_and(|c| c.status == CollectionStatus::Failed);
-        out.push(SectionSpec::new(Sec::Head, Kind::Custom { height: GRID_TOP, focusable: head && self.summary_more }, HEADER_GROUP).ranked(1));
+        let playable = self.id.playlist && collection.is_some_and(|c| !c.items.is_empty());
+        out.push(SectionSpec::new(Sec::Head, Kind::Custom { height: GRID_TOP, focusable: head && (self.summary_more || playable) }, HEADER_GROUP).ranked(1));
         out.push(SectionSpec::new(Sec::Items, Kind::Grid { spec: GridSpec::new(GRID_TOP, CONTENT_TOP) }, GRID_GROUP));
         let retry = if failed {
             CollectionScreen::status_overlay(collection, cx.tick.ms, cx.measure).action_frame_measured(cx.measure)
@@ -447,8 +467,9 @@ impl<H: ContentLike + CollectionLike> StackPage<H> for Page {
             .is_some_and(crate::registry::item_has_menu)
     }
 
-    fn focus_rect(&self, _cx: &Cx<'_, H>, k: Sec, section: Rect) -> Rect {
+    fn focus_rect(&self, cx: &Cx<'_, H>, k: Sec, section: Rect) -> Rect {
         match k {
+            Sec::Head if self.id.playlist => Self::play_rect(-section.y, cx.measure),
             Sec::Head => Self::header_rect(-section.y),
             Sec::Items | Sec::Status => section,
         }
@@ -604,6 +625,21 @@ impl CollectionScreen {
     /// sheet is offered exactly when the mark is drawn, and both read `summary_more`.
     fn activate_header<H: ContentLike + CollectionLike>(&mut self, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) {
         self.page.header_marked = true;
+        if self.page.id.playlist {
+            // Play: the playlist from its first member, in its order (`PlayIntent::Playlist`).
+            if let Some(collection) = self.collection(cx) {
+                if let Some(first) = collection.items.iter().find(|m| !m.part.is_empty()) {
+                    let title = if collection.title.is_empty() { &collection.id.name } else { &collection.title };
+                    fx.push(plx_machine::machine::Fx::App(AppFx::Content(ContentReq::Play {
+                        play: crate::registry::PlayIntent::Playlist {
+                            playlist: collection.id.rk.clone(), item: first.clone(), title: title.clone() },
+                        resume_ns: 0,
+                    })));
+                    fx.invalidate(Provenance::Input);
+                }
+            }
+            return;
+        }
         if self.collection(cx).is_some() && self.page.summary_more {
             fx.push(plx_machine::machine::Fx::App(AppFx::Content(ContentReq::Panel(
                 ContentPanel::CollectionAbout))));
@@ -790,7 +826,7 @@ mod tests {
 
     fn item(rk: &str) -> PmsMovie { PmsMovie { rk: rk.into(), title: rk.into(), ..Default::default() } }
     fn set() -> CollectionRef {
-        CollectionRef { sid: plx_plex::plex::ServerId::UNSET, rk: "50001".into(), sec: 1, tag: 7, name: "Set".into() }
+        CollectionRef { sid: plx_plex::plex::ServerId::UNSET, rk: "50001".into(), sec: 1, tag: 7, name: "Set".into(), playlist: false }
     }
     fn seeded() -> (plx_data::stores::collection::CollectionStore, CollectionScreen) {
         let mut store = plx_data::stores::collection::CollectionStore::default();
@@ -848,6 +884,24 @@ mod tests {
         let out = step(&mut screen, ScreenEvent::Activate(HEADER_ELEM), &cx(store.view(), None));
         assert!(opens_summary(&out), "OK on the header opens the summary sheet");
         assert!(screen.page.header_marked);
+    }
+
+    #[test]
+    fn ok_on_a_playlists_head_plays_it_from_the_first_member_in_its_queue() {
+        let playlist = CollectionRef::by_playlist(plx_plex::plex::ServerId::UNSET, "77", "Mix");
+        let mut store = plx_data::stores::collection::CollectionStore::default();
+        store.run(CollectionCmd::Open { target: CollectionTarget { id: playlist.clone(), want: PAGE_SIZE } });
+        let playable = |rk: &str| PmsMovie { part: format!("/library/parts/{rk}"), ..item(rk) };
+        store.install_for_test(vec![playable("a"), playable("b")], CollectionStatus::Ready);
+        let mut screen = CollectionScreen::new(EntryId(9), playlist);
+        screen.page.sync(store.view().current().unwrap(), &FixtureMeasure);
+        let out = step(&mut screen, ScreenEvent::Activate(HEADER_ELEM), &cx(store.view(), None));
+        let plays = out.iter().any(|e| matches!(&e.fx,
+            plx_machine::machine::Fx::App(AppFx::Content(ContentReq::Play {
+                play: crate::registry::PlayIntent::Playlist { playlist, item, .. }, resume_ns: 0 }))
+                if playlist == "77" && item.rk == "a"));
+        assert!(plays, "the playlist plays, from its first member");
+        assert!(!opens_summary(&out));
     }
 
     /// The frame tick re-derives `elems`/`labels` when the store's CONTENT moved, not when its size

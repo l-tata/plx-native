@@ -945,7 +945,7 @@ fn an_unpinned_library_spends_no_card_budget() {
         sections_gen: 0,
         pins: vec![(sid(0), 1, true), (sid(1), 1, false)],
     };
-    let (items, hubs, _) = merge_with_scope(&srcs, &scope);
+    let (items, hubs, _) = merge_with_scope(&srcs, &scope, &HomeExtras::default());
     assert!(hubs.iter().all(|h| h.source.is_empty()), "nothing of the unpinned library is drawn");
     assert_eq!(
         items.len(),
@@ -963,7 +963,7 @@ fn a_long_shelf_claims_only_what_it_can_publish() {
         src(0, "", HubState::Ready, Some(built(0, &[], long))),
         src(1, "friend", HubState::Ready, Some(built(1, &[], shelves_in(1, 1, 200, 12)))),
     ];
-    let (_, hubs, _) = merge_with_scope(&srcs, &BrowseScope::standalone());
+    let (_, hubs, _) = merge_with_scope(&srcs, &BrowseScope::standalone(), &HomeExtras::default());
     let theirs: usize = hubs.iter().filter(|h| h.source == "friend").map(|h| h.len).sum();
     assert_eq!(
         theirs,
@@ -981,7 +981,7 @@ fn the_card_bound_is_shared_between_sources() {
         src(0, "", HubState::Ready, Some(built(0, &[], shelves_in(0, 1, shelves, 12)))),
         src(1, "friend", HubState::Ready, Some(built(1, &[], shelves_in(1, 1, shelves, 12)))),
     ];
-    let (items, hubs, _) = merge_with_scope(&srcs, &BrowseScope::standalone());
+    let (items, hubs, _) = merge_with_scope(&srcs, &BrowseScope::standalone(), &HomeExtras::default());
     let per = |who: &str| -> usize { hubs.iter().filter(|h| h.source == who).map(|h| h.len).sum() };
     let share = HOME_CARDS_MAX / 2 / 12 * 12;
     assert_eq!((per(""), per("friend")), (share, share), "equal whole-shelf shares");
@@ -996,12 +996,12 @@ fn the_card_bound_is_shared_between_sources() {
 #[test]
 fn a_hundred_and_seventy_shelves_reach_home() {
     let no_deck = [src(0, "", HubState::Ready, Some(built(0, &[], shelves_in(0, 1, 170, 12))))];
-    let (items, hubs, _) = merge_with_scope(&no_deck, &BrowseScope::standalone());
+    let (items, hubs, _) = merge_with_scope(&no_deck, &BrowseScope::standalone(), &HomeExtras::default());
     assert_eq!((hubs.len(), items.len()), (170, 2040), "all 170 shelves fit alone: 2,040 cards");
     assert_eq!(bound_overflow(&no_deck, &BrowseScope::standalone(), &(items, hubs, vec![])), (0, 0));
 
     let with_deck = [src(0, "", HubState::Ready, Some(built_with_deck(12, shelves_in(0, 1, 170, 12))))];
-    let build = merge_with_scope(&with_deck, &BrowseScope::standalone());
+    let build = merge_with_scope(&with_deck, &BrowseScope::standalone(), &HomeExtras::default());
     assert_eq!(build.1.len(), 1 + 169, "the deck and 169 shelves");
     assert_eq!(build.0.len(), 12 + 169 * 12, "2,040 cards, 8 under the bound");
     assert_eq!(

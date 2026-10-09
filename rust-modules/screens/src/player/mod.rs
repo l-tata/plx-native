@@ -61,7 +61,7 @@ pub const WORD: &str = "player";
 /// The fields [`PlayerScreen::write`] canonicalises, for the recorder's shape pin (§5.4).
 pub const SHAPE: &str =
     "PlayerScreen{hud:{focus:i32,btn:i32,tab:i32,until:u32,dismissed:bool,visible_at_press:bool,\
-     offer:Option<(u32,i64)>,was_standin:bool},scrub:{dir:i32,hold:bool,reveal:bool,drag:bool,\
+     offer:Option<(u32,i64)>,was_standin:bool,undo:Option<(u32,i64,u32)>},scrub:{dir:i32,hold:bool,reveal:bool,drag:bool,\
      ns:i64,commit_at:u32},origin:Option<u32>,repair_alert:{open:bool,confirm:bool,scroll:u32},live_typed:str,live_typed_at:u32,live_surf:Option<u64>,live_surf_at:u32}";
 
 /// **The page this playback was launched from**, as the container's own identity.
@@ -235,6 +235,7 @@ impl PlayerScreen {
             self.hud.until = 0;
             self.hud.dismissed = false;
             self.hud.last_offer = None;
+            self.hud.undo = None;
             self.up_next.reset();
         }
         self.publish();
@@ -1040,6 +1041,10 @@ impl PlayerScreen {
             }
             Key::Left { .. } | Key::Right { .. } => {
                 match edge {
+                    // An automatic skip is still undoable: LEFT is "take me back", not a scrub.
+                    Edge::Down if matches!(key, Key::Left { .. }) && self.hud.live_undo(now).is_some() => {
+                        self.undo_auto_skip(now, fx)
+                    }
                     Edge::Down => self.key_scrub_fresh(ps, key, now, meta),
                     Edge::Repeat => self.key_scrub_repeat(now),
                     Edge::Up => self.key_scrub_release(now, fx),
@@ -1231,6 +1236,22 @@ impl PlayerScreen {
             // a tap → commit on a short debounce so quick taps accumulate first
             self.scrub.commit_at = now.wrapping_add(input::TAP_COMMIT_MS).max(1);
         }
+    }
+
+    /// **Take an automatic skip back** (LEFT inside its [`plx_appkit::skip_pill::UNDO_MS`] window,
+    /// or OK on the "Skipped … · Back" pill, which the loop routes here through
+    /// `activate_ctrl_row`): seek to the skipped segment's START and keep playing. The segment stays
+    /// retired (`metadata::mark_skipped`), so the viewer watches it instead of being thrown out of
+    /// it again. Spends the undo, so a second LEFT is an ordinary scrub.
+    pub fn undo_auto_skip<H: AppLike>(&mut self, now: u32, fx: &mut Effects<'_, H>) {
+        let Some(undo) = self.hud.live_undo(now) else {
+            return;
+        };
+        self.hud.undo = None;
+        plx_base::eventlog::log(&format!("autoskip: back to {:?} at {}s", undo.marker.kind, undo.marker.start_ms / 1000));
+        Self::ask(fx, PlayerReq::SeekTo(undo.back_ns()));
+        self.hud.extend(now, input::HUD_LINGER_MS);
+        self.publish();
     }
 
     /// Ask the loop to perform the scrub, and retire the preview that asked for it.
@@ -1463,6 +1484,9 @@ impl LogicalState for PlayerScreen {
             .bool(self.hud.was_standin);
         c.option(self.hud.last_offer.as_ref(), |c, (kind, at)| {
             c.u32(*kind as u32).u64(*at as u64);
+        });
+        c.option(self.hud.undo.as_ref(), |c, u| {
+            c.u32(u.marker.kind as u32).u64(u.marker.start_ms as u64).u32(u.until);
         });
         c.u32(self.scrub.dir as u32)
             .bool(self.scrub.hold)
@@ -2466,6 +2490,45 @@ mod scrub_ownership_tests {
                 );
             }
         }
+    }
+
+    /// **LEFT inside an automatic skip's undo window rewinds to the segment's start** (Settings >
+    /// Playback > Skip intro & credits) — a `SeekTo`, so the film resumes — and spends the undo:
+    /// the next LEFT, and any LEFT once the window has closed, is the ordinary scrub again.
+    #[test]
+    fn left_inside_the_undo_window_rewinds_to_the_skipped_segment_once() {
+        use plx_data::metadata::{Marker, MarkerKind};
+        use plx_ui::consts::SDLK_LEFT;
+        use std::sync::atomic::Ordering::Relaxed;
+        let _g = plx_base::testlock::serial();
+        let _f = Fixture::new(false);
+        const S: i64 = 1_000_000_000;
+        plx_media::player::SHARED.playpos_ns.store(50 * S, Relaxed);
+        let intro = Marker { kind: MarkerKind::Intro, start_ms: 20_000, end_ms: 45_000, final_seg: false };
+
+        let mut page = page_on_the_bar();
+        page.hud.open_undo(intro, 1_000);
+        assert!(page.hud.live_undo(1_000).is_some());
+        let (handled, reqs) = key(&mut page, SDLK_LEFT, Edge::Down, 2_000);
+        assert_eq!(handled, Handled::Yes);
+        assert_eq!(seeks(reqs), vec![PlayerReq::SeekTo(20 * S)], "back to the intro's start");
+        assert!(page.hud.undo.is_none(), "the undo is spent");
+        key(&mut page, SDLK_LEFT, Edge::Up, 2_020);
+        // the pill has gone, so the loop hands the ring back to the scrubber
+        // (`player_hud::standin_left_the_ring`); no loop runs here, so do it by hand
+        assert_eq!(page.hud.nav.focus, 1, "the undo raised the row with the ring on the Back pill");
+        page.hud.nav.focus = 0;
+        let (_, reqs) = key(&mut page, SDLK_LEFT, Edge::Down, 2_100);
+        assert!(seeks(reqs).is_empty(), "a second LEFT is a scrub press, which commits nothing yet");
+        assert_eq!(page.scrub.ns, 50 * S - DEFAULT_HOP);
+
+        // a closed window: LEFT scrubs
+        let mut page = page_on_the_bar();
+        page.hud.open_undo(intro, 1_000);
+        page.hud.nav.focus = 0;
+        let (_, reqs) = key(&mut page, SDLK_LEFT, Edge::Down, 1_000 + plx_appkit::skip_pill::UNDO_MS);
+        assert!(seeks(reqs).is_empty());
+        assert_eq!(page.scrub.ns, 50 * S - DEFAULT_HOP, "after five seconds LEFT is the scrub key again");
     }
 
     /// **(b) A scrub taken while PAUSED leaves the film paused.**

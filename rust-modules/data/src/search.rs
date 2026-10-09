@@ -269,8 +269,7 @@ impl CollectionHit {
                 rk: self.item.rk.clone(),
                 sec: self.item.sec,
                 tag: self.tag,
-                name: self.item.title.clone(),
-            }))
+                name: self.item.title.clone(), playlist: false }))
     }
 }
 

@@ -8,7 +8,7 @@
 //!   `&name;` it does not know stays literal text, so nothing is ever fetched or expanded).
 //! * [`parse`] — the XMLTV walk over it: every `<channel>` (id, display names, icon) and the
 //!   `<programme>`s that overlap a time window, with the fields a guide draws (title, episode
-//!   title, description, episode number, category, icon). Everything else — credits, ratings,
+//!   title, description, episode number, categories, year, icon). Everything else — credits, ratings,
 //!   images, star ratings — is skipped without being kept.
 //!
 //! The repository has no XML dependency on purpose: every Plex read is JSON, and a guide is a
@@ -46,9 +46,19 @@ pub struct Programme {
     pub episode: String,
     /// The first `<category>`, empty when absent.
     pub category: String,
+    /// Every `<category>`, in document order (the first is [`Self::category`]), at most
+    /// [`MAX_CATEGORIES`]. A guide often leads with a generic word (`Series`) and names the genre
+    /// second, so the genre a cell is coloured by is read across all of them.
+    pub categories: Vec<String>,
+    /// The year from `<date>` (`2019`, `20190514`), when the guide gives one — what tells two films
+    /// of one title apart when the airing is looked up in Plex.
+    pub year: Option<u16>,
     /// Artwork URL (`<icon src>`), empty when absent.
     pub icon: String,
 }
+
+/// How many `<category>` elements one programme keeps.
+pub const MAX_CATEGORIES: usize = 6;
 
 /// A parsed guide: every channel, and the airings that overlap the requested window.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -139,7 +149,11 @@ pub fn parse(bytes: &[u8], from_ms: i64, to_ms: i64) -> Result<Guide, Error> {
                             "title" if p.title.is_empty() => field = Some((Field::Title, depth)),
                             "sub-title" if p.sub_title.is_empty() => field = Some((Field::SubTitle, depth)),
                             "desc" if p.desc.is_empty() => field = Some((Field::Desc, depth)),
-                            "category" if p.category.is_empty() => field = Some((Field::Category, depth)),
+                            "category" if p.categories.len() < MAX_CATEGORIES => {
+                                p.categories.push(String::new());
+                                field = Some((Field::Category, depth));
+                            }
+                            "date" if p.year.is_none() => field = Some((Field::Date, depth)),
                             "episode-num" => {
                                 field = Some((match attr(&attrs, "system").as_str() {
                                     "onscreen" => Field::EpisodeOnscreen,
@@ -173,7 +187,12 @@ pub fn parse(bytes: &[u8], from_ms: i64, to_ms: i64) -> Result<Guide, Error> {
                         Field::Title => push_text(&mut p.title, &t),
                         Field::SubTitle => push_text(&mut p.sub_title, &t),
                         Field::Desc => push_text(&mut p.desc, &t),
-                        Field::Category => push_text(&mut p.category, &t),
+                        Field::Category => {
+                            if let Some(c) = p.categories.last_mut() {
+                                push_text(c, &t);
+                            }
+                        }
+                        Field::Date => p.year = year_of(&t),
                         Field::EpisodeOnscreen => push_text(&mut p.episode, &t),
                         Field::EpisodeNs => push_text(&mut episode_ns, &t),
                         Field::DisplayName | Field::Ignored => {}
@@ -195,6 +214,7 @@ enum Field {
     SubTitle,
     Desc,
     Category,
+    Date,
     EpisodeOnscreen,
     EpisodeNs,
     Ignored,
@@ -225,7 +245,11 @@ fn close(
             p.title = p.title.trim().to_owned();
             p.sub_title = p.sub_title.trim().to_owned();
             p.desc = p.desc.trim().to_owned();
-            p.category = p.category.trim().to_owned();
+            for c in &mut p.categories {
+                *c = c.trim().to_owned();
+            }
+            p.categories.retain(|c| !c.is_empty());
+            p.category = p.categories.first().cloned().unwrap_or_default();
             p.episode = p.episode.trim().to_owned();
             if p.episode.is_empty() {
                 p.episode = episode_from_ns(episode_ns);
@@ -261,6 +285,14 @@ fn clip(text: &str) -> String {
     let mut s = String::new();
     push_text(&mut s, text);
     s
+}
+
+/// The year an XMLTV `<date>` names: its first four digits (`2019`, `20190514`, `2019-05-14`), when
+/// they are a plausible year.
+fn year_of(text: &str) -> Option<u16> {
+    let t = text.trim();
+    let y: u16 = t.get(..4).filter(|d| d.bytes().all(|b| b.is_ascii_digit()))?.parse().ok()?;
+    (1880..=2200).contains(&y).then_some(y)
 }
 
 /// `xmltv_ns` is `season.episode.part`, each ZERO-based and any of them empty: `0.4.` is S1E5.
@@ -586,7 +618,9 @@ mod tests {
     <desc>Marge objects to the &quot;violence&quot;.</desc>
     <credits><actor role="Homer">Dan Castellaneta</actor></credits>
     <category>Animation</category>
-    <category>Comedy</category>
+    <category> Comedy </category>
+    <category></category>
+    <date>19901011</date>
     <icon src="http://192.0.2.20:8000/api/programs/x/artwork/poster"/>
     <episode-num system="onscreen">S02E09</episode-num>
     <episode-num system="xmltv_ns">1.8.</episode-num>
@@ -629,6 +663,10 @@ mod tests {
         assert_eq!(p.sub_title, "Itchy & Scratchy & Marge");
         assert_eq!(p.desc, "Marge objects to the \"violence\".");
         assert_eq!(p.category, "Animation", "the first category");
+        assert_eq!(p.categories, ["Animation", "Comedy"], "every category, trimmed, empty ones dropped");
+        assert_eq!(p.year, Some(1990));
+        assert_eq!(g.programmes[1].year, None);
+        assert!(g.programmes[1].categories.is_empty());
         assert_eq!(p.episode, "S02E09", "onscreen wins over xmltv_ns");
         assert_eq!(p.icon, "http://192.0.2.20:8000/api/programs/x/artwork/poster");
         assert_eq!(g.programmes[1].episode, "S01E05", "xmltv_ns is zero-based");
@@ -674,6 +712,15 @@ mod tests {
         assert_eq!(parse(b"", 0, 1), Err(Error::NotXmltv));
         assert_eq!(parse(&[0xff, 0xfe, 0x00], 0, 1), Err(Error::NotUtf8));
         assert!(matches!(parse(b"<tv a=b></tv>", 0, 1), Err(Error::Malformed(_))), "unquoted attribute");
+    }
+
+    #[test]
+    fn a_date_gives_a_year_only_when_it_reads_as_one() {
+        assert_eq!(year_of("2019"), Some(2019));
+        assert_eq!(year_of(" 2019-05-14 "), Some(2019));
+        assert_eq!(year_of("19"), None);
+        assert_eq!(year_of("abcd"), None);
+        assert_eq!(year_of("0001"), None);
     }
 
     #[test]

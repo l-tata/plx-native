@@ -104,5 +104,54 @@
   "settings.livetv.off": {
     "value": "Off",
     "description": "Settings: the Live TV row's value while no Tunarr server is set up"
+  },
+  "livetv.starts_in": {
+    "value": "Starts in {time}",
+    "description": "Live TV guide: an upcoming program that starts within the hour. {time} is a duration such as “25 min” or “1 hr 5 min”.",
+    "args": {
+      "time": "str"
+    }
+  },
+  "livetv.filter.all": {
+    "value": "All",
+    "description": "Live TV guide: genre filter chip that shows every channel"
+  },
+  "livetv.filter.movies": {
+    "value": "Movies",
+    "description": "Live TV guide: genre filter chip for films"
+  },
+  "livetv.filter.sports": {
+    "value": "Sports",
+    "description": "Live TV guide: genre filter chip for sport"
+  },
+  "livetv.filter.kids": {
+    "value": "Kids",
+    "description": "Live TV guide: genre filter chip for children's programs and animation"
+  },
+  "livetv.filter.news": {
+    "value": "News",
+    "description": "Live TV guide: genre filter chip for news"
+  },
+  "livetv.filter.documentary": {
+    "value": "Documentaries",
+    "description": "Live TV guide: genre filter chip for documentaries"
+  },
+  "livetv.filter.comedy": {
+    "value": "Comedy",
+    "description": "Live TV guide: genre filter chip for comedy and sitcoms"
+  },
+  "livetv.filter.empty": {
+    "value": "Nothing in {filter} for these two hours.",
+    "description": "Live TV guide: the chosen genre filter matches no program in the visible two hours. {filter} is the chip's name (Movies, Sports, or a category from the guide).",
+    "args": {
+      "filter": "str"
+    }
+  },
+  "livetv.plex_hint": {
+    "value": "Hold {key} to watch from the start in Plex",
+    "description": "Live TV guide: complete sentence shown when the focused program is in the viewer's Plex library; holding OK opens it there. {key} is the OK button rendered as a keycap; keep exactly one occurrence. Plex is a product name.",
+    "args": {
+      "key": "str"
+    }
   }
 }

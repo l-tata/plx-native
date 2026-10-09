@@ -61,6 +61,49 @@ pub(crate) const HOME_CARDS_MAX: usize = 2048;
 pub const MAX_SHELF_ITEMS: usize = 24;
 
 pub const KIND_COLLECTION: c_int = 4;
+/// A live channel on Home's On Now shelf (`crate::livetv::on_now`): `rk` is its guide number,
+/// `title` the programme airing, `show_title` the channel as a viewer names it, and the resume pair
+/// the airing's elapsed time. Not a PMS item — nothing opens it; OK tunes it.
+pub const KIND_CHANNEL: c_int = 5;
+/// A video playlist (`/playlists?playlistType=video`): `thumb` its composite, `child_count` its
+/// items. OK opens its page (the collection page, `CollectionRef::by_playlist`), where it plays.
+pub const KIND_PLAYLIST: c_int = 6;
+
+/// The hub identifiers of the shelves the APP assembles rather than a server's `/hubs` lists —
+/// see [`HomeExtras`]. One prefix, so every rule that must tell a server shelf from one of ours
+/// (the card bound's accounting, the hub identity) asks one question.
+pub const APP_SHELF_PREFIX: &str = "home.plx.";
+/// Home's live shelf (`crate::livetv::on_now`).
+pub const ON_NOW_HUB: &str = "home.plx.onnow";
+/// The account's Plex watchlist, as the household's own library copies (`crate::watchlist`).
+pub const WATCHLIST_HUB: &str = "home.plx.watchlist";
+/// Recently added in the genres the profile watches most.
+pub const GENRES_HUB: &str = "home.plx.genres";
+/// The servers' video playlists.
+pub const PLAYLISTS_HUB: &str = "home.plx.playlists";
+
+/// The rows of one app shelf, carried by a store command. `Debug` prints the count alone: a row is
+/// a household's viewing, and `PmsMovie` deliberately has no `Debug` (`ItemMenuKind`'s doc says
+/// why).
+#[derive(Clone, Default)]
+pub struct ShelfRows(pub Vec<PmsMovie>);
+
+impl std::fmt::Debug for ShelfRows {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ShelfRows({})", self.0.len())
+    }
+}
+
+/// Does a card of this kind open the item menu on a hold? Not a channel (it only tunes), a
+/// collection or a playlist (no watch state to mark, nothing to play from the start).
+pub fn item_has_menu_kind(kind: c_int) -> bool {
+    !matches!(kind, KIND_CHANNEL | KIND_COLLECTION | KIND_PLAYLIST)
+}
+
+/// Is `hub_id` one of the shelves the app assembles ([`APP_SHELF_PREFIX`])?
+pub fn app_shelf(hub_id: &str) -> bool {
+    hub_id.starts_with(APP_SHELF_PREFIX)
+}
 
 pub fn listable(type_str: &str) -> bool {
     matches!(type_str, "movie" | "show" | "season" | "episode")
@@ -135,6 +178,10 @@ pub struct PmsMovie {
     /// A collection's member count (`childCount`) — its tile's caption, "12 items". 0 on every
     /// other kind, where the listing's count fields mean leaves rather than members.
     pub child_count: i64,
+    /// The metadata provider's global id (`plex://movie/…`), verbatim or empty — the key the
+    /// account's watchlist speaks (`crate::watchlist`), the same on every server holding the title.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub guid: String,
 }
 
 impl PmsMovie {
@@ -187,6 +234,23 @@ pub struct PmsState {
     /// Moves every time the published catalog is replaced. See the retired `CATALOG_GEN` static's
     /// doc.
     pub catalog_gen: u32,
+    /// The shelves the app assembles from outside the servers' `/hubs` ([`HomeExtras`]), merged in
+    /// beside every source's own.
+    extras: HomeExtras,
+    /// The watchlist's fetch bookkeeping and published membership (`crate::watchlist`).
+    watchlist: crate::watchlist::State,
+}
+
+/// **Home's own shelves**: rows assembled from somewhere other than a server's `/hubs` answer, held
+/// beside the sources so every merge places them and a server landing never drops them. Each is
+/// set whole by its own command (`HubsCmd::SetOnNow`, `HubsCmd::SetWatchlist`); an empty one draws
+/// no heading at all, like a source that never answered.
+#[derive(Default, Clone)]
+pub struct HomeExtras {
+    /// The live channels (`crate::livetv::on_now`), [`KIND_CHANNEL`] rows.
+    pub on_now: Vec<Arc<PmsMovie>>,
+    /// The watchlist's titles the household's libraries hold, as those library rows.
+    pub watchlist: Vec<Arc<PmsMovie>>,
 }
 
 impl Default for PmsState {
@@ -199,6 +263,8 @@ impl Default for PmsState {
             hub_gen: 0,
             last_sections_gen: 0,
             catalog_gen: 0,
+            extras: HomeExtras::default(),
+            watchlist: Default::default(),
         }
     }
 }
@@ -223,6 +289,9 @@ pub struct PmsAdapter {
     /// launcher that does not call [`spawn_fetch`] (a replay) is never counted. It lives on the
     /// adapter, so a reset's rotation retires the old count with the old mailbox.
     owed: AtomicU32,
+    /// The watchlist worker's mailbox (`crate::watchlist`), shared so a kick from a path holding
+    /// only `&PmsAdapter` can hand the worker its own handle.
+    watchlist: Arc<Mutex<Option<crate::watchlist::Landing>>>,
     /// Test only: how many times [`take_landings`] has finished, so a fake worker can post only
     /// AFTER a take has found its mailbox empty.
     #[cfg(any(test, feature = "test-support"))]
@@ -235,6 +304,7 @@ impl Default for PmsAdapter {
             results: Mutex::new(Vec::new()),
             next_request: AtomicU32::new(1),
             owed: AtomicU32::new(0),
+            watchlist: Arc::new(Mutex::new(None)),
             #[cfg(any(test, feature = "test-support"))]
             takes: AtomicU32::new(0),
         }
@@ -243,6 +313,11 @@ impl Default for PmsAdapter {
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn owed_count_for_test(adapter: &PmsAdapter) -> u32 { adapter.owed.load(Ordering::SeqCst) }
+
+/// Is any source's fetch in flight (its single-flight latch, [`Src::fetching`], still held)?
+pub fn in_flight(state: &PmsState) -> bool {
+    state.srcs.iter().any(|s| s.fetching)
+}
 
 /// Is a worker spawned through [`spawn_fetch`] still owing this adapter a landing? Read by the
 /// landing gate's dump mode, which waits for the answer a request it issued owes
@@ -395,6 +470,7 @@ pub fn parse_item(it: &plx_plex::plex::Metadata, sid: ServerId) -> PmsMovie {
     m.art = clean(&it.art);
     m.summary = clean(&it.summary);
     m.rk = clean(&it.rating_key);
+    m.guid = clean(&it.guid);
     // Media[0]: codecs + Part[0].key (movies/episodes; a show container has none)
     if let Some(md) = it.media.first() {
         m.vcodec = clean(&md.video_codec);
@@ -473,6 +549,7 @@ pub struct HubsSnapshot {
     data: Arc<HomeCatalog>,
     generation: u32,
     state: HubState,
+    watchlist: Option<Arc<crate::watchlist::Membership>>,
 }
 
 pub fn hubs_snapshot(state: &PmsState) -> HubsSnapshot {
@@ -480,6 +557,7 @@ pub fn hubs_snapshot(state: &PmsState) -> HubsSnapshot {
         data: Arc::clone(published_home(state)),
         generation: state.catalog_gen,
         state: hub_state(state),
+        watchlist: state.watchlist.members.clone(),
     }
 }
 
@@ -487,11 +565,11 @@ impl HubsSnapshot {
     /// An explicit empty retained publication; fixture construction must not capture globals.
     #[cfg(any(test, feature = "test-support"))]
     pub fn empty_for_test() -> Self {
-        Self { data: Arc::new(HomeCatalog::default()), generation: 0, state: HubState::Loading }
+        Self { data: Arc::new(HomeCatalog::default()), generation: 0, state: HubState::Loading, watchlist: None }
     }
 
     pub fn view(&self) -> HubsView<'_> {
-        HubsView { data: &self.data, generation: self.generation, state: self.state }
+        HubsView { data: &self.data, generation: self.generation, state: self.state, watchlist: self.watchlist.as_deref() }
     }
 }
 
@@ -502,6 +580,7 @@ pub struct HubsView<'a> {
     data: &'a HomeCatalog,
     pub generation: u32,
     pub state: HubState,
+    watchlist: Option<&'a crate::watchlist::Membership>,
 }
 
 #[derive(Clone, Copy)]
@@ -530,6 +609,11 @@ fn stable_hub_identity<'a>(row: &'a HubRow, items: &[Arc<PmsMovie>]) -> Option<H
     if row.len == 0 { return None; }
     let sid = items.get(row.start)?.sid;
     if row.hub_id == "home.continue" { Some(HubIdentity::ContinueWatching) }
+    // An app shelf is one per Home, whichever server its first card came from: the watchlist's
+    // lead title moving to a share must not read as a different shelf (and move the focus).
+    else if app_shelf(&row.hub_id) {
+        Some(HubIdentity::Identifier { sid: ServerId::UNSET, id: &row.hub_id, key: &row.key })
+    }
     else if !row.hub_id.is_empty() {
         Some(HubIdentity::Identifier { sid, id: &row.hub_id, key: &row.key })
     }
@@ -545,6 +629,11 @@ pub struct HeroRef<'a> {
 
 impl<'a> HubsView<'a> {
     pub fn hub_count(self) -> usize { self.data.hubs.len() }
+    /// Is the title with this guid on the profile's watchlist? `None` while the list is unknown
+    /// (not fetched yet, signed out) or for a guid that cannot be on one — offer no control then.
+    pub fn on_watchlist(self, guid: &str) -> Option<bool> {
+        self.watchlist?.on_list(guid)
+    }
     pub fn hero_count(self) -> usize { self.data.heroes.len() }
     pub fn hub(self, index: usize) -> Option<HubRef<'a>> {
         let row = self.data.hubs.get(index)?;
@@ -638,6 +727,10 @@ fn request_refetch_hubs_with_scope(state: &mut PmsState, adapter: &Arc<PmsAdapte
         if let Some(request) = retry_now_with(gen, adapter, s, launch) { endpoints.insert(request); }
     }
     state.srcs = srcs;
+    // The watchlist rides Home's refresh, on its own slower clock (`watchlist::STALE_MS`).
+    if state.watchlist.due(plx_base::wallclock::now_ms()) {
+        kick_watchlist(state, adapter, None);
+    }
     endpoints
 }
 
@@ -691,7 +784,7 @@ fn edit_item_with_scope(
     if !hit {
         return false; // the item is on no shelf (a Library-grid or Related item): nothing to redraw
     }
-    let build = merge_with_scope(&state.srcs, scope);
+    let build = merge_with_scope(&state.srcs, scope, &state.extras);
     adopt_browse_scope(state, scope);
     commit(state, build);
     true
@@ -785,6 +878,15 @@ struct Shelf {
 struct SourceBuild {
     cw: Vec<CwItem>,
     shelves: Vec<Shelf>,
+    /// Recently added in the genres this source's profile watches most (`crate::taste`), newest
+    /// first. `None` when this fetch did not ask (the shelf is refreshed on its own slower clock,
+    /// [`GENRES_STALE_MS`]) — [`landed_ok`] then keeps the rows the source last had.
+    #[serde(default)]
+    genres: Option<Vec<Arc<PmsMovie>>>,
+    /// The source's video playlists ([`KIND_PLAYLIST`] rows); `None` when the read failed — the
+    /// source keeps the ones it had, as with the genre shelf.
+    #[serde(default)]
+    playlists: Option<Vec<Arc<PmsMovie>>>,
 }
 
 /// GET one source's hubs and project them. `None` = the request failed (transport, HTTP, or
@@ -796,13 +898,40 @@ struct SourceBuild {
 /// otherwise stamp these rows with the other machine's id — the one thing every `(sid, rk)`
 /// comparison downstream then trusts). A `&'static Client` also pins the exact address this fetch
 /// was aimed at even if the registry re-points that slot mid-request.
-fn fetch_source(c: &plx_plex::plex::Client, sid: ServerId) -> Option<SourceBuild> {
+///
+/// `genres`: also build the source's genre shelf (`crate::taste`), which runs on its own slower
+/// clock; a fetch that does not ask leaves [`SourceBuild::genres`] `None` (keep what it had).
+fn fetch_source(c: &plx_plex::plex::Client, sid: ServerId, genres: bool) -> Option<SourceBuild> {
     let mc = c.home_hubs(HUB_FETCH_COUNT)?;
     // The Continue Watching shelf comes from the DEDICATED hub (see `project`). Its failure fails
     // THIS SOURCE (`?`) — nothing of it commits and it retries on its own backoff. Losing the most
     // important shelf to a transient error would be worse than briefly showing the previous one.
     let cw = c.continue_watching(HUB_FETCH_COUNT)?;
-    Some(project(&mc, &cw, sid))
+    let mut build = project(&mc, &cw, sid);
+    if genres {
+        build.genres = crate::taste::fetch(c, sid, &cw).map(|rows| rows.into_iter().map(Arc::new).collect());
+    }
+    build.playlists = c.video_playlists().map(|mc| playlist_rows(&mc, sid).into_iter().map(Arc::new).collect());
+    Some(build)
+}
+
+/// A `/playlists?playlistType=video` answer as Home's playlist cards: the video playlists that
+/// hold anything, in the server's order. Pure.
+fn playlist_rows(mc: &plx_plex::plex::MediaContainer, sid: ServerId) -> Vec<PmsMovie> {
+    mc.metadata
+        .iter()
+        .filter(|it| it.kind == "playlist" && it.leaf_count > 0 && !it.rating_key.is_empty())
+        .map(|it| PmsMovie {
+            sid,
+            kind: KIND_PLAYLIST,
+            rk: clean(&it.rating_key),
+            title: clean(&it.title),
+            thumb: clean(if it.composite.is_empty() { &it.thumb } else { &it.composite }),
+            child_count: it.leaf_count,
+            summary: clean(&it.summary),
+            ..Default::default()
+        })
+        .collect()
 }
 
 /// Project one source's `/hubs` + `/hubs/continueWatching` responses into its [`SourceBuild`].
@@ -836,6 +965,7 @@ fn project(
         out.cw = hub
             .metadata
             .iter()
+            .filter(|it| !spent_deck_entry(it))
             .filter_map(|it| {
                 keep(it).map(|m| CwItem {
                     last_viewed_at: it.last_viewed_at,
@@ -894,6 +1024,34 @@ fn project(
     out
 }
 
+/// **A deck entry with nothing left to continue**, which the server still lists — dropped from
+/// Continue Watching rather than drawn as a card whose press has nowhere to go.
+///
+/// * A MOVIE watched to the end with no resume point (`viewCount > 0`, `viewOffset` 0 or at the
+///   end). PMS normally clears it from the deck on the scrobble; one it kept anyway (a scrobble
+///   another client sent, a deck cached server-side) is a finished film. Movies only: an EPISODE
+///   with a view count and no offset is the ordinary next-up card of a re-watch.
+/// * An EPISODE that is not available: it lists versions, and no version has a part to play (the
+///   file is gone, or the next episode is a placeholder the agent knows of and the library has not
+///   got). An entry with no `Media` at all is kept — the deck does not always send it.
+/// * A SHOW or SEASON every episode of which has been watched: there is no next episode.
+///
+/// Pure, over the wire row, so the rule is graded on the host.
+fn spent_deck_entry(it: &plx_plex::plex::Metadata) -> bool {
+    match it.kind.as_str() {
+        "movie" => {
+            it.view_count > 0
+                && (it.view_offset <= 0 || (it.duration > 0 && it.view_offset >= it.duration))
+        }
+        "episode" => {
+            !it.media.is_empty()
+                && it.media.iter().all(|m| m.part.iter().all(|p| p.key.is_empty()))
+        }
+        "show" | "season" => it.leaf_count > 0 && it.viewed_leaf_count >= it.leaf_count,
+        _ => false,
+    }
+}
+
 // ---- the merge: every source, one Home ----------------------------------------------------------
 
 /// Divide `budget` between sources that each want `want[i]`, so that **no source can starve
@@ -940,7 +1098,10 @@ pub fn allot(budget: usize, want: &[usize]) -> Vec<usize> {
 ///    a borrowed item holds first position exactly when the owner watched it last. It carries NO
 ///    annotation (see [`HubRow::source`]). This is the official client's own shape: the owner's
 ///    screenshots show a friend's two films sitting BETWEEN their own three, in one row.
-/// 2. **Every other shelf**, source by source in roster order — the owned server's first, then each
+/// 2. **The app's own shelves** — the watchlist, On Now, recently added in your genres and the
+///    playlists ([`HomeExtras`] and each source's genre and playlist rows), each only when it has
+///    anything to show.
+/// 3. **Every other shelf**, source by source in roster order — the owned server's first, then each
 ///    shared server's, contiguously, because adjacency is the grouping device.
 ///
 /// A source that has never answered contributes nothing at all: no heading, no empty shelf, no
@@ -949,7 +1110,7 @@ pub fn allot(budget: usize, want: &[usize]) -> Vec<usize> {
 /// source that is really gone leaves the ROSTER, which is what drops its shelves.
 #[cfg(any(test, feature = "test-support"))]
 fn merge(srcs: &[Src]) -> HubBuild {
-    merge_with_scope(srcs, &BrowseScope::standalone())
+    merge_with_scope(srcs, &BrowseScope::standalone(), &HomeExtras::default())
 }
 
 /// The sources that have answered, as `(handle, last projection)`, in roster order.
@@ -986,17 +1147,19 @@ fn publishable_shelves<'a>(
 /// shelves dropped from the tail of a source. `(0, 0)` on every Home under the bound.
 fn bound_overflow(srcs: &[Src], scope: &BrowseScope, build: &HubBuild) -> (usize, usize) {
     let live = live_sources(srcs);
-    let (mut offered_shelves, mut offered_cards) = (0, 0);
+    let (mut offered_shelves, mut offered_cards) = (0usize, 0usize);
     for items in publishable_shelves(&live, &scope.pins).iter().flatten() {
         if !items.is_empty() {
             offered_shelves += 1;
             offered_cards += items.len();
         }
     }
-    let deck = build.1.first().filter(|h| h.hub_id == "home.continue");
-    let published_shelves = build.1.len() - usize::from(deck.is_some());
-    let published_cards = build.0.len() - deck.map_or(0, |h| h.len);
-    (offered_shelves - published_shelves, offered_cards - published_cards)
+    // Only the sources' own shelves are offered against the bound: the deck and the app's shelves
+    // are placed before it is divided and never count as left off.
+    let server_shelf = |h: &&HubRow| h.hub_id != "home.continue" && !app_shelf(&h.hub_id);
+    let published_shelves = build.1.iter().filter(server_shelf).count();
+    let published_cards: usize = build.1.iter().filter(server_shelf).map(|h| h.len).sum();
+    (offered_shelves.saturating_sub(published_shelves), offered_cards.saturating_sub(published_cards))
 }
 
 /// Approximate resident bytes of a catalog: each card's struct plus the heap its strings own.
@@ -1008,7 +1171,7 @@ fn catalog_bytes(cat: &[Arc<PmsMovie>]) -> usize {
             std::mem::size_of::<PmsMovie>()
                 + [
                     &m.title, &m.rating, &m.part, &m.thumb, &m.still, &m.art, &m.summary, &m.rk,
-                    &m.vcodec, &m.acodec, &m.show_rk, &m.show_title, &m.aired,
+                    &m.vcodec, &m.acodec, &m.show_rk, &m.show_title, &m.aired, &m.guid,
                 ]
                 .iter()
                 .map(|s| s.capacity())
@@ -1017,7 +1180,23 @@ fn catalog_bytes(cat: &[Arc<PmsMovie>]) -> usize {
         .sum()
 }
 
-fn merge_with_scope(srcs: &[Src], scope: &BrowseScope) -> HubBuild {
+/// Round-robin across sources — each source's first row, then each one's second, … — so one
+/// household server cannot fill a merged app shelf before a share contributes, and a card appears
+/// once however many sources list it (by identity, [`plx_plex::plex::same_item`]).
+fn interleave<'a>(per_source: &[&'a [Arc<PmsMovie>]]) -> Vec<&'a Arc<PmsMovie>> {
+    let depth = per_source.iter().map(|rows| rows.len()).max().unwrap_or(0);
+    let mut out: Vec<&'a Arc<PmsMovie>> = Vec::new();
+    for i in 0..depth {
+        for m in per_source.iter().filter_map(|rows| rows.get(i)) {
+            if !out.iter().any(|o| plx_plex::plex::same_item((o.sid, &o.rk), (m.sid, &m.rk))) {
+                out.push(m);
+            }
+        }
+    }
+    out
+}
+
+fn merge_with_scope(srcs: &[Src], scope: &BrowseScope, extras: &HomeExtras) -> HubBuild {
     let pins = &scope.pins;
     let live = live_sources(srcs);
 
@@ -1057,7 +1236,55 @@ fn merge_with_scope(srcs: &[Src], scope: &BrowseScope) -> HubBuild {
         });
     }
 
-    // ---- 2. every other shelf, grouped by source ----
+    // ---- 2. the app's own shelves: the watchlist, On Now, then recently added in your genres ----
+    // Pinned like every other row (a watchlist title found only in an unpinned library stays off
+    // Home), capped like every shelf. The genre shelf comes last and is deduplicated against
+    // EVERYTHING else Home shows — the deck, the watchlist and every server shelf — because its
+    // whole worth is titles you have not been shown already.
+    let shelf_rows = |rows: &mut dyn Iterator<Item = &Arc<PmsMovie>>| -> Vec<Arc<PmsMovie>> {
+        rows.filter(|m| m.kind == KIND_CHANNEL || item_pinned(pins, m)).take(MAX_SHELF_ITEMS).cloned().collect()
+    };
+    let watchlist = shelf_rows(&mut extras.watchlist.iter());
+    let on_now = shelf_rows(&mut extras.on_now.iter());
+    let genres = {
+        let shown: std::collections::HashSet<(ServerId, &str)> = new_cat.iter().map(|m| (m.sid, m.rk.as_str()))
+            .chain(watchlist.iter().map(|m| (m.sid, m.rk.as_str())))
+            .chain(live.iter().flat_map(|(_, b)| b.shelves.iter().flat_map(|sh| sh.items.iter()))
+                .map(|m| (m.sid, m.rk.as_str())))
+            .collect();
+        let per_source: Vec<&[Arc<PmsMovie>]> = live.iter().map(|(_, b)| b.genres.as_deref().unwrap_or(&[])).collect();
+        shelf_rows(&mut interleave(&per_source).into_iter().filter(|m| !shown.contains(&(m.sid, m.rk.as_str()))))
+    };
+    let playlists = {
+        let per_source: Vec<&[Arc<PmsMovie>]> = live.iter().map(|(_, b)| b.playlists.as_deref().unwrap_or(&[])).collect();
+        shelf_rows(&mut interleave(&per_source).into_iter())
+    };
+    for (hub_id, title, rows) in [
+        (WATCHLIST_HUB, plx_platform::i18n::msg::browse_home_watchlist(), &watchlist),
+        (ON_NOW_HUB, plx_platform::i18n::msg::browse_home_on_now(), &on_now),
+        (GENRES_HUB, plx_platform::i18n::msg::browse_home_your_genres(), &genres),
+        (PLAYLISTS_HUB, plx_platform::i18n::msg::browse_home_playlists(), &playlists),
+    ] {
+        if rows.is_empty() {
+            continue;
+        }
+        let start = new_cat.len();
+        for m in rows {
+            new_cat.push(Arc::clone(m));
+            row_handle.push("");
+        }
+        new_hubs.push(HubRow {
+            title: title.to_string(),
+            hub_id: hub_id.to_string(),
+            key: String::new(),
+            source: String::new(),
+            total: 0,
+            start,
+            len: rows.len(),
+        });
+    }
+
+    // ---- 3. every other shelf, grouped by source ----
     // What each shelf would publish with an unlimited budget, computed ONCE so the demand handed to
     // `allot` and the cards emitted below cannot disagree. Filtered BEFORE the cap, so an unpinned
     // library cannot spend a pinned one's row budget (nor can items past the cap, which are never
@@ -1099,7 +1326,7 @@ fn merge_with_scope(srcs: &[Src], scope: &BrowseScope) -> HubBuild {
         }
     }
 
-    // ---- 3. the rotating hero pool ----
+    // ---- 4. the rotating hero pool ----
     // Continue Watching items first, then Recently Added, deduped by the item's IDENTITY. Require
     // landscape `art` (the hero draws a full-bleed backdrop) and skip seasons (a bare "Season 1"
     // makes a poor billboard). Capped at HERO_MAX.
@@ -1207,6 +1434,9 @@ struct Src {
     /// failure never blank a populated Home; `None` (never answered) is what makes a dead source
     /// contribute nothing at all — no heading, no empty shelf, no spinner row.
     last: Option<SourceBuild>,
+    /// When this source's genre shelf was last built (wall-clock ms) — its own clock
+    /// (`taste::STALE_MS`). Not captured by `initial`: it only decides what a fetch asks for.
+    genres_at_ms: Option<i64>,
 }
 
 impl Src {
@@ -1219,9 +1449,11 @@ impl Src {
         mint: impl FnOnce() -> u32,
     ) -> Option<HubRequest> {
         if self.fetching { return None; }
+        let now = plx_base::wallclock::now_ms();
         let request = HubRequest {
             gen: generation, seq: mint(), sid: self.sid,
             client: LandingClient::live(client), token_gen: client.token_gen(),
+            genres: self.genres_at_ms.is_none_or(|at| now - at >= crate::taste::STALE_MS || now < at),
         };
         self.client = Some(client);
         self.token_gen = request.token_gen;
@@ -1245,6 +1477,7 @@ impl Src {
             retry_s: 0.0,
             retry_n: 0,
             last: None,
+            genres_at_ms: None,
         }
     }
 }
@@ -1296,6 +1529,8 @@ pub struct HubRequest {
     sid: ServerId,
     client: LandingClient,
     token_gen: u32,
+    /// Build the genre shelf too (`Src::genres_at_ms` is stale).
+    genres: bool,
 }
 
 impl HubRequest {
@@ -1611,7 +1846,7 @@ fn sync_roster_with_scope(state: &mut PmsState, scope: &BrowseScope) {
     let dropped = srcs.iter().any(|x| x.last.is_some());
     state.srcs = out;
     if dropped || restamped || scope_moved {
-        let build = merge_with_scope(&state.srcs, scope);
+        let build = merge_with_scope(&state.srcs, scope, &state.extras);
         commit(state, build);
     }
 }
@@ -1656,6 +1891,15 @@ fn landed_ok(s: &mut Src, b: SourceBuild) {
         b.shelves.len(),
         b.cw.len()
     ));
+    let mut b = b;
+    match b.genres {
+        // The genre shelf runs on its own clock: a fetch that did not build it keeps the last one.
+        None => b.genres = s.last.as_mut().and_then(|last| last.genres.take()),
+        Some(_) => s.genres_at_ms = Some(plx_base::wallclock::now_ms()),
+    }
+    if b.playlists.is_none() {
+        b.playlists = s.last.as_mut().and_then(|last| last.playlists.take());
+    }
     s.last = Some(b);
     s.state = HubState::Ready;
     s.retry_n = 0;
@@ -1741,15 +1985,15 @@ pub fn spawn_fetch(adapter: &Arc<PmsAdapter>, request: HubRequest) -> bool {
     let worker_adapter = Arc::clone(adapter);
     adapter.owed.fetch_add(1, Ordering::SeqCst);
     let spawned = !refused && plx_base::task::spawn_small("hubs", move || {
-        let (client, sid) = (request.client.resource, request.sid);
+        let (client, sid, genres) = (request.client.resource, request.sid, request.genres);
         #[cfg(any(test, feature = "test-support"))]
         let build = match late {
             Some((extra, items, takes_at_spawn)) =>
                 late_build_for_test(&worker_adapter, takes_at_spawn, extra, items),
-            None => catch_unwind(move || fetch_source(client, sid)).ok().flatten(),
+            None => catch_unwind(move || fetch_source(client, sid, genres)).ok().flatten(),
         };
         #[cfg(not(any(test, feature = "test-support")))]
-        let build = catch_unwind(move || fetch_source(client, sid)).ok().flatten();
+        let build = catch_unwind(move || fetch_source(client, sid, genres)).ok().flatten();
         // Outside the panic guard: every admitted worker answers, including a panicking fetch.
         worker_adapter.results.lock().unwrap_or_else(|e| e.into_inner()).push(request.complete(build));
     });
@@ -1920,7 +2164,7 @@ pub fn land_with_directory(
 pub fn run(state: &mut PmsState, adapter: &Arc<PmsAdapter>, cmd: crate::stores::hubs::HubsCmd) -> crate::stores::StoreOutcome {
     use crate::stores::hubs::HubsCmd;
     match cmd {
-        HubsCmd::RefetchHubs | HubsCmd::Reset =>
+        HubsCmd::RefetchHubs | HubsCmd::Reset | HubsCmd::SetOnNow(_) | HubsCmd::EditWatchlist { .. } =>
             run_with_scope(state, adapter, cmd, &BrowseScope::standalone()),
         other => run_without_browse(state, adapter, other),
     }
@@ -1957,7 +2201,121 @@ fn run_with_scope(
             reset_with_scope(state, adapter, scope);
             crate::stores::StoreOutcome::changed(true)
         }
+        HubsCmd::SetOnNow(ShelfRows(rows)) => crate::stores::StoreOutcome::changed(set_on_now(state, rows, scope)),
+        HubsCmd::EditWatchlist { guid, add, row: ShelfRows(row) } => {
+            crate::stores::StoreOutcome::changed(edit_watchlist(state, adapter, &guid, add, row, scope))
+        }
     }
+}
+
+// ---- the watchlist shelf (`crate::watchlist`) ----------------------------------------------------
+
+/// Start a watchlist fetch (with an edit to make first, if any) when none is out; an edit asked
+/// for while one is out waits for it ([`land_watchlist`] starts it). Nothing without a plex.tv
+/// credential, and — for a plain refresh — nothing before the roster names a source to look the
+/// titles up on.
+fn kick_watchlist(state: &mut PmsState, adapter: &PmsAdapter, edit: Option<(String, bool)>) {
+    if state.watchlist.fetching {
+        if edit.is_some() {
+            state.watchlist.owed_edit = edit;
+        }
+        return;
+    }
+    if edit.is_none() && state.srcs.is_empty() {
+        return;
+    }
+    let Some(credential) = crate::watchlist::credential() else { return };
+    let sources = state.srcs.iter()
+        .filter_map(|s| plx_plex::plex::client_for(s.sid).map(|c| (s.sid, c)))
+        .collect();
+    let gen = state.watchlist.gen;
+    let request = crate::watchlist::Request { gen, edit, sources, credential };
+    let mailbox = Arc::clone(&adapter.watchlist);
+    let spawned = plx_base::task::spawn_small("watchlist", move || {
+        let build = catch_unwind(std::panic::AssertUnwindSafe(|| crate::watchlist::fetch(&request))).ok().flatten();
+        *mailbox.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::watchlist::Landing { gen, build });
+        plx_machine::idle::wake();
+    });
+    if spawned {
+        state.watchlist.fetching = true;
+        state.watchlist.asked_at_ms = Some(plx_base::wallclock::now_ms());
+    }
+}
+
+/// Take a finished watchlist fetch: publish its membership and shelf. `true` when Home must be
+/// re-merged. A failed read keeps what was shown (like a failed hub fetch); a fetch from before a
+/// profile switch is dropped.
+fn land_watchlist(state: &mut PmsState, adapter: &PmsAdapter) -> bool {
+    let Some(landing) = adapter.watchlist.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+        return false;
+    };
+    if landing.gen != state.watchlist.gen {
+        return false;
+    }
+    state.watchlist.fetching = false;
+    let moved = match landing.build {
+        Some(build) => {
+            state.watchlist.members = Some(Arc::new(build.members));
+            state.extras.watchlist = build.rows.into_iter().map(Arc::new).collect();
+            true
+        }
+        None => false,
+    };
+    if let Some(edit) = state.watchlist.owed_edit.take() {
+        kick_watchlist(state, adapter, Some(edit));
+    }
+    moved
+}
+
+/// [`HubsCmd::EditWatchlist`](crate::stores::hubs::HubsCmd::EditWatchlist): the optimistic half
+/// (membership and shelf), then the worker that performs the edit and reads the list back.
+fn edit_watchlist(state: &mut PmsState, adapter: &PmsAdapter, guid: &str, add: bool, row: Vec<PmsMovie>,
+    scope: &BrowseScope) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    plx_base::testlock::assert_held("the pms hub catalog (edit_watchlist)");
+    if plx_plex::plex::discover::watchlist_key(guid).is_empty() {
+        return false;
+    }
+    if let Some(members) = &state.watchlist.members {
+        state.watchlist.members = Some(Arc::new(members.edited(guid, add)));
+    }
+    let shelf = &mut state.extras.watchlist;
+    if add {
+        if let Some(m) = row.into_iter().next().filter(|_| !shelf.iter().any(|m| m.guid == guid)) {
+            shelf.insert(0, Arc::new(PmsMovie { guid: guid.to_owned(), ..m }));
+        }
+    } else {
+        shelf.retain(|m| m.guid != guid);
+    }
+    let build = merge_with_scope(&state.srcs, scope, &state.extras);
+    adopt_browse_scope(state, scope);
+    commit(state, build);
+    kick_watchlist(state, adapter, Some((guid.to_owned(), add)));
+    true
+}
+
+/// Replace the On Now shelf and re-commit Home, unless the rows are the ones already shown — the
+/// minute tick rebuilds them every minute, and an unchanged shelf must not move the catalog
+/// generation (every retained view would re-project for nothing).
+fn set_on_now(state: &mut PmsState, rows: Vec<PmsMovie>, scope: &BrowseScope) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    plx_base::testlock::assert_held("the pms hub catalog (set_on_now)");
+    let same = rows.len() == state.extras.on_now.len()
+        && rows.iter().zip(&state.extras.on_now).all(|(a, b)| same_channel_card(a, b));
+    if same {
+        return false;
+    }
+    state.extras.on_now = rows.into_iter().map(Arc::new).collect();
+    let build = merge_with_scope(&state.srcs, scope, &state.extras);
+    adopt_browse_scope(state, scope);
+    commit(state, build);
+    true
+}
+
+/// Two On Now cards that draw the same: one channel, one programme, one art, one progress.
+fn same_channel_card(a: &PmsMovie, b: &PmsMovie) -> bool {
+    (&a.rk, &a.title, &a.show_title, &a.thumb, a.resume_ms, a.dur_ns, a.sid)
+        == (&b.rk, &b.title, &b.show_title, &b.thumb, b.resume_ms, b.dur_ns, b.sid)
 }
 
 fn run_without_browse(state: &mut PmsState, adapter: &Arc<PmsAdapter>, cmd: crate::stores::hubs::HubsCmd) -> crate::stores::StoreOutcome {
@@ -1971,7 +2329,7 @@ fn run_without_browse(state: &mut PmsState, adapter: &Arc<PmsAdapter>, cmd: crat
         #[cfg(not(any(test, feature = "test-support")))]
         HubsCmd::EditItem { .. } =>
             unreachable!("Hubs EditItem requires a retained Browse directory"),
-        HubsCmd::RefetchHubs | HubsCmd::Reset =>
+        HubsCmd::RefetchHubs | HubsCmd::Reset | HubsCmd::SetOnNow(_) | HubsCmd::EditWatchlist { .. } =>
             unreachable!("Browse-scoped Hubs command reached the independent runner"),
     }
 }
@@ -2037,8 +2395,9 @@ fn step_landings_with_scope(state: &mut PmsState, adapter: &PmsAdapter, dt: Opti
     let landed = take();
     let any_landed = !landed.is_empty();
     let cur = state.hub_gen;
+    // The watchlist's landing first: it needs the source table in place to start an owed edit.
+    let mut dirty = land_watchlist(state, adapter);
     let mut srcs = std::mem::take(&mut state.srcs);
-    let mut dirty = false;
     for l in landed {
         // A landing from before the last authoritative fetch describes a server (or an account) we
         // have since moved off, and one whose seq has been superseded describes an attempt this
@@ -2092,7 +2451,7 @@ fn step_landings_with_scope(state: &mut PmsState, adapter: &PmsAdapter, dt: Opti
     let scope_moved = browse_scope_moved(state, scope);
     let build = (dirty || scope_moved).then(|| {
         let t0 = std::time::Instant::now();
-        let build = merge_with_scope(&srcs, scope);
+        let build = merge_with_scope(&srcs, scope, &state.extras);
         let took = t0.elapsed();
         let over = bound_overflow(&srcs, scope, &build);
         (build, took, over)
@@ -2136,6 +2495,8 @@ fn step_landings_with_scope(state: &mut PmsState, adapter: &PmsAdapter, dt: Opti
 #[cfg(any(test, feature = "test-support"))]
 fn build_test(n: usize) -> SourceBuild {
     SourceBuild {
+        genres: None,
+        playlists: None,
         cw: Vec::new(),
         shelves: vec![Shelf {
             title: "Continue Watching".into(),
@@ -2207,6 +2568,8 @@ pub fn seed_two_library_home_for_test(
     let mut source = Src::new(sid, String::new());
     source.state = HubState::Ready;
     source.last = Some(SourceBuild {
+        genres: None,
+        playlists: None,
         cw: Vec::new(),
         shelves: vec![Shelf {
             title: "Recent".into(),
@@ -2218,7 +2581,7 @@ pub fn seed_two_library_home_for_test(
     });
     let scope = BrowseScope::retained(directory);
     let sources = vec![source];
-    let build = merge_with_scope(&sources, &scope);
+    let build = merge_with_scope(&sources, &scope, &state.extras);
     state.srcs = sources;
     remember_roster(state, &scope);
     state.seen_facts = facts_key();
@@ -2244,7 +2607,7 @@ fn seed_with_scope_for_test(state: &mut PmsState, adapter: &Arc<PmsAdapter>, sid
         s.last = Some(build);
     }
     let srcs = vec![s];
-    let build = merge_with_scope(&srcs, scope);
+    let build = merge_with_scope(&srcs, scope, &state.extras);
     state.srcs = srcs;
     // Leave `sync_roster` believing this exact scope is up to date. For a standalone fixture that
     // preserves the synthetic source against an empty registry; for an owner-bound fixture it
@@ -2278,6 +2641,9 @@ fn reset_with_scope(state: &mut PmsState, adapter: &Arc<PmsAdapter>, scope: &Bro
     let _ = adapter; // every HubsStore command path rotates before applying `HubsCmd::Reset`
     state.hub_gen = state.hub_gen.wrapping_add(1); // a worker still running belongs to the old identity
     state.srcs = Vec::new();
+    // The watchlist is the profile's: drop it, and any fetch still out for the previous one.
+    state.watchlist = crate::watchlist::State { gen: state.watchlist.gen.wrapping_add(1), ..Default::default() };
+    state.extras.watchlist.clear();
     forget_roster(state);
     state.seen_facts = u32::MAX;
     // Adopt the retained pin semantics with the empty commit below: a change from BEFORE this reset
@@ -2432,6 +2798,14 @@ mod multi_source_merge_tests;
 #[cfg(test)]
 #[path = "pms_owed_tests.rs"]
 mod owed_tests;
+
+#[cfg(test)]
+#[path = "pms_deck_tests.rs"]
+mod deck_tests;
+
+#[cfg(test)]
+#[path = "pms_app_shelves_tests.rs"]
+mod app_shelves_tests;
 
 /// The library's tile abstraction (restructure spec §10) over a catalog row: the one place a
 /// `PmsMovie` becomes a `Tile`, so a widget that draws a tile asks the trait and never this type.

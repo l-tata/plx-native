@@ -143,7 +143,7 @@ mod tests {
                 assert_eq!(part, "/p");
                 assert_eq!(context, plx_data::metadata::EXTRA_CONTEXT);
             }
-            PlayIntent::Movie(_) => panic!("an extra is not the parent movie"),
+            PlayIntent::Movie(_) | PlayIntent::Playlist { .. } => panic!("an extra is not the parent movie"),
         }
         assert!(play(&d, elem(1).unwrap()).is_none());
     }

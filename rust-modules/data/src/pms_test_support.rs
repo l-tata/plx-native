@@ -156,6 +156,8 @@ pub(super) fn shelf_in(slot: u16, sec: i64, title: &str, hub_id: &str, rks: &[&s
 /// A source's projection: `(lastViewedAt, rk)` deck entries plus whole shelves.
 pub(super) fn built(slot: u16, cw: &[(i64, &str)], shelves: Vec<Shelf>) -> SourceBuild {
     SourceBuild {
+        genres: None,
+        playlists: None,
         cw: cw
             .iter()
             .map(|&(t, r)| CwItem {

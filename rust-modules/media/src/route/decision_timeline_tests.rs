@@ -368,6 +368,8 @@ fn a_session_resolved_for_a_preview_never_reports_a_timeline() {
         title: "Trailer".into(),
         ctx: plx_data::metadata::TRAILER_CONTEXT.into(),
         preview: true,
+        seed: None,
+        playlist: String::new(),
     });
     apply_plan(
         &mut ps,

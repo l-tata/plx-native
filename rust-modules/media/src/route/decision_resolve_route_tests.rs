@@ -1458,6 +1458,8 @@ fn a_refused_retry_keeps_its_position_and_full_request_for_the_next_quality() {
         title: "Episode".into(),
         ctx: "S01 E02".into(),
         preview: false,
+        seed: None,
+        playlist: String::new(),
     };
     { let s = &mut ps; {
         s.request = Some(request.clone());

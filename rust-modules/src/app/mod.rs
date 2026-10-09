@@ -128,6 +128,10 @@ pub(crate) mod events;
 pub(crate) mod lifecycle;
 pub(crate) mod playback;
 pub(crate) mod livetv;
+pub(crate) mod ambient;
+pub(crate) mod resume_place;
+pub(crate) mod deck_refresh;
+pub(crate) mod on_now;
 mod preferences;
 pub(crate) mod input;
 pub(crate) mod bridge;
@@ -295,11 +299,17 @@ pub(crate) struct App {
     pub(crate) menu_play_await: Option<MenuPlayAwait>,
     /// **Live TV's tuner** (`app::livetv`): the stream probe in flight and the re-tune schedule.
     pub(crate) livetv: livetv::LiveTuner,
+    /// Reopen where the last session left off (`resume_place`).
+    pub(crate) resume: resume_place::ResumePlace,
+    /// The ambient screensaver (`ambient`).
+    pub(crate) ambient: ambient::Ambient,
     pub(crate) prev: u32,
     pub(crate) refresh_hubs_at: u32,
-    /// When the hubs were last asked for (frame-clock ms) by the post-playback refresh or the
-    /// staleness refresh (`run::hubs_stale`).
-    pub(crate) hubs_asked_at: u32,
+    /// When Continue Watching is refetched: after a playback stops, when Home is shown again or
+    /// the app is foregrounded, and on a cadence while Home is visible (`deck_refresh`).
+    pub(crate) deck_refresh: deck_refresh::DeckRefresh,
+    /// Home's On Now shelf, rebuilt from the Live TV guide when it can have moved (`on_now`).
+    pub(crate) on_now: on_now::OnNowFeed,
     /// The wall-clock minute the top bar's clock last showed (`bridge::clock_minute_moved`).
     pub(crate) clock_minute: i64,
     /// The HTTPS retry for servers on a plaintext grant (`plex::grant::UpgradeRetry`), stepped

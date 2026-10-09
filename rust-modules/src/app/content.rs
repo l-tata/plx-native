@@ -155,6 +155,8 @@ pub(super) fn request_play_intent(
         }
         plx_screens::registry::PlayIntent::Movie(m) =>
             plx_media::route::request_play_movie(session, meta, m, &super::playback::movie_ctx(m)),
+        plx_screens::registry::PlayIntent::Playlist { playlist, item, title } =>
+            plx_media::route::request_play_playlist(session, meta, playlist, item, title),
     }
 }
 
@@ -517,6 +519,10 @@ pub(crate) fn content_requests(app: &mut App, fr: &Frame) {
                 // BACK must return them to where they pressed.
                 bridge::nav_push_with_return(&mut app.pages, AppArg::Content(arg), ret);
             }
+            ContentReq::Shuffle { sid, rk } => {
+                halt_preview(app);
+                super::playback::request_shuffle(&app.player.session, sid, &rk);
+            }
             ContentReq::PushShow { sid, rk, season } => {
                 halt_preview(app);
                 let season = (season > 0).then(|| std::os::raw::c_int::try_from(season).ok()).flatten();
@@ -676,6 +682,7 @@ fn home_requests(app: &mut App, now: u32) {
                 activate_home_item(app, source, entry, sid, &rk, Some(resume_ns), ret, now),
             HomeReq::Detail { sid, rk } =>
                 activate_home_item(app, source, entry, sid, &rk, None, ret, now),
+            HomeReq::Tune { number } => super::livetv::tune_number(app, &number, now),
             HomeReq::ItemMenu { sid, rk } => {
                 let snapshot = app.bridge.hubs_snapshot();
                 let Some(item) = home_item(snapshot.view(), sid, &rk)
@@ -806,7 +813,7 @@ mod search_action_tests {
             tag: 7 });
         let req = |sid, rk: &str, tag| SearchReq::Collection { sid, rk: rk.into(), tag };
         assert!(search_target(&hit, &req(a, "50007", 7)) == Some(AppArg::Content(ContentArg::Collection(
-            plx_plex::plex::collections::CollectionRef { sid: a, rk: "50007".into(), sec: 1, tag: 7, name: "Shorts".into() }))));
+            plx_plex::plex::collections::CollectionRef { sid: a, rk: "50007".into(), sec: 1, tag: 7, name: "Shorts".into(), playlist: false }))));
         assert!(search_target(&hit, &req(b, "50007", 7)).is_none(), "another server's key");
         assert!(search_target(&hit, &req(a, "50008", 7)).is_none(), "a stale selection");
         assert!(search_target(&hit, &SearchReq::Detail { sid: a, rk: "50007".into() }).is_none(),

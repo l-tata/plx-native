@@ -25,6 +25,40 @@ pub enum SkipAction {
     Seek(i64),
     /// the item is finished — hand off to the end-of-playback path (next episode, or leave)
     Finish,
+    /// **Undo an automatic skip**: go back to this position (ns, the segment's start) and keep
+    /// playing. Only ever offered by [`undo_prompt`], for [`UNDO_MS`] after the player skipped a
+    /// segment by itself (Settings > Playback > Skip intro & credits). The segment stays retired
+    /// (`metadata::mark_skipped`), so landing back inside it is watching it, not a new offer.
+    Rewind(i64),
+}
+
+/// How long the "Skipped intro · Back" pill stands after an automatic skip, and how long LEFT
+/// means "take me back" rather than "scrub". Long enough to read the pill and reach for the
+/// remote; short enough that LEFT is the scrub key again by the time anyone means to scrub.
+pub const UNDO_MS: u32 = 5_000;
+
+/// An automatic skip that can still be taken back: the segment it jumped over, and the frame time
+/// (ms, `clock::now`) its window closes. Owned by the player screen's HUD state
+/// (`screens::player::input::HudState::undo`); the loop installs it when it performs the skip.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AutoSkipUndo {
+    pub marker: metadata::Marker,
+    pub until: u32,
+}
+
+impl AutoSkipUndo {
+    /// The undo opened at `now` for `marker`.
+    pub fn at(marker: metadata::Marker, now: u32) -> Self {
+        AutoSkipUndo { marker, until: now.wrapping_add(UNDO_MS).max(1) }
+    }
+    /// Is the window still open at `now`? Wrapping-safe, like every other frame-time comparison.
+    pub fn live(&self, now: u32) -> bool {
+        self.until.wrapping_sub(now) as i32 > 0
+    }
+    /// Where "Back" lands: the segment's own start, in ns.
+    pub fn back_ns(&self) -> i64 {
+        self.marker.start_ms * 1_000_000
+    }
 }
 
 /// The offer the button is currently making. Carries the marker's TYPED kind, not its label:
@@ -42,9 +76,11 @@ pub struct Prompt {
 impl Prompt {
     /// The button's copy — presentation, derived from the kind at the point of drawing.
     pub fn label(&self) -> &'static str {
-        match self.kind {
-            MarkerKind::Intro => plx_platform::i18n::msg::widgets_skip_intro(),
-            MarkerKind::Credits => plx_platform::i18n::msg::widgets_skip_credits(),
+        match (self.action, self.kind) {
+            (SkipAction::Rewind(_), MarkerKind::Intro) => plx_platform::i18n::msg::widgets_skip_intro_skipped(),
+            (SkipAction::Rewind(_), MarkerKind::Credits) => plx_platform::i18n::msg::widgets_skip_credits_skipped(),
+            (_, MarkerKind::Intro) => plx_platform::i18n::msg::widgets_skip_intro(),
+            (_, MarkerKind::Credits) => plx_platform::i18n::msg::widgets_skip_credits(),
         }
     }
 }
@@ -68,6 +104,30 @@ pub fn prompt_for(m: metadata::Marker) -> Prompt {
             _ => SkipAction::Seek(m.end_ms * 1_000_000),
         },
     }
+}
+
+/// PURE: the "Skipped intro · Back" offer that stands in the control row after an automatic skip of
+/// `m` — the same pill, wearing the undo label and the [`SkipAction::Rewind`] action. Its
+/// [`crate::player_hud::ControlSlot::offer`] is the original segment's, so it never counts as a
+/// fresh offer and never re-raises the HUD on its own.
+pub fn undo_prompt(m: metadata::Marker) -> Prompt {
+    Prompt { marker: m, kind: m.kind, action: SkipAction::Rewind(m.start_ms * 1_000_000) }
+}
+
+/// PURE: does the Skip-intro-and-credits setting skip this offer by itself?
+///
+/// Only an ordinary [`SkipAction::Seek`] or [`SkipAction::Finish`] offer qualifies, of a kind the
+/// setting names. The Up Next interaction is decided BEFORE this is asked:
+/// [`crate::player_hud::slot_for`] never makes a Skip offer out of a final credits segment with a
+/// queued successor (Countdown turns it into the Up Next tile, the other modes into the discs), so
+/// a `Finish` reaching here is always the LAST item — and finishing it leaves the player instead
+/// of silently starting another episode.
+pub fn auto_skips(pr: Prompt, mode: plx_plex::plex::session::AutoSkip) -> bool {
+    let kind_on = match pr.kind {
+        MarkerKind::Intro => mode.skips_intro(),
+        MarkerKind::Credits => mode.skips_credits(),
+    };
+    kind_on && !matches!(pr.action, SkipAction::Rewind(_))
 }
 
 /// The button's rect — the SHARED control-row slot, so it and Up Next cannot drift apart.

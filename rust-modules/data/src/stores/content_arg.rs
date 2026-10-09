@@ -20,6 +20,9 @@ impl plx_machine::machine::LogicalState for ContentArg {
             Self::Filmography { sid, key } => { c.u32(2).u32(u32::from(sid.raw())).str(key); }
             Self::Collection(id) => {
                 c.u32(3).u32(u32::from(id.sid.raw())).str(&id.rk).u64(id.sec as u64).u64(id.tag as u64).str(&id.name);
+                // A playlist adds its mark; a collection writes exactly what it always did, so
+                // recordings of collection pages keep their canon.
+                if id.playlist { c.u32(1); }
             }
         }
     }

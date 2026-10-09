@@ -691,6 +691,22 @@
     "value": "Off",
     "description": "Next episode picker option: nothing is shown during the credits and the next episode does not start by itself."
   },
+  "settings.playback.auto_skip": {
+    "value": "Skip intro & credits",
+    "description": "Settings row title and picker title: whether the player skips intro and credits segments by itself instead of offering a Skip button."
+  },
+  "settings.playback.auto_skip.off": {
+    "value": "Off",
+    "description": "Skip intro & credits picker option (the default): nothing is skipped automatically; the player shows a Skip button."
+  },
+  "settings.playback.auto_skip.intro": {
+    "value": "Skip intro",
+    "description": "Skip intro & credits picker option: intros are skipped automatically, credits still show a Skip button."
+  },
+  "settings.playback.auto_skip.intro_credits": {
+    "value": "Skip intro & credits",
+    "description": "Skip intro & credits picker option: intros and credits are both skipped automatically."
+  },
   "settings.playback.deck_press": {
     "value": "Continue Watching",
     "description": "Settings row title and picker title: what OK does on a card in the Continue Watching shelf."
@@ -768,6 +784,10 @@
   "settings.playback.next_episode.copy": {
     "value": "Up Next countdown shows a Next episode button when the credits start. After credits lets them play, then starts the next episode. Off closes the player instead.",
     "description": "Explanation under the title of the Next episode picker. It names the three options by their picker labels (Up Next countdown, After credits, Off); keep those words identical to settings.playback.next_episode.countdown, .after_credits and .off. Only credits that run to the end of the item trigger the button."
+  },
+  "settings.playback.auto_skip.copy": {
+    "value": "Skips intros, and credits too if you choose, as soon as they start. Left or the Back button on screen returns to the start. Credits are never skipped while Up Next counts down to the next episode.",
+    "description": "Explanation under the title of the Skip intro & credits picker. 'Back' is the button label shown in the player pill after a skip (widgets.skip.intro_skipped); 'Up Next' is the next-episode countdown (settings.playback.next_episode.countdown)."
   },
   "settings.playback.deck_press.copy": {
     "value": "Open details shows the movie or episode page when you press OK on a Continue Watching card. Play starts or resumes it at once. The card's menu, opened by holding OK, always has the other.",
@@ -1186,5 +1206,33 @@
   "settings.consent.placeholder.webos_codename_short": {
     "value": "webOS codename",
     "description": "Placeholder shown inside angle brackets in the data preview, standing for the TV software's release codename."
+  },
+  "settings.playback.screensaver": {
+    "value": "Screensaver",
+    "description": "Settings row title and picker title: how long the app waits, with no button pressed, before it fades to a slideshow of the library's artwork."
+  },
+  "settings.playback.screensaver.off": {
+    "value": "Off",
+    "description": "Screensaver picker option: the screen never fades to the slideshow."
+  },
+  "settings.playback.screensaver.min2": {
+    "value": "After 2 minutes",
+    "description": "Screensaver picker option."
+  },
+  "settings.playback.screensaver.min5": {
+    "value": "After 5 minutes",
+    "description": "Screensaver picker option (the default)."
+  },
+  "settings.playback.screensaver.min10": {
+    "value": "After 10 minutes",
+    "description": "Screensaver picker option."
+  },
+  "settings.playback.screensaver.min20": {
+    "value": "After 20 minutes",
+    "description": "Screensaver picker option."
+  },
+  "settings.playback.screensaver.copy": {
+    "value": "When nothing is pressed for a while on a browsing page, the screen fades to a slideshow of artwork from your library with the time. Any button brings the page back. It never starts during playback.",
+    "description": "Explanation under the title of the Screensaver picker."
   }
 }

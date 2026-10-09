@@ -20,11 +20,63 @@ pub struct Airing {
     pub sub_title: String,
     pub desc: String,
     pub episode: String,
+    /// The first category, as the guide spells it (what the info pane prints).
     pub category: String,
+    /// Every category, the first included ([`super::xmltv::Programme::categories`]).
+    pub categories: Vec<String>,
+    /// The year the guide gives, if any.
+    pub year: Option<u16>,
     pub icon: String,
 }
 
+/// **The genres the guide colours and filters by** — the broadcast families a viewer scans a
+/// grid for. A guide's categories are free text in any capitalisation (`Movie`, `Feature Film`,
+/// `Children's`, `Sitcom`), so each genre is a small vocabulary, matched case-insensitively
+/// ([`Genre::of_category`]); a category none of them claims stays plain text and has no colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Genre {
+    Movie,
+    Sports,
+    Kids,
+    News,
+    Documentary,
+    Comedy,
+}
+
+impl Genre {
+    /// Every genre, in the order the guide's filter strip offers them.
+    pub const ALL: [Genre; 6] = [Genre::Movie, Genre::Sports, Genre::Kids, Genre::News, Genre::Documentary, Genre::Comedy];
+
+    /// The genre one category names, if any. Whole words, not substrings: `Newsroom Drama` is not
+    /// news and `Sportsman's Paradise` is not sport — but the vocabulary carries the compound
+    /// spellings guides really use (`Sports event`, `Children's`, `Stand-up`).
+    pub fn of_category(category: &str) -> Option<Genre> {
+        let c = category.trim().to_lowercase();
+        let genre = match c.as_str() {
+            "movie" | "movies" | "film" | "films" | "feature film" | "feature" | "tv movie" | "movie - drama" => Genre::Movie,
+            "sport" | "sports" | "sports event" | "sports non-event" | "sports talk" | "sports news" => Genre::Sports,
+            "kids" | "children" | "children's" | "childrens" | "kids & family" | "family" | "animation" | "animated"
+            | "cartoon" | "cartoons" => Genre::Kids,
+            "news" | "newsmagazine" | "news magazine" | "public affairs" | "weather" => Genre::News,
+            "documentary" | "documentaries" | "docuseries" | "nature" => Genre::Documentary,
+            "comedy" | "sitcom" | "sitcoms" | "stand-up" | "standup" | "comedy-drama" => Genre::Comedy,
+            _ => return None,
+        };
+        Some(genre)
+    }
+}
+
 impl Airing {
+    /// The airing's genre: the first of its categories that names one.
+    pub fn genre(&self) -> Option<Genre> {
+        self.categories.iter().find_map(|c| Genre::of_category(c))
+    }
+
+    /// Does any of the airing's categories read `category` (ignoring case)?
+    pub fn has_category(&self, category: &str) -> bool {
+        self.categories.iter().any(|c| c.eq_ignore_ascii_case(category))
+    }
+
     /// Is `t` inside this airing?
     pub fn covers(&self, t: i64) -> bool {
         self.start_ms <= t && t < self.stop_ms
@@ -173,6 +225,8 @@ fn airings_of(programmes: &[Programme], channel_id: &str) -> Vec<Airing> {
             desc: p.desc.clone(),
             episode: p.episode.clone(),
             category: p.category.clone(),
+            categories: p.categories.clone(),
+            year: p.year,
             icon: p.icon.clone(),
         });
     }
@@ -273,6 +327,24 @@ mod tests {
         assert_eq!(a.len(), 2);
         assert_eq!((a[0].start_ms, a[0].stop_ms), (0, 3000));
         assert_eq!(a[1].title, "b");
+    }
+
+    #[test]
+    fn genres_read_every_category_by_whole_words() {
+        let a = |cats: &[&str]| Airing { categories: cats.iter().map(|c| c.to_string()).collect(), ..Default::default() };
+        assert_eq!(a(&["Movie"]).genre(), Some(Genre::Movie));
+        assert_eq!(a(&["Feature Film"]).genre(), Some(Genre::Movie));
+        assert_eq!(a(&["Series", "Sitcom"]).genre(), Some(Genre::Comedy), "a generic first word does not hide the genre");
+        assert_eq!(a(&["Animation", "Comedy"]).genre(), Some(Genre::Kids), "the first genre wins");
+        assert_eq!(a(&["CHILDREN'S"]).genre(), Some(Genre::Kids));
+        assert_eq!(a(&["Sports event"]).genre(), Some(Genre::Sports));
+        assert_eq!(a(&["news"]).genre(), Some(Genre::News));
+        assert_eq!(a(&["Documentary"]).genre(), Some(Genre::Documentary));
+        assert_eq!(a(&["Newsroom Drama"]).genre(), None, "not a substring match");
+        assert_eq!(a(&["Reality"]).genre(), None);
+        assert_eq!(a(&[]).genre(), None);
+        assert!(a(&["Reality"]).has_category("reality"));
+        assert!(!a(&["Reality"]).has_category("Real"));
     }
 
     #[test]

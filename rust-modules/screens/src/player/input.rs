@@ -219,6 +219,11 @@ pub struct HudState {
     /// stand-in vanishing under the focus ring — see `player_hud::standin_left_the_ring`,
     /// which is where that rule is written down and tested.
     pub was_standin: bool,
+    /// The automatic skip that can still be taken back (Settings > Playback > Skip intro &
+    /// credits): while its window is open the control row wears the "Skipped … · Back" pill
+    /// (`player_hud::with_undo`) and LEFT rewinds to the segment's start instead of scrubbing.
+    /// Installed by the loop when it performs the skip; cleared when spent and by a real stop.
+    pub undo: Option<plx_appkit::skip_pill::AutoSkipUndo>,
 }
 impl HudState {
     /// Focus at rest, no timer, nothing dismissed, no segment seen yet, discs in the control row.
@@ -229,6 +234,7 @@ impl HudState {
         visible_at_press: false,
         last_offer: None,
         was_standin: false,
+        undo: None,
     };
 
     /// Is the transport on screen right now, by this HUD's own state?
@@ -269,6 +275,21 @@ impl HudState {
         // the whole of `note_global_press`, the ONLY caller: an unsupported press never reaches
         // here, so a colour button over a film no longer raises the transport.
         self.dismissed = false;
+    }
+
+    /// The automatic skip of `marker` just happened at `now`: open its undo window and put the
+    /// HUD on screen for that long, ring on the Back pill — the same raise a fresh offer gets
+    /// ([`Self::raise_for_offer`]), held for the whole window so the pill is never offered to a
+    /// transport nobody can see.
+    pub fn open_undo(&mut self, marker: plx_data::metadata::Marker, now: u32) {
+        self.undo = Some(plx_appkit::skip_pill::AutoSkipUndo::at(marker, now));
+        self.raise_for_offer(now, 0);
+        self.extend(now, plx_appkit::skip_pill::UNDO_MS);
+    }
+
+    /// The live undo at `now`, if its window is still open.
+    pub fn live_undo(&self, now: u32) -> Option<plx_appkit::skip_pill::AutoSkipUndo> {
+        self.undo.filter(|u| u.live(now))
     }
 
     /// A FRESH segment offer takes the control row: put the HUD ON SCREEN and, from rest, park the

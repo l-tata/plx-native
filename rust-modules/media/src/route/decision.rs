@@ -15,7 +15,7 @@
 use plx_plex::plex::ServerId;
 use plx_data::pms::PmsMovie;
 use std::os::raw::c_char;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 use super::flight::*;
 use super::plan::*;
@@ -41,6 +41,13 @@ struct PlaybackRequest {
     /// Background hero preview. No PlayQueue, no timeline, no scrobble, resume at 0, and the
     /// caller must not push the player route.
     preview: bool,
+    /// The existing PlayQueue this playback continues in ([`QueueSeed`]); `None` = its own fresh
+    /// queue. Part of the REQUEST so a retry of a shuffled episode stays in its shuffle.
+    seed: Option<QueueSeed>,
+    /// The playlist (its ratingKey) this item is played as the head of: the PlayQueue is then
+    /// the playlist's (`Client::create_playlist_queue`), so the rest of it follows in order.
+    /// Empty for every other play.
+    playlist: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -356,7 +363,22 @@ pub struct PlaybackSession {
     /// so even a whole show is tens of KB. The capping that matters is the DRAWING (a still per row
     /// is a GL texture); that belongs to the overlay, and `apply_plan` deliberately warms only
     /// `up_next`'s.
-    queue: Vec<plx_plex::plex::QueueRow>,
+    ///
+    /// Shared like `up_next`, and for the same reason: the frame's publication copies the session
+    /// every frame and the More menu's Play queue page reads the rows off that copy, so a deep
+    /// copy would clone every row's strings sixty times a second.
+    queue: Option<std::sync::Arc<Vec<plx_plex::plex::QueueRow>>>,
+    /// **Successors come from THIS queue** (`route::QueueSeed::sticky`) — set for a shuffled queue,
+    /// whose next episode a fresh `continuous=1` queue would get wrong (it is the show IN ORDER).
+    /// An ordinary playback leaves it false, so its Up Next creates a new continuous queue for the
+    /// next episode exactly as every build before shuffle did. Installed by `apply_plan`, retired
+    /// with `queue` by `request_play`.
+    queue_sticky: bool,
+    /// Every `Media[]` version of the item now playing (only when there are several), shared like
+    /// `queue` for the same reason: the player's Version page reads it off the publication.
+    versions: Option<std::sync::Arc<Vec<plx_data::metadata::MediaVersion>>>,
+    /// Which of them plays (`plex::media_index_for` when the resolve ran; 0 = the first).
+    media_index: u32,
     /// **This frame's millisecond stamp, mirrored from [`crate::player::machine::Player::now_ms`]**
     /// (spec §4.1), whose `set_now` is its ONLY writer — the loop calls it once per iteration from
     /// the same `fr.now` every other phase of the frame reads.
@@ -458,7 +480,10 @@ impl PlaybackSession {
         title: [0; 128],
         ctxline: [0; 96],
         up_next: None,
-        queue: Vec::new(),
+        queue: None,
+        queue_sticky: false,
+        versions: None,
+        media_index: 0,
         now_ms: 0,
         preview: false,
         resolved_as_preview: false,
@@ -532,7 +557,10 @@ impl PlaybackSession {
             ctxline,
             up_next,
             now_ms,
-            queue: _,
+            queue,
+            queue_sticky,
+            versions,
+            media_index,
             preview: _,
             resolved_as_preview,
             live,
@@ -586,7 +614,11 @@ impl PlaybackSession {
             ctxline: *ctxline,
             up_next: up_next.clone(),
             now_ms: *now_ms,
-            queue: Vec::new(),
+            // shared, not copied — the Play queue page reads the rows off this copy
+            queue: queue.clone(),
+            queue_sticky: *queue_sticky,
+            versions: versions.clone(),
+            media_index: *media_index,
             // A screen copy is not the live preview. The loop reads the real session.
             preview: false,
             resolved_as_preview: *resolved_as_preview,
@@ -5322,7 +5354,10 @@ pub fn install_live_stream(ps: &mut PlaybackSession, session: crate::live::LiveS
     ps.cur_sid = ServerId::UNSET;
     ps.tsession.clear();
     ps.up_next = None;
-    ps.queue.clear();
+    ps.queue = None;
+    ps.queue_sticky = false;
+    ps.versions = None;
+    ps.media_index = 0;
     // The film's delivery facts go with it: Auto's Original watch reads them, and a channel has
     // no Plex item for it to move onto a transcode.
     ps.cur_contract = plx_plex::plex::EncodeContract::original(false, plx_plex::plex::AudioEnhancements::NONE);
@@ -6485,6 +6520,61 @@ pub fn set_deck_press(mode: DeckPress) -> bool {
     saved
 }
 
+/// Whether the player skips intro / credits markers by itself — install-wide, like
+/// [`DECK_PRESS`]. Read once a frame by the loop's marker-offer edge (`app::run`), which asks
+/// [`auto_skip_for`] whether the segment just offered is one this setting skips.
+static AUTO_SKIP: AtomicU8 = AtomicU8::new(0); // AutoSkip::Off's index
+
+pub fn auto_skip() -> AutoSkip {
+    AutoSkip::from_index(AUTO_SKIP.load(Ordering::Relaxed))
+}
+
+pub fn restore_auto_skip(mode: AutoSkip) {
+    #[cfg(any(test, feature = "test-support"))]
+    plx_base::testlock::assert_held("auto-skip preference");
+    AUTO_SKIP.store(mode.index(), Ordering::Relaxed);
+}
+
+/// Blocking persistence seam; Settings dispatches it on the storage worker. The live value changes
+/// only once the write is durable, so a failed save claims nothing.
+pub fn set_auto_skip(mode: AutoSkip) -> bool {
+    let saved = plx_plex::plex::session::update_with_outcome(|s| Some(s.with_auto_skip(mode)))
+        .is_some_and(|write| matches!(write.classify(),
+            plx_plex::plex::session::async_persistence::CompletionOutcome::Durable(_)));
+    if saved {
+        restore_auto_skip(mode);
+        plx_machine::idle::invalidate();
+    }
+    saved
+}
+
+/// How long a browsing page waits before the ambient screensaver (`app::ambient`) — install-wide,
+/// like [`AUTO_SKIP`]. Not a playback preference, but the preferences screen reads every live value
+/// from here.
+static SCREENSAVER: AtomicU8 = AtomicU8::new(2); // Screensaver::Minutes5's index
+
+pub fn screensaver() -> Screensaver {
+    Screensaver::from_index(SCREENSAVER.load(Ordering::Relaxed))
+}
+
+pub fn restore_screensaver(mode: Screensaver) {
+    #[cfg(any(test, feature = "test-support"))]
+    plx_base::testlock::assert_held("screensaver preference");
+    SCREENSAVER.store(mode.index(), Ordering::Relaxed);
+}
+
+/// Blocking persistence seam, durable-first like [`set_auto_skip`].
+pub fn set_screensaver(mode: Screensaver) -> bool {
+    let saved = plx_plex::plex::session::update_with_outcome(|s| Some(s.with_screensaver(mode)))
+        .is_some_and(|write| matches!(write.classify(),
+            plx_plex::plex::session::async_persistence::CompletionOutcome::Durable(_)));
+    if saved {
+        restore_screensaver(mode);
+        plx_machine::idle::invalidate();
+    }
+    saved
+}
+
 pub fn set_default_quality(q: Quality) -> bool {
     let q = supported_quality(q);
     let saved = plx_plex::plex::session::update_with_outcome(|s| Some(s.with_playback_quality(q)))
@@ -7162,6 +7252,8 @@ pub(super) struct QueueInfo {
     pub(super) item_id: String,
     pub(super) up_next: Option<UpNext>,
     pub(super) rows: Vec<plx_plex::plex::QueueRow>,
+    /// the successors come from this queue too ([`QueueSeed::sticky`])
+    pub(super) sticky: bool,
 }
 
 /// The queued next episode. Main-thread only, and — like `metadata::playing()` (via
@@ -7184,9 +7276,8 @@ pub fn up_next(ps: &PlaybackSession) -> Option<&UpNext> {
 /// `request_play_up_next`'s by-value signature exists to make unrepresentable. A caller that wants
 /// to keep a row past the call clones it out (`with_queue(|q| q.get(i).cloned())`); the borrow
 /// checker cannot police a `&'static`, but it does police this.
-#[allow(dead_code)] // nothing reads the rows yet — the queue overlay that draws them is its own batch
 pub fn with_queue<R>(ps: &PlaybackSession, f: impl FnOnce(&[plx_plex::plex::QueueRow]) -> R) -> R {
-    f(&ps.queue)
+    f(ps.queue.as_deref().map_or(&[], Vec::as_slice))
 }
 
 /// Create a PlayQueue for `rk` so the session is a first-class, remote-controllable player and
@@ -7211,6 +7302,7 @@ pub(super) fn resolve_playqueue(
     session: &str,
     cached: &str,
     continuous: bool,
+    playlist: &str,
 ) -> QueueInfo {
     let known = c.machine_id();
     // `mid` is the FETCHED id and nothing else: apply_plan's "" means "leave the cache alone", and
@@ -7231,7 +7323,12 @@ pub(super) fn resolve_playqueue(
         crate::player::log("playqueue: no machineIdentifier (skip)");
         return QueueInfo::default();
     }
-    match c.create_play_queue(effective, rk, session, continuous) {
+    let created = if playlist.is_empty() {
+        c.create_play_queue(effective, rk, session, continuous)
+    } else {
+        c.create_playlist_queue(effective, playlist, rk, session)
+    };
+    match created {
         Some(q) => {
             let up_next = q.next.as_ref().and_then(up_next_of);
             crate::player::log(&format!(
@@ -7259,6 +7356,7 @@ pub(super) fn resolve_playqueue(
                 },
                 up_next,
                 rows: q.items,
+                sticky: false,
             }
         }
         None => {
@@ -7269,6 +7367,134 @@ pub(super) fn resolve_playqueue(
             }
         }
     }
+}
+
+/// The queue of a playback that CONTINUES in an existing one ([`QueueSeed`]): its window around
+/// the seed's row, fetched fresh when `refetch` asks (a successor of a shuffled episode, a row
+/// jumped to from the queue panel) — the rows the session already holds otherwise, or when that
+/// GET fails, since a queue whose window is a little stale still names the right successor more
+/// often than a fresh in-order queue would. No `/identity`: the queue exists, so nothing has to be
+/// addressed to a machine.
+///
+/// PURE apart from the one GET, like [`resolve_playqueue`]: owned data for `apply_plan`.
+pub(super) fn continue_playqueue(c: &plx_plex::plex::Client, rk: &str, seed: &QueueSeed) -> QueueInfo {
+    let fetched = (seed.refetch && seed.id > 0)
+        .then(|| c.fetch_play_queue(seed.id, seed.item_id, rk))
+        .flatten()
+        .filter(|q| !q.items.is_empty());
+    let rows = match fetched {
+        Some(q) => q.items,
+        None => {
+            if seed.refetch {
+                crate::player::log("playqueue: continuation GET failed; keeping the held window");
+            }
+            seed.rows.clone()
+        }
+    };
+    queue_info_from_seed(seed, rows, c.id(), rk)
+}
+
+/// [`continue_playqueue`]'s mapping without the GET, so a host test grades the shipped shape.
+pub(super) fn queue_info_from_seed(seed: &QueueSeed, rows: Vec<plx_plex::plex::QueueRow>, sid: ServerId, rk: &str) -> QueueInfo {
+    let up_next = plx_plex::plex::queue_next_after(&rows, seed.item_id, sid, rk).and_then(up_next_of);
+    crate::player::log(&format!(
+        "playqueue: continue id={} item={} rows={} sticky={} next={}",
+        seed.id,
+        seed.item_id,
+        rows.len(),
+        seed.sticky,
+        up_next
+            .as_ref()
+            .map(|u| format!("S{}E{} {}", u.season, u.index, u.rk))
+            .unwrap_or_else(|| "-".into())
+    ));
+    QueueInfo {
+        machine_id: String::new(),
+        id: if seed.id > 0 { seed.id.to_string() } else { String::new() },
+        item_id: if seed.item_id > 0 { seed.item_id.to_string() } else { String::new() },
+        up_next,
+        rows,
+        sticky: seed.sticky,
+    }
+}
+
+/// The seed that keeps a playback of row `item_id` inside the CURRENT playback's queue: its id, the
+/// rows already held (the fallback when the refetch fails) and its stickiness. `None` when this
+/// playback has no queue id (a failed POST, a preview, Live TV), which is a plain fresh play.
+pub fn queue_seed_for(ps: &PlaybackSession, item_id: i64) -> Option<QueueSeed> {
+    let id = ps.pq_id.parse::<i64>().ok().filter(|id| *id > 0)?;
+    Some(QueueSeed {
+        id,
+        item_id,
+        rows: ps.queue.as_deref().cloned().unwrap_or_default(),
+        refetch: true,
+        sticky: ps.queue_sticky,
+    })
+}
+
+/// The seed Up Next continues in: the current queue when it is STICKY (a shuffle), else none — an
+/// ordinary queue's successor gets the fresh `continuous=1` queue it always did.
+pub(super) fn up_next_seed(ps: &PlaybackSession, u: &UpNext) -> Option<QueueSeed> {
+    ps.queue_sticky.then(|| queue_seed_for(ps, u.item_id)).flatten()
+}
+
+/// Install a queue on a session the way a landed plan would — for a test of something that READS
+/// the queue (the More menu's Play queue page) without resolving a playback.
+#[cfg(any(test, feature = "test-support"))]
+pub fn install_queue_for_test(
+    ps: &mut PlaybackSession,
+    pq_id: i64,
+    playing_item_id: i64,
+    rows: Vec<plx_plex::plex::QueueRow>,
+    sticky: bool,
+) {
+    ps.pq_id = pq_id.to_string();
+    ps.pq_item_id = playing_item_id.to_string();
+    ps.queue = (!rows.is_empty()).then(|| std::sync::Arc::new(rows));
+    ps.queue_sticky = sticky;
+}
+
+/// A picked version's `(part, vcodec, acodec)`, off its playing-item fetch — `None` for version 0
+/// (the caller's own fields already are its) and for a version with no part.
+pub(super) fn version_play_fields(it: &plx_data::metadata::PlayingItem) -> Option<(String, String, String)> {
+    let v = it.versions.get(it.media_index as usize)?;
+    (it.media_index > 0 && !v.part.is_empty()).then(|| (v.part.clone(), v.vcodec.clone(), v.acodec.clone()))
+}
+
+/// The item now playing's versions, when it has several (the player's Version page), and which
+/// one plays.
+pub fn with_versions<R>(ps: &PlaybackSession, f: impl FnOnce(&[plx_data::metadata::MediaVersion], u32) -> R) -> R {
+    f(ps.versions.as_deref().map_or(&[], Vec::as_slice), ps.media_index)
+}
+
+/// **Switch the item on screen to version `media_index`** — the player's Version page. The pick is
+/// remembered for the item for the rest of the session (`plex::set_media_index`), then the item is
+/// resolved again at `resume_ns` exactly as a retry is (the caller stops the Engine first), so the
+/// new version's part, streams and `mediaIndex` replace the old ones.
+pub fn switch_version(
+    ps: &mut PlaybackSession,
+    meta: &mut plx_data::stores::metadata::MetadataStore,
+    media_index: u32,
+    resume_ns: i64,
+) -> bool {
+    if ps.request.is_none() {
+        return false;
+    }
+    plx_plex::plex::set_media_index(cur_sid(ps), &cur_rk(ps), media_index);
+    crate::player::log(&format!("version: switching to Media[{media_index}]"));
+    retry_current_play(ps, meta, resume_ns, None)
+}
+
+/// Install versions on a session the way a landed plan would — for a test of the Version page.
+#[cfg(any(test, feature = "test-support"))]
+pub fn install_versions_for_test(ps: &mut PlaybackSession, versions: Vec<plx_data::metadata::MediaVersion>, media_index: u32) {
+    ps.versions = (!versions.is_empty()).then(|| std::sync::Arc::new(versions));
+    ps.media_index = media_index;
+}
+
+/// Does the current playback's queue supply its own successors (a shuffle)?
+pub fn queue_is_sticky(ps: &PlaybackSession) -> bool {
+    ps.queue_sticky
 }
 
 impl ResolveEnv {
@@ -7311,6 +7537,9 @@ impl ResolveEnv {
             direct_play_mode: direct_play_mode(),
             src_kbps: resolve_src_kbps(meta.current(), sid, rk),
             omit_queue_continuous: false,
+            queue_seed: None,
+            media_index: 0,
+            playlist: String::new(),
             preview: false,
             audio_enhancements: crate::player::audio_enhancements(),
             pass: plx_plex::plex::serverinfo::subscription_of(sid),
@@ -7581,6 +7810,42 @@ pub fn request_play(
             title: title.to_owned(),
             ctx: ctx.to_owned(),
             preview: false,
+            playlist: String::new(),
+            seed: None,
+        },
+        None,
+        None,
+        false,
+    )
+}
+
+/// [`request_play`] for an item that belongs to an EXISTING PlayQueue ([`QueueSeed`]): the
+/// resolve continues in that queue instead of POSTing a fresh `continuous=1` one, so the playback
+/// after it comes from the same queue (a shuffle's next episode) and the timeline reports the
+/// seed's playQueueItemID.
+pub fn request_play_seeded(
+    ps: &mut PlaybackSession,
+    meta: &mut plx_data::stores::metadata::MetadataStore,
+    sid: ServerId,
+    u: &UpNext,
+    title: &str,
+    ctx: &str,
+    seed: QueueSeed,
+) -> bool {
+    request_play_inner(
+        ps,
+        meta,
+        PlaybackRequest {
+            sid,
+            rk: u.rk.clone(),
+            part: u.part.clone(),
+            vcodec: u.vcodec.clone(),
+            acodec: u.acodec.clone(),
+            title: title.to_owned(),
+            ctx: ctx.to_owned(),
+            preview: false,
+            seed: Some(seed),
+            playlist: String::new(),
         },
         None,
         None,
@@ -7612,6 +7877,8 @@ pub fn request_preview(
             title: title.to_owned(),
             ctx: plx_data::metadata::TRAILER_CONTEXT.to_owned(),
             preview: true,
+            seed: None,
+            playlist: String::new(),
         },
         None,
         None,
@@ -7687,7 +7954,8 @@ fn request_play_inner(
         // very episode from here, the one now on screen. The retained rows go with it, for the
         // same reason and because a fresh `Vec` also hands their strings back to the allocator.
         s.up_next = None;
-        s.queue = Vec::new();
+        s.queue = None;
+        s.queue_sticky = false;
         // …and the PREVIOUS item's refusal, for the same reason and one more: `player::state()`
         // derives `Error` from it, so a verdict left standing would put the failure read-out over
         // the item now being resolved. `play_pending()` outranks it for this frame either way, but
@@ -7709,6 +7977,16 @@ fn request_play_inner(
     // captured HERE, on the main thread, and moved into the worker — see ResolveEnv
     let mut env = ResolveEnv::snapshot(ps, meta.view(), sid, rk);
     env.omit_queue_continuous = plx_data::metadata::context_omits_queue_continuous(ctx);
+    env.queue_seed = request.seed.clone();
+    // The version picker's choice for this item (`plex::media_index_for`): a version other than the
+    // first is resolved from ITS part and streams, so the loaded detail's (version 0's) streams and
+    // bitrate must not stand in for it.
+    env.media_index = if request.preview { 0 } else { plx_plex::plex::media_index_for(sid, rk) };
+    if env.media_index > 0 {
+        env.cached_item = None;
+        env.src_kbps = 0;
+    }
+    env.playlist = request.playlist.clone();
     env.set_preview(request.preview);
     if let Some(retry) = retry {
         apply_retry_enhancement(&mut env, retry);
@@ -7725,7 +8003,7 @@ fn request_play_inner(
         *PLAY_RESUME.lock().unwrap_or_else(|e| e.into_inner()) = Some((gen, resume_ns));
     }
     PLAY_BUSY.store(true, Ordering::SeqCst);
-    let (rk, part, vc, ac) = (request.rk, request.part, request.vcodec, request.acodec);
+    let (rk, mut part, mut vc, mut ac) = (request.rk, request.part, request.vcodec, request.acodec);
     let worker = ResolveWorker::enter();
     let spawned = plx_base::task::spawn_off_frame("resolve", move |off| {
         let _worker = worker;
@@ -7737,6 +8015,15 @@ fn request_play_inner(
         }
         // catch_unwind OUTSIDE the mailbox write, like load_season: a panicking resolve must still
         // land (as !ok) or PLAY_BUSY latches and the screen wedges on a spinner forever.
+        if env.media_index > 0 {
+            // a picked version plays ITS part and codecs, read off its own item fetch (which the
+            // resolve below then reuses as the playing item instead of fetching again)
+            let item = plx_data::metadata::fetch_playing_item_version(env.sid, &rk, env.media_index);
+            if let Some((p, v, a)) = item.as_ref().and_then(version_play_fields) {
+                (part, vc, ac) = (p, v, a);
+            }
+            env.cached_item = item;
+        }
         let plan = std::panic::catch_unwind(|| build_stream(off, &rk, &part, &vc, &ac, &env))
             .unwrap_or_else(|_| Plan { direct_play_mode: env.direct_play_mode, ..Default::default() });
         let landing = PlayLanding {
@@ -7955,6 +8242,41 @@ pub fn request_play_movie(ps: &mut PlaybackSession, meta: &mut plx_data::stores:
     )
 }
 
+/// **Play a playlist from its first item** (or the item `m`, which must be one of it): the item
+/// plays as [`request_play_movie`] plays it, but its PlayQueue is the PLAYLIST's
+/// (`playlistID`, `Client::create_playlist_queue`), so Up Next and the queue list walk the
+/// playlist in its order. `ctx` is the HUD's context line — the playlist's name.
+pub fn request_play_playlist(
+    ps: &mut PlaybackSession,
+    meta: &mut plx_data::stores::metadata::MetadataStore,
+    playlist: &str,
+    m: &PmsMovie,
+    ctx: &str,
+) -> bool {
+    if m.part.is_empty() || playlist.is_empty() {
+        return false;
+    }
+    request_play_inner(
+        ps,
+        meta,
+        PlaybackRequest {
+            sid: item_sid(m.sid),
+            rk: m.rk.clone(),
+            part: m.part.clone(),
+            vcodec: m.vcodec.clone(),
+            acodec: m.acodec.clone(),
+            title: m.title.clone(),
+            ctx: ctx.to_owned(),
+            preview: false,
+            playlist: playlist.to_owned(),
+            seed: None,
+        },
+        None,
+        None,
+        false,
+    )
+}
+
 /// The server an item's ids belong to: its own when it has one, else the browsed surface.
 ///
 /// A row's `sid` is `UNSET` only before any server was registered (and in host tests, which build
@@ -7992,7 +8314,110 @@ pub fn request_play_up_next(ps: &mut PlaybackSession, meta: &mut plx_data::store
     } else {
         surface_sid()
     };
-    request_play(ps, meta, sid, &u.rk, &u.part, &u.vcodec, &u.acodec, title, ctx)
+    // A SHUFFLED queue supplies its own successor: continue in it, or the next episode would get a
+    // fresh in-order queue and the shuffle would end after one episode. Read before
+    // `request_play_inner` retires the queue. An ordinary queue is not sticky and keeps the fresh
+    // `continuous=1` POST every build before shuffle made.
+    match up_next_seed(ps, &u) {
+        Some(seed) => {
+            let title = title.to_owned();
+            request_play_seeded(ps, meta, sid, &u, &title, ctx, seed)
+        }
+        None => request_play(ps, meta, sid, &u.rk, &u.part, &u.vcodec, &u.acodec, title, ctx),
+    }
+}
+
+/// Start a row of the current playback's queue — the Play queue panel's OK. Always CONTINUES in
+/// that queue ([`queue_seed_for`]), sticky or not, because the row was chosen from it: a fresh
+/// queue would drop the rows the viewer just picked from. Falls back to a plain play only when the
+/// playback has no queue id. Like [`request_play_up_next`] it takes the row BY VALUE.
+pub fn request_play_queue_row(
+    ps: &mut PlaybackSession,
+    meta: &mut plx_data::stores::metadata::MetadataStore,
+    u: UpNext,
+    ctx: &str,
+) -> bool {
+    let title = if u.show_title.is_empty() { u.ep_title.clone() } else { u.show_title.clone() };
+    let sid = if cur_sid(ps).is_set() { cur_sid(ps) } else { surface_sid() };
+    match queue_seed_for(ps, u.item_id) {
+        Some(seed) => request_play_seeded(ps, meta, sid, &u, &title, ctx, seed),
+        None => request_play(ps, meta, sid, &u.rk, &u.part, &u.vcodec, &u.acodec, &title, ctx),
+    }
+}
+
+/// **What a Shuffle press resolved to**: the shuffled PlayQueue the server built over a show or a
+/// season, as the seed its first playback continues in, and that first row's descriptor. Taken by
+/// the loop ([`take_shuffle_landing`]), which starts it like any other play.
+pub struct ShuffleLanding {
+    pub sid: ServerId,
+    pub first: UpNext,
+    pub seed: QueueSeed,
+}
+
+static SHUFFLE_GEN: AtomicU64 = AtomicU64::new(0);
+/// The newest shuffle's landing: `(generation, Some(landing))`, or `None` inside for a shuffle the
+/// server refused. One slot, newest wins — a second Shuffle press supersedes the first.
+static SHUFFLE_SLOT: std::sync::Mutex<Option<(u64, Option<ShuffleLanding>)>> = std::sync::Mutex::new(None);
+
+/// **Shuffle a show or a season** (`container_rk`): POST a `shuffle=1` PlayQueue over it on a
+/// worker and leave the landing for the loop. MAIN THREAD, NON-BLOCKING. `false` only when no
+/// worker could be spawned. The machine id takes the same three rungs [`resolve_playqueue`] does
+/// (the registry's id, this session's cache when it was learned from `sid`, else `/identity`).
+pub fn request_shuffle(ps: &PlaybackSession, sid: ServerId, container_rk: &str) -> bool {
+    if container_rk.is_empty() {
+        return false;
+    }
+    let gen = SHUFFLE_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let cached = if ps.machine_sid == sid { ps.machine_id.clone() } else { String::new() };
+    let rk = container_rk.to_owned();
+    crate::player::log(&format!("shuffle: requested rk={rk}"));
+    plx_base::task::spawn_off_frame("shuffle", move |_off| {
+        let landing = std::panic::catch_unwind(|| shuffle_queue(sid, &rk, &cached)).unwrap_or(None);
+        if landing.is_none() {
+            crate::player::log("shuffle: the server built no queue");
+        }
+        let mut slot = SHUFFLE_SLOT.lock().unwrap_or_else(|e| e.into_inner());
+        if gen == SHUFFLE_GEN.load(Ordering::SeqCst) {
+            *slot = Some((gen, landing));
+        }
+    })
+}
+
+/// The worker half of [`request_shuffle`]: the POST, then the landing.
+fn shuffle_queue(sid: ServerId, rk: &str, cached: &str) -> Option<ShuffleLanding> {
+    let c = plx_plex::plex::client_for(sid)?;
+    let known = c.machine_id().to_owned();
+    let mid = if !known.is_empty() {
+        known
+    } else if !cached.is_empty() {
+        cached.to_owned()
+    } else {
+        c.machine_identity()?
+    };
+    let q = c.create_shuffle_queue(&mid, rk, &new_sess(rk))?;
+    shuffle_landing_of(sid, q.id, q.selected_item_id, q.items)
+}
+
+/// PURE: a shuffled queue's answer as the landing — the server's selected row first (its first
+/// row when it named none), sticky, with the rows it just sent so the first playback needs no
+/// second round trip. `None` for an empty queue or one whose selection is nothing playable.
+pub(super) fn shuffle_landing_of(
+    sid: ServerId,
+    id: i64,
+    selected_item_id: i64,
+    rows: Vec<plx_plex::plex::QueueRow>,
+) -> Option<ShuffleLanding> {
+    let at = plx_plex::plex::queue_index_of(&rows, selected_item_id, sid, "").unwrap_or(0);
+    let first = queue_row_descriptor(rows.get(at)?)?;
+    let seed = QueueSeed { id, item_id: first.item_id, rows, refetch: false, sticky: true };
+    Some(ShuffleLanding { sid, first, seed })
+}
+
+/// MAIN THREAD, once a frame: the newest shuffle's landing, once. `Some(None)` = it failed.
+pub fn take_shuffle_landing() -> Option<Option<ShuffleLanding>> {
+    let mut slot = SHUFFLE_SLOT.lock().unwrap_or_else(|e| e.into_inner());
+    let (gen, landing) = slot.take()?;
+    (gen == SHUFFLE_GEN.load(Ordering::SeqCst)).then_some(landing)
 }
 
 /// Supersede an in-flight resolve (BACK during a load). The landing is dropped by generation.
@@ -8132,6 +8557,9 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
         String::new()
     };
     let resolve_failed = plan.url.is_empty() && plan.verdict.is_none();
+    // the item's versions and which one plays, for the player's Version page — read before the
+    // store takes the playing item
+    let (versions, media_index) = plan.playing.as_ref().map_or((Vec::new(), 0), |p| (p.versions.clone(), p.media_index));
     meta.run(plx_data::stores::metadata::MetadataCmd::InstallPlaying(
         plan.playing,
     ));
@@ -8242,7 +8670,10 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
             title,
             ctxline,
             up_next: plan.up_next.map(std::sync::Arc::new),
-            queue: plan.queue,
+            queue: (!plan.queue.is_empty()).then(|| std::sync::Arc::new(plan.queue)),
+            queue_sticky: plan.queue_sticky,
+            versions: (versions.len() > 1).then(|| std::sync::Arc::new(versions)),
+            media_index,
             // The frame tick is the MACHINE's, not the plan's: a landing replaces the session's
             // contents and must not rewind the stamp `Player::set_now` wrote this iteration.
             now_ms,
@@ -10338,6 +10769,22 @@ mod skip_interval_tests;
 #[cfg(test)]
 #[path = "decision_deck_press_tests.rs"]
 mod deck_press_tests;
+
+#[cfg(test)]
+#[path = "decision_auto_skip_tests.rs"]
+mod auto_skip_tests;
+
+#[cfg(test)]
+#[path = "decision_screensaver_tests.rs"]
+mod screensaver_tests;
+
+#[cfg(test)]
+#[path = "decision_queue_seed_tests.rs"]
+mod queue_seed_tests;
+
+#[cfg(test)]
+#[path = "decision_version_tests.rs"]
+mod version_tests;
 
 #[cfg(test)]
 #[path = "decision_resolve_route_tests.rs"]

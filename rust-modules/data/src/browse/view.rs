@@ -34,6 +34,9 @@ struct ListingData {
     genre: Option<Arc<GenreEntry>>,
     unwatched: bool,
     cursor: Option<Arc<super::Cursor>>,
+    filter_defs: Arc<Vec<super::filters::FilterDef>>,
+    more: Arc<Vec<super::filters::ActiveFilter>>,
+    values: Option<(String, Arc<Vec<GenreEntry>>)>,
 }
 
 impl ListingSnapshot {
@@ -146,6 +149,9 @@ impl ListingSnapshot {
                 genre: None,
                 unwatched: false,
                 cursor: None,
+                filter_defs: Arc::default(),
+                more: Arc::default(),
+                values: None,
             }),
         }
     }
@@ -232,6 +238,20 @@ impl<'a> ListingView<'a> {
     pub fn unwatched(self) -> bool {
         self.0.data.as_ref().is_some_and(|s| s.unwatched && s.library_type.filters())
     }
+    /// The further filters the listed type offers (`browse::filters`) — none while a type the
+    /// filters do not apply to is listed.
+    pub fn filter_defs(self) -> &'a [super::filters::FilterDef] {
+        self.0.data.as_ref().filter(|s| s.library_type.filters()).map_or(&[], |s| s.filter_defs.as_slice())
+    }
+    /// The further filters AS APPLIED, in menu order.
+    pub fn more_filters(self) -> &'a [super::filters::ActiveFilter] {
+        self.0.data.as_ref().filter(|s| s.library_type.filters()).map_or(&[], |s| s.more.as_slice())
+    }
+    /// `field`'s value list, once fetched (`LibraryWork::FilterValues`).
+    pub fn filter_values(self, field: &str) -> Option<&'a [GenreEntry]> {
+        let (f, values) = self.0.data.as_ref()?.values.as_ref()?;
+        (f == field).then_some(values.as_slice())
+    }
     pub fn library_type(self) -> super::LibraryType {
         self.0.data.as_ref().map_or(super::LibraryType::default(), |s| s.library_type)
     }
@@ -315,6 +335,9 @@ impl super::BrowseState {
                     genre: state.genre.clone(),
                     unwatched: state.unwatched,
                     cursor: state.cursor.clone(),
+                    filter_defs: state.filter_defs.clone(),
+                    more: state.more.clone(),
+                    values: state.values.clone(),
                 }),
         }
     }

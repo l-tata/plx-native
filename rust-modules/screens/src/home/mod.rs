@@ -1043,6 +1043,11 @@ impl HomeScreen {
         else {
             return HintInput::default();
         };
+        // A live channel or a playlist has no menu to hold for (`emit_item_menu`), so it
+        // promises none.
+        if self.item_at(H::hubs(cx), row, col).is_some_and(|item| !plx_data::pms::item_has_menu_kind(item.kind)) {
+            return HintInput::default();
+        }
         let count = self.rows.get(row).map_or(0, |r| r.elems.len());
         let glide = self
             .grid
@@ -1280,6 +1285,8 @@ impl HomeScreen {
         let Some(item) = self.item_at(H::hubs(cx), row, col) else {
             return Handled::No;
         };
+        // A live channel, a collection or a playlist still reaches the app, which declines it
+        // (`item_menu::has_actions`) so the dipped card springs back rather than staying held.
         if item.rk.is_empty() {
             return Handled::No;
         }
@@ -1431,7 +1438,19 @@ impl HomeScreen {
                 let Some(item) = self.item_at(view, row, col) else {
                     return;
                 };
-                if self
+                if item.kind == plx_data::pms::KIND_PLAYLIST {
+                    // A playlist opens its page — the collection page over the playlist's items,
+                    // which plays it in order.
+                    fx.push(Fx::App(AppFx::Content(ContentReq::Push(ContentArg::Collection(
+                        plx_plex::plex::collections::CollectionRef::by_playlist(item.sid, &item.rk, &item.title),
+                    )))));
+                    return;
+                }
+                if item.kind == plx_data::pms::KIND_CHANNEL {
+                    // An On Now card tunes its channel, as OK on the guide does; its key is the
+                    // channel's guide number (`livetv::on_now::rows`).
+                    (item, HomeReq::Tune { number: item.rk.clone() })
+                } else if self
                     .rows
                     .get(row)
                     .is_some_and(|h| h.identity == HomeHubIdentity::ContinueWatching)

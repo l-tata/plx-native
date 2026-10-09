@@ -691,6 +691,32 @@ pub fn video_codec_name(codec: &str) -> String {
     }
 }
 
+/// **A `Media[]` version, named** — `4K · HEVC · HDR10 · 62 GB` / `1080p · H.264 · 8 GB`: its
+/// resolution class, video codec, dynamic range (left out for SDR) and size, each only when the
+/// server sent it. The version picker's one label (the detail page's chooser and the player's
+/// Version page), so the two cannot name one copy two ways. HDR10/HLG/Dolby Vision are format
+/// names and stay untranslated, like the codec names.
+pub fn version_label(v: &plx_data::metadata::MediaVersion) -> String {
+    use plx_data::metadata::HdrFormat;
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(res) = plx_ui::fmt::resolution(&v.video_resolution, v.width, v.height) {
+        parts.push(res);
+    }
+    if !v.vcodec.is_empty() {
+        parts.push(video_codec_name(&v.vcodec));
+    }
+    match v.hdr {
+        HdrFormat::Sdr => {}
+        HdrFormat::Hdr10 => parts.push("HDR10".to_string()),
+        HdrFormat::Hlg => parts.push("HLG".to_string()),
+        HdrFormat::DolbyVision => parts.push("Dolby Vision".to_string()),
+    }
+    if v.size > 0 {
+        parts.push(plx_ui::fmt::bytes(v.size, (0, 0, 0)));
+    }
+    parts.join(" \u{b7} ")
+}
+
 /// The live playback fact for the meta line: **what the server is actually sending**, read off the
 /// running stream and never predicted.
 ///
@@ -1004,6 +1030,24 @@ mod tests {
 #[cfg(test)]
 mod focus_tests {
     use super::*;
+
+    /// **A version is labelled from its own facts** — resolution class, codec, dynamic range and
+    /// size, in that order, each only when known — in the brief's two shapes.
+    #[test]
+    fn a_version_is_labelled_from_its_own_facts() {
+        use plx_data::metadata::{HdrFormat, MediaVersion};
+        let _serial = plx_base::testlock::serial();
+        let _lang = plx_platform::i18n::language_on_this_thread_for_test(plx_platform::i18n::Preference::En);
+        let uhd = MediaVersion {
+            video_resolution: "4k".into(), vcodec: "hevc".into(), hdr: HdrFormat::Hdr10,
+            size: 62 * 1024 * 1024 * 1024, ..Default::default()
+        };
+        assert_eq!(version_label(&uhd), "4K \u{b7} HEVC \u{b7} HDR10 \u{b7} 62 GB");
+        let fhd = MediaVersion { video_resolution: "1080".into(), vcodec: "h264".into(), size: 8 * 1024 * 1024 * 1024, ..Default::default() };
+        assert_eq!(version_label(&fhd), "1080p \u{b7} H.264 \u{b7} 8 GB");
+        let dv = MediaVersion { width: 3840, height: 2160, vcodec: "hevc".into(), hdr: HdrFormat::DolbyVision, ..Default::default() };
+        assert_eq!(version_label(&dv), "4K \u{b7} HEVC \u{b7} Dolby Vision", "no size, no size part");
+    }
     use plx_machine::machine::{FocusRead, InputOwner, PressRead, Tick};
 
     // TEST ONLY: a thread-confined store, so `set_current_for_test`/`apply` and the `view()`

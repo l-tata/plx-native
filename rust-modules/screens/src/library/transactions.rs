@@ -37,6 +37,8 @@ pub(super) enum GridAction {
     Unwatched { desired: bool },
     Genre { id: Option<String> },
     LibraryType(plx_data::browse::LibraryType),
+    /// A further filter (`browse::filters`): `(value, its title)` in force, or `None` off.
+    Filter { field: String, value: Option<(String, String)> },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -97,6 +99,9 @@ impl plx_machine::machine::LogicalState for PendingTransactions {
                 GridAction::Unwatched { desired } => { c.u32(1).bool(*desired); }
                 GridAction::Genre { id } => { c.u32(2).option(id.as_deref(), |c, id| { c.str(id); }); }
                 GridAction::LibraryType(kind) => { c.u32(3).u32(kind.code()); }
+                GridAction::Filter { field, value } => {
+                    c.u32(4).str(field).option(value.as_ref(), |c, (value, title)| { c.str(value).str(title); });
+                }
             }
         });
     }

@@ -1022,6 +1022,8 @@ fn settings_boot_arm(app: &mut App, fr: &mut Frame) {
                 "picker-next-episode" => plx_screens::family::SettingsPage::Picker(plx_screens::family::PickerKind::NextEpisode),
                 "picker-deck-press" => plx_screens::family::SettingsPage::Picker(plx_screens::family::PickerKind::DeckPress),
                 "picker-skip-interval" => plx_screens::family::SettingsPage::Picker(plx_screens::family::PickerKind::SkipInterval),
+                "picker-auto-skip" => plx_screens::family::SettingsPage::Picker(plx_screens::family::PickerKind::AutoSkip),
+                "picker-screensaver" => plx_screens::family::SettingsPage::Picker(plx_screens::family::PickerKind::Screensaver),
                 "audio" => plx_screens::family::SettingsPage::AudioSubtitles,
                 _other => {
                     #[cfg(feature = "devtriggers")]

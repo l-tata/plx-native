@@ -641,6 +641,13 @@ pub(super) unsafe fn apply_item_action<R: super::playback::PlaybackResources>(
                 detail: None, guid: String::new(),
             });
         }
+        // Add to / Remove from Watchlist: the hub store moves the shelf and the membership on this
+        // frame and its worker performs the edit on plex.tv, then reads the list back.
+        Action::Watchlist { guid, add } => {
+            let row = item.into_iter().filter(|_| add).collect();
+            super::bridge::execute_endpoint_outcomes(pages, bridge.hubs_run(
+                plx_data::stores::hubs::HubsCmd::EditWatchlist { guid, add, row: plx_data::pms::ShelfRows(row) }).endpoints);
+        }
         // The deck card's Play row (OK opens the page): the same captured-row launch as Play from
         // Start, resuming instead of restarting. The row only exists on a Card menu, never on the
         // filmstrip, so there is no loaded-episode path. A show or season has no stream of its
@@ -655,6 +662,16 @@ pub(super) unsafe fn apply_item_action<R: super::playback::PlaybackResources>(
                         menu_play_await, now);
                 }
             }
+        }
+        // A show or season, shuffled: the queue is built on a worker and started by the loop once
+        // it lands (`playback::drain_shuffle`), from the item's own server.
+        Action::Shuffle(rk) => super::playback::request_shuffle(ps, sid, &rk),
+        // The version chooser: the pick is the item's for the rest of the session — the next Play
+        // (and every transcode of it) asks for that `Media[]` version.
+        Action::SetVersion(rk, index) => {
+            log(&format!("version: Media[{index}] picked for rk={rk}"));
+            plx_plex::plex::set_media_index(plx_media::route::item_sid(sid), &rk, index);
+            plx_machine::idle::invalidate();
         }
         Action::PlayFromStart(rk) => {
             // On the detail page the target is an episode of the LOADED SEASON, which the hub
@@ -1193,6 +1210,7 @@ pub(crate) fn delete_all_local_data(meta: &mut plx_data::stores::metadata::Metad
     failures.extend(sweep_local_files(
         plx_base::paths::obsolete_last_place_candidates()
             .into_iter()
+            .chain(plx_base::paths::resume_place_candidates())
             .chain(plx_base::paths::telemetry_candidates())
             .chain(plx_base::paths::telemetry_spool_candidates())
             .chain(plx_base::paths::telemetry_crashmark_candidates()),

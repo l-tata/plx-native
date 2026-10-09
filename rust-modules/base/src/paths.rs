@@ -700,6 +700,25 @@ pub fn telemetry_candidates() -> Vec<PathBuf> {
     v
 }
 
+/// Where the **resume point** lives (`app::resume_place`): the page the app was on, so a cold
+/// launch can reopen it. The session file's search order, under its own name — not the retired
+/// `lastplace.json`, whose candidates [`obsolete_last_place_candidates`] still sweeps at boot.
+/// Like the session file, never the runtime root on a television: `/tmp` is cleared by the very
+/// power cycle a resume point exists to survive.
+pub fn resume_place_candidates() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if ENV_STEERABLE {
+        v.push(in_runtime_dir("resume.json"));
+    }
+    let id = app_id();
+    v.extend([
+        PathBuf::from(format!("/media/developer/{id}-resume.json")),
+        PathBuf::from(format!("/media/internal/.{id}-resume.json")),
+        in_app_dir("resume.json"),
+    ]);
+    v
+}
+
 /// Candidate locations of the retired **last place** bookmark (`coldstart`).
 ///
 /// Builds before 2026-09-01 wrote into these persistent locations. The current build only removes

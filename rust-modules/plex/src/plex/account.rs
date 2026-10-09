@@ -57,6 +57,12 @@ pub fn plex_tv() -> &'static str {
     })
 }
 
+/// Is plex.tv replaced by the loopback stand-in ([`plex_tv`])? A dev build's synthetic mock then
+/// answers the account-level reads too (the watchlist), which need no real account behind them.
+pub fn plex_tv_is_stand_in() -> bool {
+    plex_tv() != PLEX_TV
+}
+
 /// `http://127.0.0.1:<port>` or `http://localhost:<port>`, optionally with a trailing `/`.
 fn loopback_http(v: &str) -> bool {
     let port = v
@@ -271,6 +277,25 @@ impl AccountClient {
     /// top of this ONE transport + identity choke point instead of hand-rolling a second one.
     pub(super) fn get<T: DeserializeOwned>(&self, url: &str) -> Option<T> {
         decode("GET", url, self.get_raw(url).ok()?)
+    }
+
+    /// PUT `url` with an empty body: `Some(true)` on a 2xx, `Some(false)` on any other status
+    /// (plex.tv answered and refused), `None` when nothing answered. `pub(super)` for the same
+    /// reason as [`Self::get`]: `discover.rs`'s watchlist writes ride this one choke point.
+    pub(super) fn put_ok(&self, url: &str) -> Option<bool> {
+        let resp = plx_net::net::request_evidence(url, &self.headers(), "PUT", Some(b""),
+            plx_net::net::API, false, None, None);
+        note_response_contact(url, &resp);
+        match resp {
+            Ok(r) => {
+                if !r.ok() {
+                    log_status_failure("PUT", url, r.status);
+                }
+                Some(r.ok())
+            }
+            Err(failure) if failure.status.is_some() => Some(false),
+            Err(_) => None,
+        }
     }
 
     /// [`Self::get`], keeping what the call observed when it yields nothing — see [`CallEvidence`].

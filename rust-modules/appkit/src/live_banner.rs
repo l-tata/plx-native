@@ -15,6 +15,7 @@
 use crate::player_hud::{draw_scrim, sb_w, SB_H, SB_X, SB_Y};
 use plx_data::livetv::guide::{Airing, Lineup};
 use plx_media::live::LiveSession;
+use plx_ui::channel_tile::ChannelTile;
 use plx_ui::label::{HAlign, Label};
 use plx_ui::{theme, Painter, Rect};
 
@@ -131,8 +132,9 @@ pub fn surf_window(len: usize, highlight: usize) -> Vec<usize> {
     (0..n).map(|k| (highlight + len - before + k) % len).collect()
 }
 
-/// **The channel list over a playing channel** — UP/DOWN's surf. Each row is a channel's number
-/// and name, what it is airing now and how far through; the highlight is the channel OK would
+/// **The channel list over a playing channel** — UP/DOWN's surf. Each row is a channel's tile
+/// (`plx_ui::channel_tile`: its logo with the number as a badge) and name, what it is airing now
+/// and how far through; the highlight is the channel OK would
 /// tune, and the channel already playing carries the guide's NOW mark at its left edge.
 pub fn draw_surf(lineup: &Lineup, highlight: usize, playing: usize, now: i64, measure: &dyn plx_machine::machine::Measure) {
     let rows = surf_window(lineup.len(), highlight);
@@ -148,7 +150,10 @@ pub fn draw_surf(lineup: &Lineup, highlight: usize, playing: usize, now: i64, me
     let row_h = body_h + cap_h + SURF_BAR_GAP + SURF_BAR_H + 2.0 * pad;
     let panel = Rect::new(x, SURF_TOP, SURF_W, rows.len() as f32 * row_h + 2.0 * pad);
     p.rect(panel, theme::space::MD, theme::scrim_black(0.72), theme::scrim_black(0.72), 0.0);
-    let num_w = measure.width_str("000", theme::size::BODY, true);
+    // Each row leads with the channel's tile — its logo, or its initials, with the number as the
+    // tile's badge — as tall as the row's two lines and 16:9, the guide's own channel column.
+    let tile_h = body_h + cap_h;
+    let tile_w = tile_h * 16.0 / 9.0;
     for (k, &i) in rows.iter().enumerate() {
         let Some(ch) = lineup.channels.get(i) else { continue };
         let row = Rect::new(x + pad, SURF_TOP + pad + k as f32 * row_h, SURF_W - 2.0 * pad, row_h);
@@ -160,10 +165,9 @@ pub fn draw_surf(lineup: &Lineup, highlight: usize, playing: usize, now: i64, me
         }
         let inner = Rect::new(row.x + theme::space::MD, row.y, row.w - 2.0 * theme::space::MD, row.h);
         let top = inner.y + pad;
-        line(p, measure, &ch.number, theme::size::BODY, theme::TEXT_PRIMARY, true,
-            Rect::new(inner.x, top, num_w, body_h), HAlign::Left);
-        let text_x = inner.x + num_w + theme::space::SM;
-        let text_w = inner.w - num_w - theme::space::SM;
+        ChannelTile::new(&ch.number, &ch.name, &ch.icon).draw(p, Rect::new(inner.x, top, tile_w, tile_h), theme::space::XS, measure);
+        let text_x = inner.x + tile_w + theme::space::SM;
+        let text_w = inner.w - tile_w - theme::space::SM;
         line(p, measure, &ch.name, theme::size::BODY, theme::TEXT_PRIMARY, true,
             Rect::new(text_x, top, text_w, body_h), HAlign::Left);
         let (on_now, _) = ch.now_next(now);

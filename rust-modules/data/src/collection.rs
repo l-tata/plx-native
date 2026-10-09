@@ -200,7 +200,7 @@ impl CollectionState {
         }
         if !c.header_ready { return Some(Job::Header { rk: c.id.rk.clone() }); }
         if c.more && c.items.len() < c.want {
-            return Some(Job::Children { rk: c.id.rk.clone(), start: c.offset });
+            return Some(Job::Children { rk: c.id.rk.clone(), start: c.offset, playlist: c.id.playlist });
         }
         None
     }
@@ -312,7 +312,14 @@ impl CollectionState {
 enum Job {
     Resolve { sec: i64, tag: i64, name: String },
     Header { rk: String },
-    Children { rk: String, start: usize },
+    Children {
+        rk: String,
+        start: usize,
+        /// A playlist's members (`/playlists/{rk}/items`) rather than a collection's children.
+        /// Not written for a collection, so a recorded collection job keeps its exact bytes.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        playlist: bool,
+    },
 }
 
 /// A collection row's header fields, as both the tag resolution and the metadata GET read them.
@@ -328,8 +335,15 @@ struct Header {
 
 impl Header {
     fn of(row: &plx_plex::plex::Metadata) -> Self {
-        Self { title: row.title.clone(), thumb: row.thumb.clone(), summary: row.summary.clone(),
-            child_count: row.child_count.max(0) as usize, order: CollectionOrder::of(row.collection_sort) }
+        // A playlist's art is its composite and its size its leaves.
+        let playlist = row.kind == "playlist";
+        Self {
+            title: row.title.clone(),
+            thumb: if row.thumb.is_empty() { row.composite.clone() } else { row.thumb.clone() },
+            summary: row.summary.clone(),
+            child_count: if playlist { row.leaf_count } else { row.child_count }.max(0) as usize,
+            order: CollectionOrder::of(row.collection_sort),
+        }
     }
 }
 
@@ -386,8 +400,12 @@ fn run_job(client: &'static plx_plex::plex::Client, sid: ServerId, job: Job) -> 
             }
             Job::Header { rk } => answered(client.collection(&rk))?.metadata.first()
                 .map_or(Landing::Missing, |row| Landing::Header { rk: None, head: Header::of(row) }),
-            Job::Children { rk, start } => {
-                let page = answered(client.collection_children(&rk, start as i64, PAGE_SIZE as i64))?;
+            Job::Children { rk, start, playlist } => {
+                let page = answered(if playlist {
+                    client.playlist_items(&rk, start as i64, PAGE_SIZE as i64)
+                } else {
+                    client.collection_children(&rk, start as i64, PAGE_SIZE as i64)
+                })?;
                 let total = page.total_size.max(page.size).max(0) as usize;
                 let got = page.metadata.len();
                 let items = page.metadata.iter().filter(|row| crate::pms::listable(&row.kind))
@@ -454,7 +472,7 @@ mod tests {
 
     fn set_target(rk: &str, tag: i64, name: &str) -> CollectionTarget {
         CollectionTarget { id: CollectionRef { sid: ServerId::UNSET, rk: rk.into(), sec: 1, tag,
-            name: name.into() }, want: PAGE_SIZE }
+            name: name.into(), playlist: false }, want: PAGE_SIZE }
     }
 
     fn row(kind: &str, thumb: &str, parent: &str, grandparent: &str) -> plx_plex::plex::Metadata {
@@ -569,6 +587,28 @@ mod tests {
         assert!(state.view().current().unwrap().header_ready);
         assert!(!adapter.fetch.busy(), "B's own answer released B's claim");
         join.join().unwrap();
+    }
+
+    #[test]
+    fn a_playlist_pages_its_items_and_a_collection_job_keeps_its_recorded_shape() {
+        let adapter = Arc::new(CollectionAdapter::default());
+        let mut state = CollectionState::default();
+        let target = CollectionTarget { id: CollectionRef::by_playlist(ServerId::UNSET, "77", "Mix"), want: PAGE_SIZE };
+        state.run(&adapter, CollectionCmd::Open { target });
+        assert!(matches!(state.job(), Some(Job::Header { .. })), "a playlist's header is its metadata row");
+        adapter.land(state.generation(), Landing::Header { rk: None, head: header("Mix", 3) });
+        assert!(state.take_landing_for_test(&adapter));
+        assert!(matches!(state.job(), Some(Job::Children { start: 0, playlist: true, .. })));
+        let collection = serde_json::to_value(Job::Children { rk: "1".into(), start: 0, playlist: false }).unwrap();
+        assert_eq!(collection, serde_json::json!({"Children": {"rk": "1", "start": 0}}));
+    }
+
+    #[test]
+    fn a_playlist_header_takes_its_composite_and_its_leaf_count() {
+        let row: plx_plex::plex::Metadata = serde_json::from_str(
+            r#"{"type":"playlist","title":"Mix","composite":"/playlists/77/composite/1","leafCount":5}"#).unwrap();
+        let head = Header::of(&row);
+        assert_eq!((head.thumb.as_str(), head.child_count), ("/playlists/77/composite/1", 5));
     }
 
     #[test]

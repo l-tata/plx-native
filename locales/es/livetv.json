@@ -23,5 +23,15 @@
   "settings.livetv.section": "TV en directo",
   "settings.livetv.title": "TV en directo",
   "settings.livetv.detail": "Canales de tu servidor Tunarr.",
-  "settings.livetv.off": "Desactivada"
+  "settings.livetv.off": "Desactivada",
+  "livetv.starts_in": "Empieza en {time}",
+  "livetv.filter.all": "Todo",
+  "livetv.filter.movies": "Películas",
+  "livetv.filter.sports": "Deportes",
+  "livetv.filter.kids": "Infantil",
+  "livetv.filter.news": "Noticias",
+  "livetv.filter.documentary": "Documentales",
+  "livetv.filter.comedy": "Comedia",
+  "livetv.filter.empty": "No hay nada de {filter} en estas dos horas.",
+  "livetv.plex_hint": "Mantén {key} para verlo desde el principio en Plex"
 }

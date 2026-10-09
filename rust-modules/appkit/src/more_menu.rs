@@ -89,6 +89,14 @@ pub enum Action {
     /// as in `account_menu` because the account menu is unreachable during playback, and playback
     /// is what a Cloud Test Lab session is usually reproducing.
     SendDiagnostics,
+    /// **Jump to this row of the play queue** (its `playQueueItemID`) — the Play queue page's OK.
+    /// The loop stops the item on screen and starts this one INSIDE the same queue
+    /// (`route::request_play_queue_row`). The row now playing commits nothing.
+    PlayQueueItem(i64),
+    /// **Play version `n` of the item on screen** (its `Media[n]`) — the Version page's OK. The loop
+    /// remembers the pick and resolves the item again at the current position
+    /// (`route::switch_version`). The version playing commits nothing.
+    SetVersion(u32),
 }
 
 /// **A drill-in page of the More menu** — the form's `Dest`. The root is the empty page stack, not
@@ -98,6 +106,14 @@ pub enum MorePage {
     /// The playback-quality ladder: one checked-rung row per rung ([`MoreRow::Act`] of a
     /// [`Action::SetQuality`]).
     Quality,
+    /// **The play queue around the item now playing** — one row per queue row
+    /// ([`Action::PlayQueueItem`]), the playing one checked, each with its episode address, and a
+    /// watched / time-left read-out. It lists the window the session already holds
+    /// (`route::with_queue`): the continuous queue every playback creates, or a shuffle's.
+    Queue,
+    /// **The item's `Media[]` versions** (`4K · HEVC · HDR10 · 62 GB`), the one playing checked —
+    /// offered only when the item has more than one.
+    Version,
 }
 
 impl MorePage {
@@ -105,6 +121,8 @@ impl MorePage {
     fn title(self) -> String {
         match self {
             Self::Quality => plx_platform::i18n::msg::widgets_menu_quality().to_string(),
+            Self::Queue => plx_platform::i18n::msg::widgets_menu_queue().to_string(),
+            Self::Version => plx_platform::i18n::msg::widgets_menu_version().to_string(),
         }
     }
 
@@ -112,6 +130,8 @@ impl MorePage {
     fn code(self) -> u32 {
         match self {
             Self::Quality => 1,
+            Self::Queue => 2,
+            Self::Version => 3,
         }
     }
 }
@@ -122,6 +142,10 @@ impl MorePage {
 pub enum MoreRow {
     /// The root's Quality row ([`MorePage::Quality`]): reads out the current rung.
     OpenQuality,
+    /// The root's Play queue row ([`MorePage::Queue`]): reads out where in the queue this is.
+    OpenQueue,
+    /// The root's Version row ([`MorePage::Version`]): reads out the playing version's resolution.
+    OpenVersion,
     Act(Action),
 }
 
@@ -166,6 +190,10 @@ pub struct MoreMenuState {
     /// menu uses: a row set that changes height animates the top edge, bottom and right stay on the
     /// anchor, and a push or pop slides the two pages.
     motion: PanelMotion,
+    /// The playing row's item id as of the last push of the Play queue page — where that page opens.
+    queue_initial: Option<i64>,
+    /// The playing version as of the last push of the Version page — where that page opens.
+    version_initial: Option<u32>,
 }
 
 /// The hand-assigned focus key of each row. `SetQuality` rungs are an exhaustive match, so a new
@@ -185,6 +213,13 @@ impl FormId for Action {
             Action::SetQuality(Quality::P720) => 14,
             Action::SetQuality(Quality::P720Low) => 15,
             Action::SetQuality(Quality::P480) => 16,
+            // A queue row's identity is its playQueueItemID, in a range of its own (bit 29, under
+            // the form's 2^30 key ceiling), so no queue row can take a fixed row's key. 29 bits of
+            // a server's item id: two rows of
+            // one window colliding would need ids a billion apart.
+            Action::PlayQueueItem(id) => QUEUE_KEY_BASE | (*id as u64 & QUEUE_KEY_MASK) as u32,
+            // a version's index, in a range of its own (100+)
+            Action::SetVersion(n) => 100 + n,
         })
     }
 }
@@ -194,9 +229,70 @@ impl FormId for MoreRow {
         match self {
             // free in `Action`'s key space (0..=2 and 10..=16)
             MoreRow::OpenQuality => RowKey(3),
+            MoreRow::OpenQueue => RowKey(4),
+            MoreRow::OpenVersion => RowKey(5),
             MoreRow::Act(a) => a.key(),
         }
     }
+}
+
+const QUEUE_KEY_BASE: u32 = 1 << 29;
+const QUEUE_KEY_MASK: u64 = (1 << 29) - 1;
+
+/// Where the playing item sits in its queue — `(1-based position, rows held)` — or `None` when
+/// there is no queue worth a page: no rows, or only the item itself (a movie's queue of one). The
+/// position is found by the ONE identity rule (`plex::queue_index_of`: item id, rating key as the
+/// fallback); a playing item the window does not hold still offers the page, without a position.
+fn queue_offer(ps: &plx_media::route::PlaybackSession) -> Option<(Option<usize>, usize)> {
+    plx_media::route::with_queue(ps, |rows| {
+        (rows.len() > 1).then(|| (current_queue_index(ps, rows).map(|i| i + 1), rows.len()))
+    })
+}
+
+fn current_queue_index(ps: &plx_media::route::PlaybackSession, rows: &[plx_plex::plex::QueueRow]) -> Option<usize> {
+    let item_id = plx_media::route::pq_item_id(ps).parse().unwrap_or(0);
+    plx_plex::plex::queue_index_of(rows, item_id, plx_media::route::cur_sid(ps), &plx_media::route::cur_rk(ps))
+}
+
+/// One queue row, drawn: the item's own title (server text), its episode address and show beneath
+/// (an episode) and a trailing read-out of its watch state — `Watched`, or the time left of a
+/// started one. The playing row's leading mark comes from [`FormSection::choice`].
+fn queue_row(r: &plx_plex::plex::QueueRow) -> Row {
+    let address = plx_ui::fmt::episode_address(r.season, r.index);
+    let detail = match (address.is_empty(), r.show_title.is_empty()) {
+        (false, false) => format!("{} \u{b7} {address}", r.show_title),
+        (false, true) => address,
+        (true, _) => r.show_title.clone(),
+    };
+    let row = Row::new(r.title.clone()).server_label().detail(detail).server_detail();
+    match queue_readout(r) {
+        Some(v) => row.value(v).value_dim(true),
+        None => row,
+    }
+}
+
+/// PURE: the trailing word of a queue row — `Watched` for a watched row, the minutes left of a
+/// started one (never less than one), nothing for an unstarted one.
+fn queue_readout(r: &plx_plex::plex::QueueRow) -> Option<String> {
+    if r.watched {
+        return Some(plx_platform::i18n::msg::widgets_queue_watched().to_string());
+    }
+    (r.resume_ms > 0 && r.dur_ms > r.resume_ms)
+        .then(|| plx_platform::i18n::msg::widgets_queue_left(((r.dur_ms - r.resume_ms) / 60_000).max(1)))
+}
+
+/// The Play queue PAGE: every queue row the session holds, in queue order, the playing one checked.
+fn queue_form(ps: &plx_media::route::PlaybackSession) -> MoreForm {
+    plx_media::route::with_queue(ps, |rows| {
+        let current = current_queue_index(ps, rows).map(|i| rows[i].item_id);
+        let sec = rows.iter().fold(FormSection::new(""), |sec, r| {
+            let a = Action::PlayQueueItem(r.item_id);
+            sec.choice(MoreRow::Act(a), a, queue_row(r), |id| {
+                current.is_some_and(|c| *id == MoreRow::Act(Action::PlayQueueItem(c)))
+            })
+        });
+        Form::new().section(sec)
+    })
 }
 
 /// Is the Quality row offered? Force Direct Play never offers one (no rung can change what plays),
@@ -218,14 +314,69 @@ fn root_form(
     for a in rows.iter().copied().filter(|a| !matches!(a, Action::SetQuality(_))) {
         options = options.item(MoreRow::Act(a), RowKind::Button, a, row_for(ps, a));
     }
+    let queue = queue_offer(ps);
+    let version = version_offer(ps);
     let quality = FormSection::new("").item_if(
         quality_offered(rows, forced),
         MoreRow::OpenQuality,
         RowKind::Nav(MorePage::Quality),
         Action::None,
         Row::new(plx_platform::i18n::msg::widgets_menu_quality()).value(current.label()),
+    )
+    .item_if(
+        queue.is_some(),
+        MoreRow::OpenQueue,
+        RowKind::Nav(MorePage::Queue),
+        Action::None,
+        queue_root_row(queue),
+    )
+    .item_if(
+        version.is_some(),
+        MoreRow::OpenVersion,
+        RowKind::Nav(MorePage::Version),
+        Action::None,
+        match version {
+            Some(res) if !res.is_empty() => Row::new(plx_platform::i18n::msg::widgets_menu_version()).value(res),
+            _ => Row::new(plx_platform::i18n::msg::widgets_menu_version()),
+        },
     );
     Form::new().section(quality).section(options)
+}
+
+/// The playing version's resolution class (`4K`), when the item has several versions — `None`
+/// (no Version row) when it has one.
+fn version_offer(ps: &plx_media::route::PlaybackSession) -> Option<String> {
+    plx_media::route::with_versions(ps, |versions, current| {
+        (versions.len() > 1).then(|| {
+            versions
+                .get(current as usize)
+                .and_then(|v| plx_ui::fmt::resolution(&v.video_resolution, v.width, v.height))
+                .unwrap_or_default()
+        })
+    })
+}
+
+/// The Version PAGE: every version, labelled, the playing one checked.
+fn version_form(ps: &plx_media::route::PlaybackSession) -> MoreForm {
+    plx_media::route::with_versions(ps, |versions, current| {
+        let sec = versions.iter().enumerate().fold(FormSection::new(""), |sec, (i, v)| {
+            let a = Action::SetVersion(i as u32);
+            sec.choice(MoreRow::Act(a), a, Row::new(crate::info_panel::version_label(v)).server_label(), |id| {
+                *id == MoreRow::Act(Action::SetVersion(current))
+            })
+        });
+        Form::new().section(sec)
+    })
+}
+
+/// The root's Play queue drill-in: `3 of 12` beside it, or no read-out when the playing item is not
+/// in the window the session holds.
+fn queue_root_row(queue: Option<(Option<usize>, usize)>) -> Row {
+    let row = Row::new(plx_platform::i18n::msg::widgets_menu_queue());
+    match queue {
+        Some((Some(at), n)) => row.value(plx_platform::i18n::msg::widgets_menu_queue_position(at as i64, n as i64)),
+        _ => row,
+    }
 }
 
 /// The Quality PAGE: one checked-rung row per rung of `rows`, the current one checked.
@@ -254,7 +405,7 @@ impl MoreMenuState {
         form.table.compact = true; // a short action list — BODY labels, like the profile menu
         form.table.min_panel_w = theme::layout::PLAYER_MENU_MIN_W;
         form.set_or_open(root_form(ps, &rows, forced, current), None);
-        let mut st = MoreMenuState { form, rows, forced, current, pages: PageStack::new(), motion: PanelMotion::new() };
+        let mut st = MoreMenuState { form, rows, forced, current, pages: PageStack::new(), motion: PanelMotion::new(), queue_initial: None, version_initial: None };
         // A quality entry (the failure screen's OK) opens straight on the Quality page with the
         // active rung focused, no slide: the viewer is fixing a bad decision, not browsing. Under
         // Force Direct Play there is no ladder, so it is the ordinary root.
@@ -281,6 +432,8 @@ impl MoreMenuState {
     fn page_form(&self, ps: &plx_media::route::PlaybackSession, page: MorePage) -> MoreForm {
         match page {
             MorePage::Quality => quality_form(ps, &self.rows, self.current),
+            MorePage::Queue => queue_form(ps),
+            MorePage::Version => version_form(ps),
         }
     }
 
@@ -289,6 +442,18 @@ impl MoreMenuState {
     fn page_initial(&self, page: MorePage) -> Option<MoreRow> {
         match page {
             MorePage::Quality => Some(MoreRow::Act(Action::SetQuality(self.current))),
+            // the queue page opens on the playing row (set by `push`, which has the session)
+            MorePage::Queue => self.queue_initial.map(|id| MoreRow::Act(Action::PlayQueueItem(id))),
+            MorePage::Version => self.version_initial.map(|n| MoreRow::Act(Action::SetVersion(n))),
+        }
+    }
+
+    /// Is `page` still offered by the row set as last built? The Quality page goes with the ladder;
+    /// the queue page does not depend on it.
+    fn page_offered(&self, page: MorePage) -> bool {
+        match page {
+            MorePage::Quality => quality_offered(&self.rows, self.forced),
+            MorePage::Queue | MorePage::Version => true,
         }
     }
 
@@ -297,6 +462,12 @@ impl MoreMenuState {
     /// and its title band, and start the slide.
     fn push(&mut self, ps: &plx_media::route::PlaybackSession, page: MorePage) {
         let Some(return_id) = self.form.selected_id().copied() else { return };
+        if page == MorePage::Version {
+            self.version_initial = Some(plx_media::route::with_versions(ps, |_, current| current));
+        }
+        if page == MorePage::Queue {
+            self.queue_initial = plx_media::route::with_queue(ps, |rows| current_queue_index(ps, rows).map(|i| rows[i].item_id));
+        }
         self.pages.push(page, return_id, self.form.table.scroll_pos());
         let leaving = page_stack::leave_page(&mut self.form);
         let form = self.page_form(ps, page);
@@ -368,7 +539,7 @@ impl MoreMenuState {
         self.forced = forced;
         self.current = current;
         if let Some(first) = self.pages.first().copied() {
-            if quality_offered(&self.rows, self.forced) {
+            if self.pages.top().is_some_and(|page| self.page_offered(page)) {
                 let page = self.pages.top().unwrap_or(MorePage::Quality);
                 let fallback = self.page_initial(page);
                 let form = self.page_form(ps, page);
@@ -640,7 +811,7 @@ fn label(a: Action) -> std::borrow::Cow<'static, str> {
         // the picker's leading mark (see this module's doc)
         Action::SetQuality(q) => q.label().into(),
         Action::SendDiagnostics => plx_platform::i18n::msg::widgets_menu_diagnostics().into(),
-        Action::None => "".into(),
+        Action::None | Action::PlayQueueItem(_) | Action::SetVersion(_) => "".into(),
     }
 }
 
@@ -671,7 +842,7 @@ fn is_on(a: Action) -> bool {
     match a {
         Action::ToggleStats => stats_on(),
         // a rung is not a switch — see `row_for`, which gives it the leading mark instead
-        Action::SetQuality(_) | Action::SendDiagnostics | Action::None => false,
+        Action::SetQuality(_) | Action::SendDiagnostics | Action::None | Action::PlayQueueItem(_) | Action::SetVersion(_) => false,
     }
 }
 
@@ -814,7 +985,7 @@ mod tests {
         let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
         form.table.compact = true;
         form.set_or_open(root_form(&ps, &rows, forced, current), None);
-        MoreMenuState { form, rows, forced, current, pages: PageStack::new(), motion: PanelMotion::new() }
+        MoreMenuState { form, rows, forced, current, pages: PageStack::new(), motion: PanelMotion::new(), queue_initial: None, version_initial: None }
     }
 
     /// The same menu with the Quality page pushed (and its slide skipped).
@@ -987,6 +1158,8 @@ mod tests {
             current: Quality::Auto,
             pages: PageStack::new(),
             motion: PanelMotion::new(),
+            queue_initial: None,
+            version_initial: None,
         };
         for a in rows_for(false).into_iter().filter(|a| matches!(a, Action::SetQuality(_))) {
             let i = st.form.index_of_key(a.key()).expect("every row keeps its key");
@@ -1180,6 +1353,87 @@ mod tests {
         assert!(!step(&mut st));
     }
 
+    fn queue_rows() -> Vec<plx_plex::plex::QueueRow> {
+        let row = |item_id: i64, rk: &str, index: i64, watched: bool, resume_ms: i64| plx_plex::plex::QueueRow {
+            item_id,
+            rk: rk.into(),
+            kind: "episode".into(),
+            title: format!("t{rk}"),
+            show_title: "show".into(),
+            season: 1,
+            index,
+            dur_ms: 40 * 60_000,
+            resume_ms,
+            watched,
+            ..Default::default()
+        };
+        vec![row(11, "a", 1, true, 0), row(12, "b", 2, false, 0), row(13, "c", 3, false, 30 * 60_000)]
+    }
+
+    /// **The Play queue page lists the queue around the playing item and jumps on OK.** The root
+    /// offers it only when the queue holds more than the item itself, reading out where playback
+    /// sits; the page checks the playing row, opens on it, reads out each row's watch state, and
+    /// OK on another row commits a jump to THAT row's queue item.
+    #[test]
+    fn the_queue_page_lists_the_queue_and_jumps_to_a_row() {
+        let _serial = plx_base::testlock::serial();
+        let _lang = plx_platform::i18n::language_on_this_thread_for_test(plx_platform::i18n::Preference::En);
+        let mut ps = plx_media::route::PlaybackSession::default();
+        let st = MoreMenuState::new(&ps);
+        assert!(st.form.index_of(&MoreRow::OpenQueue).is_none(), "no queue, no row");
+        plx_media::route::install_queue_for_test(&mut ps, 41, 12, queue_rows()[..1].to_vec(), false);
+        assert!(MoreMenuState::new(&ps).form.index_of(&MoreRow::OpenQueue).is_none(), "a queue of one is no queue");
+
+        plx_media::route::install_queue_for_test(&mut ps, 41, 12, queue_rows(), false);
+        let mut st = MoreMenuState::new(&ps);
+        let at = st.form.index_of(&MoreRow::OpenQueue).expect("the root offers the queue");
+        assert_eq!(st.form.table.sections[0].rows[at].value.as_deref(), Some("2 of 3"));
+        assert!(st.focus_key(MoreRow::OpenQueue.key().0));
+        assert_eq!(st.on_ok(&ps), MoreOk::Navigated);
+        assert_eq!(st.page(), Some(MorePage::Queue));
+        assert_eq!(st.sel_id(), Some(MoreRow::Act(Action::PlayQueueItem(12))), "opens on the playing row");
+        let rows = &st.form.table.sections[0].rows;
+        assert_eq!(rows.len(), 3);
+        assert!(rows[1].checked && !rows[0].checked && !rows[2].checked);
+        assert_eq!(rows[0].value.as_deref(), Some("Watched"));
+        assert_eq!(rows[1].value, None);
+        assert_eq!(rows[2].value.as_deref(), Some("10 min left"));
+        assert_eq!(rows[2].detail, "show \u{b7} S1 \u{b7} E3");
+        assert!(st.focus_key(Action::PlayQueueItem(13).key().0));
+        assert_eq!(st.on_ok(&ps), MoreOk::Action(Action::PlayQueueItem(13)));
+        assert!(st.pop(&ps));
+        assert_eq!(st.sel_id(), Some(MoreRow::OpenQueue), "back to the opener");
+    }
+
+    /// **The Version page names every version and switches on OK.** Offered only for an item
+    /// with several versions, read out as the playing one's resolution; the page checks and opens
+    /// on the playing version, and OK on another commits a switch to THAT version.
+    #[test]
+    fn the_version_page_lists_the_versions_and_switches() {
+        use plx_data::metadata::{HdrFormat, MediaVersion};
+        let _serial = plx_base::testlock::serial();
+        let _lang = plx_platform::i18n::language_on_this_thread_for_test(plx_platform::i18n::Preference::En);
+        let mut ps = plx_media::route::PlaybackSession::default();
+        let uhd = MediaVersion { video_resolution: "4k".into(), vcodec: "hevc".into(), hdr: HdrFormat::Hdr10, ..Default::default() };
+        let fhd = MediaVersion { video_resolution: "1080".into(), vcodec: "h264".into(), ..Default::default() };
+        plx_media::route::install_versions_for_test(&mut ps, vec![uhd.clone()], 0);
+        assert!(MoreMenuState::new(&ps).form.index_of(&MoreRow::OpenVersion).is_none(), "one version: no choice");
+
+        plx_media::route::install_versions_for_test(&mut ps, vec![uhd, fhd], 1);
+        let mut st = MoreMenuState::new(&ps);
+        let at = st.form.index_of(&MoreRow::OpenVersion).expect("two versions: the row");
+        assert_eq!(st.form.table.sections[0].rows[at].value.as_deref(), Some("1080p"));
+        assert!(st.focus_key(MoreRow::OpenVersion.key().0));
+        assert_eq!(st.on_ok(&ps), MoreOk::Navigated);
+        assert_eq!(st.page(), Some(MorePage::Version));
+        assert_eq!(st.sel_id(), Some(MoreRow::Act(Action::SetVersion(1))), "opens on the playing version");
+        let rows = &st.form.table.sections[0].rows;
+        assert_eq!(rows[0].label, "4K \u{b7} HEVC \u{b7} HDR10");
+        assert!(rows[1].checked && !rows[0].checked);
+        assert!(st.focus_key(Action::SetVersion(0).key().0));
+        assert_eq!(st.on_ok(&ps), MoreOk::Action(Action::SetVersion(0)));
+    }
+
     /// **A row set that changes height animates the card** (`ui::panel_motion`): the panel opens
     /// at rest, a live change to the set (Force Direct Play dropping the Quality row, Auto's
     /// gate opening) rebuilds it and the top edge springs to the new layout while the bottom and
@@ -1274,6 +1528,8 @@ mod focus_tests {
             current: plx_media::route::Quality::Auto,
             pages: PageStack::new(),
             motion: PanelMotion::new(),
+            queue_initial: None,
+            version_initial: None,
         }
     }
 

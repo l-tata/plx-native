@@ -105,7 +105,7 @@ fn menu_side_actions_keep_source_sort_and_filter_row_identity() {
     sort.apply_draft(sort_draft(&sorts, 0, false));
     let sort_key = sort.form.key_at(1).unwrap().0;
     let mut filter = LibraryMenu::new(EntryId(7), menu_arg(LibraryMenuKind::Filter, [0; 4]));
-    filter.apply_draft(filter_draft(false, None, true));
+    filter.apply_draft(filter_draft(false, None, true, &[], &[]));
     let filter_key = filter.form.key_at(0).unwrap().0;
     let (groups, sections) = source_sections();
     let mut sources = LibraryMenu::new(EntryId(7), menu_arg(LibraryMenuKind::Sources, [0; 4]));

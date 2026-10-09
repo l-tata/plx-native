@@ -616,6 +616,13 @@ fn neutral_collection_name<'a>(m: Option<&TileFacts<'a>>) -> Option<&'a str> {
     m.filter(|m| m.kind == TileKind::Collection && m.thumb.is_empty()).map(|m| m.title)
 }
 
+/// The channel a live card names on the neutral tile, when it draws one: a channel the guide has
+/// no artwork for (no programme icon, no logo). Its `show_title` is the channel as a viewer names
+/// it, "12 Films".
+fn neutral_channel_name<'a>(m: Option<&TileFacts<'a>>) -> Option<&'a str> {
+    m.filter(|m| m.kind == TileKind::Channel && m.thumb.is_empty()).map(|m| m.show_title)
+}
+
 pub fn card(p: Painter, frame: Rect, art: Art, rad: f32, focused: bool, scale: f32, f: f32) {
     card_named(p, frame, art, None, rad, focused, scale, f)
 }
@@ -654,6 +661,12 @@ pub fn card_named(p: Painter, frame: Rect, art: Art, fan_name: Option<&str>, rad
                 // would read as loading forever. It wears its mark and name instead, and no state
                 // mark — a collection has no watch state (`poster_mark`).
                 crate::collection_tile::draw(p, frame, r, rad, name);
+                return;
+            }
+            if let Some(name) = neutral_channel_name(m.as_ref()) {
+                // The same absence for a live channel: its name on the neutral tile, under a
+                // television, and the airing's progress bar (drawn by the row) still under it.
+                crate::collection_tile::draw_marked(p, frame, r, rad, name, crate::icons::Icon::Show);
                 return;
             }
             if t != 0 {

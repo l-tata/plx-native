@@ -106,6 +106,35 @@ pub fn img_decode_owned(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     }
 }
 
+/// The size a `w`×`h` picture is scaled DOWN to so it still COVERS a `box_w`×`box_h` box — the
+/// arithmetic of a `minSize=1` transcode. A picture already inside the box (on either axis) is
+/// left alone: this never scales up, and never below the box on the axis that binds.
+pub fn cover_size(w: u32, h: u32, box_w: u32, box_h: u32) -> (u32, u32) {
+    if w == 0 || h == 0 || box_w == 0 || box_h == 0 {
+        return (w, h);
+    }
+    let k = (box_w as f64 / w as f64).max(box_h as f64 / h as f64);
+    if k >= 1.0 {
+        return (w, h);
+    }
+    (((w as f64 * k).round() as u32).max(1), ((h as f64 * k).round() as u32).max(1))
+}
+
+/// [`img_decode_owned`], then scaled down to [`cover_size`] — what the server-side transcoder does
+/// for Plex art, for art fetched verbatim from a server that has none (a Live TV server's channel
+/// logos and programme artwork, `ui::tex::PLAIN_URL`). Without it a 2000-pixel logo drawn in a
+/// 64-pixel tile would hold 16 MB of texture and alias on the way down.
+pub fn img_decode_cover(data: &[u8], box_w: u32, box_h: u32) -> Option<(u32, u32, Vec<u8>)> {
+    let (w, h, px) = img_decode_owned(data)?;
+    let (tw, th) = cover_size(w, h, box_w, box_h);
+    if (tw, th) == (w, h) {
+        return Some((w, h, px));
+    }
+    let src = image::RgbaImage::from_raw(w, h, px)?;
+    let out = image::imageops::resize(&src, tw, th, image::imageops::FilterType::Triangle);
+    Some((tw, th, out.into_raw()))
+}
+
 /// The first six bytes as hex, for a failure line only — never built on the success path.
 fn magic(data: &[u8]) -> String {
     data.iter().take(6).map(|b| format!("{b:02x}")).collect()
@@ -197,4 +226,29 @@ pub fn img_upload_rgba(px: *const c_uchar, w: c_int, h: c_int) -> c_uint {
         return 0;
     }
     crate::gfx::upload_rgba(0, w, h, px)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cover_size_scales_down_to_cover_and_never_up() {
+        assert_eq!(cover_size(2000, 1000, 200, 200), (400, 200), "the short side binds");
+        assert_eq!(cover_size(1000, 3000, 300, 300), (300, 900));
+        assert_eq!(cover_size(100, 100, 200, 200), (100, 100), "never scaled up");
+        assert_eq!(cover_size(400, 100, 200, 200), (400, 100), "already inside the box on one axis");
+        assert_eq!(cover_size(0, 10, 5, 5), (0, 10));
+    }
+
+    #[test]
+    fn a_large_png_decodes_to_the_covering_size() {
+        let rgba = vec![200u8; 64 * 32 * 4];
+        let mut png = Vec::new();
+        let enc = image::codecs::png::PngEncoder::new(&mut png);
+        image::ImageEncoder::write_image(enc, &rgba, 64, 32, image::ExtendedColorType::Rgba8).unwrap();
+        let (w, h, px) = img_decode_cover(&png, 16, 16).unwrap();
+        assert_eq!((w, h), (32, 16));
+        assert_eq!(px.len(), 32 * 16 * 4);
+    }
 }

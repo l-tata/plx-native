@@ -74,12 +74,14 @@ impl LibraryScreen {
                 Some(GridAction::Unwatched { desired }) => *desired,
                 _ => listing.unwatched(),
             };
-            (plx_platform::i18n::msg::browse_library_filter_c(), match (genre, unwatched) {
-                (None, false) => plx_platform::i18n::msg::browse_library_all().into(),
-                (None, true) => plx_platform::i18n::msg::browse_library_unwatched().into(),
-                (Some(genre), false) => genre.into(),
-                (Some(genre), true) => plx_platform::i18n::msg::browse_library_genre_unwatched(genre),
-            })
+            // The further filters, with a queued edit to one of them shown as it will land.
+            let mut more: Vec<&str> = listing.more_filters().iter()
+                .filter(|f| !matches!(queued, Some(GridAction::Filter { field, .. }) if *field == f.field))
+                .map(|f| f.title.as_str()).collect();
+            if let Some(GridAction::Filter { value: Some((_, title)), .. }) = queued {
+                more.push(title.as_str());
+            }
+            (plx_platform::i18n::msg::browse_library_filter_c(), filter_summary(genre, unwatched, &more))
         };
         Chip { name, value: CString::new(format!(" · {value}")).unwrap_or_default(), note: None }
     }
@@ -93,5 +95,45 @@ impl LibraryScreen {
         };
         Rect::new(x, CONTENT_TOP + layout.grid_block_top() + plx_ui::consts::TITLE_DY + CARD_DY - scroll,
             self.toolbar_chip(elem, cx).width(cx.measure), 52.0)
+    }
+}
+
+/// The Filter chip's value: every filter in force, the genre and the further ones by their values
+/// and Unwatched last, " · "-joined — at most three named, the rest counted ("+2") so the chip
+/// stays a chip. Nothing in force reads "All".
+pub(super) fn filter_summary(genre: Option<&str>, unwatched: bool, more: &[&str]) -> String {
+    if more.is_empty() {
+        return match (genre, unwatched) {
+            (None, false) => plx_platform::i18n::msg::browse_library_all().into(),
+            (None, true) => plx_platform::i18n::msg::browse_library_unwatched().into(),
+            (Some(genre), false) => genre.into(),
+            (Some(genre), true) => plx_platform::i18n::msg::browse_library_genre_unwatched(genre),
+        };
+    }
+    let mut parts: Vec<&str> = genre.into_iter().chain(more.iter().copied()).collect();
+    if unwatched {
+        parts.push(plx_platform::i18n::msg::browse_library_unwatched());
+    }
+    const NAMED: usize = 3;
+    if parts.len() > NAMED {
+        let rest = parts.len() - (NAMED - 1);
+        let mut out = parts[..NAMED - 1].join(" \u{00b7} ");
+        out.push_str(&format!(" \u{00b7} +{rest}"));
+        return out;
+    }
+    parts.join(" \u{00b7} ")
+}
+
+#[cfg(test)]
+mod filter_summary_tests {
+    use super::filter_summary;
+
+    #[test]
+    fn the_chip_names_every_filter_in_force_and_counts_past_three() {
+        let unwatched = plx_platform::i18n::msg::browse_library_unwatched();
+        assert_eq!(filter_summary(None, false, &[]), plx_platform::i18n::msg::browse_library_all());
+        assert_eq!(filter_summary(Some("s1"), false, &["1999"]), "s1 \u{00b7} 1999");
+        assert_eq!(filter_summary(None, true, &["4K"]), format!("4K \u{00b7} {unwatched}"));
+        assert_eq!(filter_summary(Some("s1"), true, &["1999", "4K"]), "s1 \u{00b7} 1999 \u{00b7} +2");
     }
 }

@@ -148,6 +148,21 @@ pub struct MetaType {
     pub active: i64, // bool on the wire; de_i64 folds true/false/"1"
     #[serde(rename = "Sort", default)]
     pub sort: Vec<SortOption>,
+    /// The type's server-driven FILTER menu (`docs/plex-openapi.json`, `Meta.Type[].Filter[]`).
+    #[serde(rename = "Filter", default, deserialize_with = "de_vec")]
+    pub filter: Vec<FilterOption>,
+}
+
+/// One filter the section advertises for a type: its listing field (`filter`, e.g. `year`), how
+/// it is chosen (`filterType`: `boolean`, `string`, `integer`) and its display title.
+#[derive(Deserialize, Default)]
+pub struct FilterOption {
+    #[serde(default, deserialize_with = "de_str")]
+    pub filter: String,
+    #[serde(rename = "filterType", default, deserialize_with = "de_str")]
+    pub filter_type: String,
+    #[serde(default, deserialize_with = "de_str")]
+    pub title: String,
 }
 
 /// One sort menu entry. `descKey` carries the server's descending expression when it is
@@ -375,6 +390,10 @@ pub struct Metadata {
     pub view_count: i64, // present only once watched ≥1× (absent = unwatched)
     #[serde(default)]
     pub thumb: String,
+    /// A PLAYLIST's artwork: the server's composite of its members (`/playlists/{id}/composite/…`)
+    /// — a playlist row carries this and usually no `thumb`.
+    #[serde(default, deserialize_with = "de_str")]
+    pub composite: String,
     #[serde(rename = "parentThumb", default)]
     pub parent_thumb: String,
     #[serde(default)]
@@ -444,12 +463,20 @@ impl Metadata {
     /// `Media[0]` — the FIRST version listed, **not** a chosen-best one, and the honest name for
     /// what every caller here actually reads. An item can carry SEVERAL `Media[]` versions
     /// (docs/pms-api.md §4; the dev library really does — one episode ships a 4k and a 1080
-    /// version, another two 4k versions at different bitrates), and picking among them by
-    /// codec/resolution needs a version picker this client does not have yet. So anything derived
-    /// from this describes **version 0**, and a UI that shows it should be read that way.
+    /// version, another two 4k versions at different bitrates). The viewer picks among them with
+    /// the version picker (`data::metadata::media_versions`, [`Self::media_at`], and
+    /// `transcoder::set_media_index` for `mediaIndex`); anything derived from THIS describes
+    /// **version 0**, the default when nothing was picked, and a UI that shows it should be read
+    /// that way.
     /// [`first_part`](Self::first_part) carries the same caveat.
     pub fn primary_media(&self) -> Option<&Media> {
         self.media.first()
+    }
+
+    /// `Media[i]` — version `i` of the item, for the version picker (`mediaIndex=i` on the
+    /// transcoder, `Media[i].Part[0].key` for direct play). `None` past the last version.
+    pub fn media_at(&self, i: usize) -> Option<&Media> {
+        self.media.get(i)
     }
 }
 

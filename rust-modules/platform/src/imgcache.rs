@@ -150,6 +150,27 @@ pub fn classify_baked(
     })
 }
 
+/// The durable key of a picture fetched VERBATIM from an absolute URL — art from a server with no
+/// transcoder (a Live TV server's channel logos and programme artwork). Its identity is the URL
+/// itself and the box the decode is scaled to; the bytes on disk are the server's original, so the
+/// box only separates two decodes of one picture. An URL carries no credential here (the Live TV
+/// routes are unauthenticated), and only `http`/`https` are accepted.
+pub fn classify_url(url: &str, w: u32, h: u32) -> Option<DiskKey> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) || w == 0 || h == 0 {
+        return None;
+    }
+    let dims = format!("{w}x{h}");
+    let mut identity = Vec::new();
+    for field in ["plx-url-v1", url, &dims] {
+        identity.extend_from_slice(&(field.len() as u64).to_le_bytes());
+        identity.extend_from_slice(field.as_bytes());
+    }
+    Some(DiskKey {
+        name: format!("image-{}.img", hex_digest(&identity)),
+        legacy: None,
+    })
+}
+
 fn hex_digest(bytes: &[u8]) -> String {
     plx_base::sha256::sha256(bytes)
         .iter()

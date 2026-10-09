@@ -1,5 +1,6 @@
 //! A registered Library menu surface. Navigation owns its lifetime, phase, and input scope.
 use plx_data::browse::{LibraryType, GenreEntry, SecKind, SortEntry, SrcGroup, SrcRow};
+use plx_data::browse::filters::{ActiveFilter, FilterDef, FilterKind};
 use crate::registry::{AppFx, AppMsg, LibraryLike, LibraryMenuArg, LibraryMenuKind};
 use plx_data::stores::browse::{BrowseCmd, LibraryWork, QueryEdit, SectionAddress};
 use plx_data::stores::{StoreCmd, StoreId};
@@ -25,14 +26,18 @@ use std::borrow::Cow;
 const PANEL_RADIUS: f32 = 20.0;
 
 pub const SHAPE: [&str; 2] = [
-    "LibraryMenu{arg:LibraryMenuArg,kind:u32,desired_unwatched:Option<bool>,identities:[str],dependencies:[u8],rows:[{key:u32,table_index:i32}],table:TableViewMotion}",
+    "LibraryMenu{arg:LibraryMenuArg,kind:u32,field:str,desired_unwatched:Option<bool>,identities:[str],dependencies:[u8],rows:[{key:u32,table_index:i32}],table:TableViewMotion}",
     TableView::MOTION_SHAPE,
 ];
 
 #[derive(Clone)]
 enum Action {
     Edit(QueryEdit),
+    /// An edit that keeps the menu open — a switch, like Unwatched.
+    Toggle(QueryEdit),
     Genre,
+    /// Open a further filter's value picker (`browse::filters`).
+    Field(String),
     Select(SectionAddress),
     Recheck,
 }
@@ -298,7 +303,10 @@ fn type_draft(section_kind: SecKind, current: LibraryType) -> MenuDraft {
     MenuDraft { stamp: stamp.finish(), form: MenuForm::new().section(section), selected }
 }
 
-fn filter_draft(unwatched: bool, genre: Option<&GenreEntry>, genres_supported: bool) -> MenuDraft {
+/// The Filter menu: Unwatched, Genre, then each further filter the section offers — a switch is a
+/// toggle row, a field with values a row naming its value that opens the picker.
+fn filter_draft(unwatched: bool, genre: Option<&GenreEntry>, genres_supported: bool, defs: &[FilterDef],
+    more: &[ActiveFilter]) -> MenuDraft {
     let mut section = MenuSection::new(plx_platform::i18n::msg::browse_library_filter()).item_keyed(
         "unwatched".into(),
         RowKey(0),
@@ -315,6 +323,29 @@ fn filter_draft(unwatched: bool, genre: Option<&GenreEntry>, genres_supported: b
         section = choice(section, "genre".into(), Action::Genre, row);
     }
     let mut stamp = Stamp::default();
+    for def in defs {
+        let active = more.iter().find(|f| f.field == def.field);
+        stamp.tag(14);
+        stamp.str(&def.field);
+        stamp.str(&def.title);
+        stamp.str(active.map_or("", |f| f.title.as_str()));
+        let identity = format!("filter:{}", def.field);
+        section = match def.kind {
+            FilterKind::Switch => section.item_keyed(identity, RowKey(0), RowKind::Toggle,
+                Action::Toggle(QueryEdit::Filter {
+                    field: def.field.clone(),
+                    value: active.is_none().then(|| ("1".to_owned(), def.title.clone())),
+                }),
+                Row::new(&def.title).server_label().toggle(active.is_some())),
+            FilterKind::Values => {
+                let mut row = Row::new(&def.title).server_label()
+                    .value(active.map_or(plx_platform::i18n::msg::browse_library_all(), |f| f.title.as_str()))
+                    .chevron(true);
+                if active.is_some() { row = row.server_value(); }
+                choice(section, identity, Action::Field(def.field.clone()), row)
+            }
+        };
+    }
     stamp.tag(9);
     stamp.bool(genres_supported);
     stamp.bool(unwatched);
@@ -328,6 +359,38 @@ fn filter_draft(unwatched: bool, genre: Option<&GenreEntry>, genres_supported: b
         form: MenuForm::new().section(section),
         selected: None,
     }
+}
+
+/// A further filter's value picker: "All" (the field off), then the field's values; the menu
+/// shows "All" alone until the list lands.
+fn values_draft(def: Option<&FilterDef>, field: &str, values: &[GenreEntry], current: Option<&ActiveFilter>) -> MenuDraft {
+    let title = def.map_or(field, |d| d.title.as_str());
+    let mut section = choice(
+        MenuSection::new(title),
+        "value:all".into(),
+        Action::Edit(QueryEdit::Filter { field: field.to_owned(), value: None }),
+        Row::new(plx_platform::i18n::msg::browse_library_all()).checked(current.is_none()),
+    );
+    let mut stamp = Stamp::default();
+    stamp.tag(15);
+    stamp.str(field);
+    stamp.str(current.map_or("", |c| c.value.as_str()));
+    let mut selected = current.is_none().then(|| "value:all".to_string());
+    for value in values {
+        let active = current.is_some_and(|c| c.value == value.id);
+        if active {
+            selected = Some(format!("value:{}", value.id));
+        }
+        stamp.str(&value.id);
+        stamp.str(&value.title);
+        section = choice(
+            section,
+            format!("value:{}", value.id),
+            Action::Edit(QueryEdit::Filter { field: field.to_owned(), value: Some((value.id.clone(), value.title.clone())) }),
+            Row::new(&value.title).checked(active).server_label(),
+        );
+    }
+    MenuDraft { stamp: stamp.finish(), form: MenuForm::new().section(section), selected }
 }
 
 fn genre_draft(genres: &[GenreEntry], current: Option<&GenreEntry>) -> MenuDraft {
@@ -377,6 +440,9 @@ pub struct LibraryMenu {
     identities: Vec<String>,
     stamp: Vec<u8>,
     desired_unwatched: Option<bool>,
+    /// The further filter whose value picker is open (the `Genre` kind with a field); empty for
+    /// the genre picker itself.
+    field: String,
     #[cfg(test)] draft_rebuilds: usize,
 }
 
@@ -390,6 +456,7 @@ impl LibraryMenu {
             identities: Vec::new(),
             stamp: Vec::new(),
             desired_unwatched: None,
+            field: String::new(),
             #[cfg(test)] draft_rebuilds: 0,
         }
     }
@@ -456,7 +523,14 @@ impl LibraryMenu {
                 return sort_draft(listing.sorts(), listing.sort_index(), listing.sort_desc());
             }
             LibraryMenuKind::Filter => {
-                return filter_draft(self.desired_unwatched.unwrap_or(listing.unwatched()), listing.genre(), listing.library_type() == LibraryType::Primary);
+                return filter_draft(self.desired_unwatched.unwrap_or(listing.unwatched()), listing.genre(),
+                    listing.library_type() == LibraryType::Primary, listing.filter_defs(), listing.more_filters());
+            }
+            LibraryMenuKind::Genre if !self.field.is_empty() => {
+                let field = self.field.as_str();
+                return values_draft(listing.filter_defs().iter().find(|d| d.field == field), field,
+                    listing.filter_values(field).unwrap_or(&[]),
+                    listing.more_filters().iter().find(|f| f.field == field));
             }
             LibraryMenuKind::Genre => {
                 return genre_draft(listing.genres(), listing.genre());
@@ -506,9 +580,20 @@ impl LibraryMenu {
         match action {
             Action::Genre => {
                 self.kind = LibraryMenuKind::Genre;
+                self.field.clear();
                 self.stamp.clear();
                 self.refresh(cx);
             }
+            Action::Field(field) => {
+                self.kind = LibraryMenuKind::Genre;
+                self.field = field;
+                self.stamp.clear();
+                self.refresh(cx);
+            }
+            Action::Toggle(edit) => fx.push(Fx::Deliver(
+                MachineId::Instance(self.arg.host),
+                Delivery::Screen(ScreenEvent::App(AppMsg::LibraryEdit { target: self.arg.target, edit })),
+            )),
             Action::Edit(edit) => {
                 if let QueryEdit::Unwatched(desired) = &edit {
                     self.desired_unwatched = Some(*desired);
@@ -565,12 +650,14 @@ impl<H: LibraryLike> Machine<H> for LibraryMenu {
             ScreenEvent::Tick(tick) => {
                 self.refresh(cx);
                 if self.kind == LibraryMenuKind::Genre {
+                    let work = if self.field.is_empty() {
+                        LibraryWork::Genres
+                    } else {
+                        LibraryWork::FilterValues(self.field.clone())
+                    };
                     fx.push(Fx::App(AppFx::Store(
                         StoreId::Browse,
-                        StoreCmd::Browse(BrowseCmd::Addressed {
-                            target: self.arg.target,
-                            work: LibraryWork::Genres,
-                        }),
+                        StoreCmd::Browse(BrowseCmd::Addressed { target: self.arg.target, work }),
                     )));
                 }
                 self.form.table.sel = cx
@@ -601,6 +688,7 @@ impl<H: LibraryLike> Machine<H> for LibraryMenu {
                 {
                     if self.kind == LibraryMenuKind::Genre {
                         self.kind = LibraryMenuKind::Filter;
+                        self.field.clear();
                         self.stamp.clear();
                         self.refresh(cx);
                     } else {
@@ -729,6 +817,7 @@ impl LogicalState for LibraryMenu {
     fn write(&self, c: &mut Canon) {
         self.arg.write(c);
         c.u32(self.kind as u32);
+        c.str(&self.field);
         c.option(self.desired_unwatched.as_ref(), |c, desired| { c.bool(*desired); });
         c.seq(self.identities.len());
         for identity in &self.identities {
@@ -983,14 +1072,14 @@ mod tests {
             id: "7".into(),
             title: "Drama".into(),
         };
-        let all = lay(filter_draft(false, None, true));
+        let all = lay(filter_draft(false, None, true, &[], &[]));
         assert_eq!(all.sections[0].rows[1].value.as_deref(), Some("All"));
         assert!(matches!(
             all.rows[0].1,
             Action::Edit(QueryEdit::Unwatched(true))
         ));
 
-        let filtered = lay(filter_draft(true, Some(&drama), true));
+        let filtered = lay(filter_draft(true, Some(&drama), true, &[], &[]));
         assert_eq!(filtered.sections[0].rows[1].value.as_deref(), Some("Drama"));
         assert!(filtered.sections[0].rows[0].toggle == Some(true));
         assert!(matches!(
@@ -998,6 +1087,42 @@ mod tests {
             Action::Edit(QueryEdit::Unwatched(false))
         ));
         assert_ne!(all.stamp, filtered.stamp);
+    }
+
+    #[test]
+    fn the_filter_menu_offers_each_further_filter_with_its_value() {
+        let defs = [
+            FilterDef { field: "year".into(), title: "Year".into(), kind: FilterKind::Values },
+            FilterDef { field: "hdr".into(), title: "HDR".into(), kind: FilterKind::Switch },
+        ];
+        let off = lay(filter_draft(false, None, true, &defs, &[]));
+        let ids: Vec<_> = off.rows.iter().map(|(id, ..)| id.as_str()).collect();
+        assert_eq!(ids, ["unwatched", "genre", "filter:year", "filter:hdr"]);
+        assert_eq!(off.sections[0].rows[2].value.as_deref(), Some("All"));
+        assert!(matches!(&off.rows[2].1, Action::Field(f) if f == "year"), "a field with values opens its picker");
+        assert!(matches!(&off.rows[3].1, Action::Toggle(QueryEdit::Filter { field, value: Some(_) }) if field == "hdr"),
+            "a switch toggles in place");
+        let on = lay(filter_draft(false, None, true, &defs, &[
+            ActiveFilter { field: "year".into(), value: "1999".into(), title: "1999".into() },
+            ActiveFilter { field: "hdr".into(), value: "1".into(), title: "HDR".into() },
+        ]));
+        assert_eq!(on.sections[0].rows[2].value.as_deref(), Some("1999"));
+        assert!(on.sections[0].rows[3].toggle == Some(true));
+        assert!(matches!(&on.rows[3].1, Action::Toggle(QueryEdit::Filter { value: None, .. })));
+        assert_ne!(off.stamp, on.stamp);
+    }
+
+    #[test]
+    fn the_value_picker_checks_the_value_in_force_and_offers_all() {
+        let def = FilterDef { field: "decade".into(), title: "Decade".into(), kind: FilterKind::Values };
+        let values = [GenreEntry { id: "1990".into(), title: "1990s".into() }, GenreEntry { id: "2000".into(), title: "2000s".into() }];
+        let current = ActiveFilter { field: "decade".into(), value: "2000".into(), title: "2000s".into() };
+        let laid = lay(values_draft(Some(&def), "decade", &values, Some(&current)));
+        let ids: Vec<_> = laid.rows.iter().map(|(id, ..)| id.as_str()).collect();
+        assert_eq!(ids, ["value:all", "value:1990", "value:2000"]);
+        assert_eq!(laid.selected, 2, "the picker opens on the value in force");
+        assert!(matches!(&laid.rows[0].1, Action::Edit(QueryEdit::Filter { value: None, .. })));
+        assert!(matches!(&laid.rows[1].1, Action::Edit(QueryEdit::Filter { value: Some((v, t)), .. }) if v == "1990" && t == "1990s"));
     }
 
     fn source_sections() -> (Vec<SrcGroup>, Vec<plx_data::browse::view::SectionView>) {
@@ -1249,9 +1374,9 @@ mod tests {
             let drafts = [
                 ("sort asc", lay(sort_draft(&sorts, 1, false))),
                 ("sort desc", lay(sort_draft(&sorts, 0, true))),
-                ("filter all", lay(filter_draft(false, None, true))),
-                ("filter genre", lay(filter_draft(true, Some(&genres[0]), true))),
-                ("filter no genres", lay(filter_draft(false, None, false))),
+                ("filter all", lay(filter_draft(false, None, true, &[], &[]))),
+                ("filter genre", lay(filter_draft(true, Some(&genres[0]), true, &[], &[]))),
+                ("filter no genres", lay(filter_draft(false, None, false, &[], &[]))),
                 ("genre all", lay(genre_draft(&genres, None))),
                 ("genre one", lay(genre_draft(&genres, Some(&genres[0])))),
             ];

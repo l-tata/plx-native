@@ -30,6 +30,7 @@ pub mod card_motion;
 pub mod card_motion_metrics;
 pub mod value_chip; // shared label/value/owner capsule used by menu-opening controls
 pub mod containers; // RESTRUCTURE (spec §6.2): Navigation = TabContainer → NavStack → ModalStack, the transitions, the host fold
+pub mod channel_tile; // a Live TV channel's tile: its logo contained on a plate with a number badge, or name-tinted initials
 pub mod collection_tile; // the neutral tile a thumb-less collection draws on every surface
 pub mod consts;
 pub mod decision_alert;

@@ -73,6 +73,8 @@
   "browse.menu.go_season": "Ir a la temporada",
   "browse.menu.go_movie": "Ir a la película",
   "browse.menu.remove_deck": "Quitar de Continuar viendo",
+  "browse.menu.shuffle": "Aleatorio",
+  "browse.detail.version": "Versión",
   "browse.login.deleted": "Datos locales eliminados",
   "browse.login.deleted_detail": "Se han eliminado las credenciales, las preferencias, la telemetría y los diagnósticos locales.",
   "browse.login.partial": "Sesión cerrada y la mayoría de los datos locales eliminados",
@@ -474,5 +476,11 @@
   "browse.clock.notice_year": "La hora del televisor parece incorrecta ({year}). Conectado con la clave guardada.",
   "browse.clock.notice": "La hora del televisor parece incorrecta. Conectado con la clave guardada.",
   "browse.clock.no_key": "La hora del televisor parece incorrecta. Conecta el televisor a internet una vez e inténtalo de nuevo.",
-  "browse.clock.key_changed": "La clave de tu servidor ha cambiado. Conecta el televisor a internet una vez para que la app pueda comprobarla de nuevo."
+  "browse.clock.key_changed": "La clave de tu servidor ha cambiado. Conecta el televisor a internet una vez para que la app pueda comprobarla de nuevo.",
+  "browse.home.watchlist": "Mi lista",
+  "browse.home.on_now": "En directo",
+  "browse.home.your_genres": "Novedades de tus géneros",
+  "browse.menu.watchlist_add": "Añadir a Mi lista",
+  "browse.menu.watchlist_remove": "Quitar de Mi lista",
+  "browse.home.playlists": "Listas de reproducción"
 }

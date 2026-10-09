@@ -955,8 +955,7 @@ fn a_collection_hit_routes_by_rating_key_or_by_section_and_tag_id() {
             rk: "50007".into(),
             sec: 1,
             tag: 7,
-            name: "Aardman Shorts".into(),
-        }))
+            name: "Aardman Shorts".into(), playlist: false }))
     );
 
     // a tag-shaped row, from a server that ignored the flag: no ratingKey, so the section and the

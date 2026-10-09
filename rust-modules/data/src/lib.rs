@@ -21,4 +21,6 @@ pub mod pms; // the Home catalog: hubs merged across every source
 pub mod subsearch; // the player's subtitle search & download: agent search, install, install poll
 pub mod search; // Search data layer: /hubs/search fanned out across every source, merged into typed shelves
 pub mod stores; // stores as machines (restructure phase 4): one command vocabulary + one step per data store
+pub mod taste; // recently added in the genres the profile watches most: one source's Home shelf
+pub mod watchlist; // the account's Plex watchlist: Home's shelf of library copies, and its membership
 pub mod viewstate; // watched / unwatched / remove-from-deck: the PMS view-state WRITES, off the SDL thread

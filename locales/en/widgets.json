@@ -27,6 +27,33 @@
     "value": "Send diagnostics",
     "description": "Option or section label in the player overflow menu."
   },
+  "widgets.menu.queue": {
+    "value": "Play queue",
+    "description": "Player overflow menu: the row that opens the list of items queued around the one playing, and that page's title. Selecting a row there plays it."
+  },
+  "widgets.menu.queue_position": {
+    "value": "{position} of {total}",
+    "description": "Player overflow menu: read-out beside the Play queue row, where the playing item sits in its queue (e.g. 3 of 12).",
+    "args": {
+      "position": "i64",
+      "total": "i64"
+    }
+  },
+  "widgets.queue.watched": {
+    "value": "Watched",
+    "description": "Player Play queue page: trailing read-out of a queued item that has been watched."
+  },
+  "widgets.queue.left": {
+    "value": "{minutes} min left",
+    "description": "Player Play queue page: trailing read-out of a queued item that was started, with the minutes remaining (abbreviated).",
+    "args": {
+      "minutes": "i64"
+    }
+  },
+  "widgets.menu.version": {
+    "value": "Version",
+    "description": "Player overflow menu: the row (and page title) for choosing which copy of the item plays when it has several, e.g. 4K and 1080p."
+  },
   "widgets.badge.forced": {
     "value": "FORCED",
     "description": "Compact media-track badge. This describes a subtitle or audio track."
@@ -166,6 +193,14 @@
   "widgets.skip.credits": {
     "value": "Skip Credits",
     "description": "Player action that skips the currently offered introduction or credits marker."
+  },
+  "widgets.skip.intro_skipped": {
+    "value": "Skipped intro · Back",
+    "description": "Player pill shown for five seconds after the player skipped an intro on its own (Settings > Playback > Skip intro & credits). Pressing it, or Left, goes back to the start of the intro. The middle dot separates the notice from the action."
+  },
+  "widgets.skip.credits_skipped": {
+    "value": "Skipped credits · Back",
+    "description": "Player pill shown for five seconds after the player skipped the credits on its own (Settings > Playback > Skip intro & credits). Pressing it, or Left, goes back to the start of the credits. The middle dot separates the notice from the action."
   },
   "widgets.next.episode": {
     "value": "Next Episode",

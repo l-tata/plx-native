@@ -779,6 +779,31 @@ pub fn slot(ps: &plx_media::route::PlaybackSession, meta: plx_data::metadata::Me
     slot_for(m, has_next, mode)
 }
 
+/// PURE: the offer the loop should perform WITHOUT a press, given this frame's occupant and the
+/// Skip intro & credits setting — `Some` only for a [`ControlSlot::Skip`] whose kind the setting
+/// names ([`crate::skip_pill::auto_skips`]). An Up Next tile is never auto-skipped: it is the
+/// better offer, and taking it silently would start the next episode behind the viewer's back.
+///
+/// The loop asks this only on the FRESH edge of an offer (`app::run`'s `last_offer` latch), so a
+/// segment is auto-skipped at most once per playback; `metadata::mark_skipped` then retires it, so
+/// a viewer who seeks back into it watches it rather than being thrown out again.
+pub fn auto_skip_for(slot: ControlSlot, mode: plx_plex::plex::session::AutoSkip) -> Option<crate::skip_pill::Prompt> {
+    match slot {
+        ControlSlot::Skip(pr) if crate::skip_pill::auto_skips(pr, mode) => Some(pr),
+        _ => None,
+    }
+}
+
+/// PURE: the row's occupant once a still-open automatic-skip undo is taken into account. The
+/// "Skipped intro · Back" pill ([`crate::skip_pill::undo_prompt`]) stands in for the DISCS only —
+/// a real segment beginning inside the window keeps its own offer.
+pub fn with_undo(base: ControlSlot, undo: Option<crate::skip_pill::AutoSkipUndo>, now: u32) -> ControlSlot {
+    match (base, undo) {
+        (ControlSlot::Discs, Some(u)) if u.live(now) => ControlSlot::Skip(crate::skip_pill::undo_prompt(u.marker)),
+        _ => base,
+    }
+}
+
 /// PURE edge: has a stand-in just vanished OUT FROM UNDER the focus ring, so the ring has to go
 /// back to the scrubber? `focused` is whether the control row currently holds focus. `was_standin`
 /// is the occupant on the last OVERLAY-FREE frame, not simply the last frame — the caller only
@@ -2218,6 +2243,70 @@ mod tests {
             slot_for(Some(marker(MarkerKind::Credits, true)), true, NextEpisodeMode::Countdown),
             ControlSlot::UpNext(_)
         ));
+    }
+
+    /// **Skip intro & credits: which offers the player takes by itself.** Off takes none (today's
+    /// pill); Intro takes only intros; Intro & credits takes credits too — a mid-item segment as a
+    /// seek, and a final one on the LAST item as a finish. A final credits segment WITH a
+    /// successor is never taken: under Countdown it is the Up Next tile (the better offer), and
+    /// under After credits / Off it is no offer at all, so nothing starts the next episode silently.
+    #[test]
+    fn auto_skip_takes_only_the_offers_its_setting_names() {
+        use plx_plex::plex::session::AutoSkip;
+        let intro = slot_for(Some(marker(MarkerKind::Intro, false)), true, NextEpisodeMode::Countdown);
+        let mid_credits = slot_for(Some(marker(MarkerKind::Credits, false)), true, NextEpisodeMode::Countdown);
+        let last_credits = slot_for(Some(marker(MarkerKind::Credits, true)), false, NextEpisodeMode::Countdown);
+
+        for slot in [intro, mid_credits, last_credits] {
+            assert!(auto_skip_for(slot, AutoSkip::Off).is_none(), "Off keeps the pill");
+        }
+        assert!(matches!(auto_skip_for(intro, AutoSkip::Intro), Some(p) if p.action == SkipAction::Seek(2_000 * 1_000_000)));
+        assert!(auto_skip_for(mid_credits, AutoSkip::Intro).is_none(), "Intro leaves credits alone");
+        assert!(auto_skip_for(last_credits, AutoSkip::Intro).is_none());
+
+        assert!(auto_skip_for(intro, AutoSkip::IntroAndCredits).is_some());
+        assert!(matches!(auto_skip_for(mid_credits, AutoSkip::IntroAndCredits),
+            Some(p) if p.action == SkipAction::Seek(2_000 * 1_000_000)));
+        assert!(matches!(auto_skip_for(last_credits, AutoSkip::IntroAndCredits),
+            Some(p) if p.action == SkipAction::Finish), "the last item's final credits finish it");
+
+        // final credits with a successor: never auto-skipped, in any Next-episode mode
+        for mode in [NextEpisodeMode::Countdown, NextEpisodeMode::AfterCredits, NextEpisodeMode::Off] {
+            let with_next = slot_for(Some(marker(MarkerKind::Credits, true)), true, mode);
+            assert!(auto_skip_for(with_next, AutoSkip::IntroAndCredits).is_none(), "{mode:?}");
+        }
+        assert!(auto_skip_for(ControlSlot::Discs, AutoSkip::IntroAndCredits).is_none());
+    }
+
+    /// **The undo window.** For [`crate::skip_pill::UNDO_MS`] after an automatic skip the discs
+    /// give way to the "Skipped … · Back" pill, whose action rewinds to the segment's START and
+    /// whose offer identity is the original segment's (so it never re-raises the HUD or counts as
+    /// a fresh offer — and is never itself auto-skipped). A real offer beginning inside the window
+    /// keeps its own occupant; once the window closes the discs return.
+    #[test]
+    fn an_automatic_skip_offers_a_way_back_for_five_seconds() {
+        use crate::skip_pill::{AutoSkipUndo, UNDO_MS};
+        use plx_plex::plex::session::AutoSkip;
+        let m = marker(MarkerKind::Intro, false);
+        let undo = AutoSkipUndo::at(m, 10_000);
+        assert_eq!(undo.back_ns(), 1_000 * 1_000_000, "back is the segment's start");
+        let up = with_undo(ControlSlot::Discs, Some(undo), 10_000 + UNDO_MS - 1);
+        match up {
+            ControlSlot::Skip(p) => {
+                assert_eq!(p.action, SkipAction::Rewind(1_000 * 1_000_000));
+                assert_eq!(p.kind, MarkerKind::Intro);
+            }
+            _ => panic!("the undo pill stands in for the discs"),
+        }
+        assert_eq!(up.offer(), Some((MarkerKind::Intro, 1_000)), "same identity as the skipped offer");
+        assert!(auto_skip_for(up, AutoSkip::IntroAndCredits).is_none(), "the undo pill is never auto-taken");
+        assert!(with_undo(ControlSlot::Discs, Some(undo), 10_000 + UNDO_MS).is_discs(), "the window closes");
+        assert!(with_undo(ControlSlot::Discs, None, 10_000).is_discs());
+        let credits = slot_for(Some(marker(MarkerKind::Credits, false)), false, NextEpisodeMode::Countdown);
+        assert!(with_undo(credits, Some(undo), 10_001) == credits, "a real offer keeps the row");
+        // wrapping frame clock: a window opened just before the wrap is still live after it
+        let wrap = AutoSkipUndo::at(m, u32::MAX - 100);
+        assert!(wrap.live(50) && !wrap.live(UNDO_MS));
     }
 
     /// A `final` credits segment runs to the end of the item, so skipping it FINISHES rather than

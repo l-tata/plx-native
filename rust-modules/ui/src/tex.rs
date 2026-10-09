@@ -63,6 +63,14 @@ pub enum Warm {
     Full,
 }
 
+/// **The `srv` that names no server**: `path` is then an absolute `http(s)://` URL the source
+/// fetches VERBATIM — no transcoder, no credential — and scales down to the requested box itself.
+/// It exists for art that lives outside Plex: a Live TV server's channel logos and programme
+/// artwork (`screens::livetv`, `appkit::live_banner`). Everything else about the key is unchanged
+/// (the same slots, LRU, disk tier and residency), which is the point: there is ONE image
+/// pipeline. Never a registry slot (those stop at `MAX_SERVERS`, and `u16::MAX` is `UNSET`).
+pub const PLAIN_URL: u16 = u16::MAX - 1;
+
 /// The application's SOURCE half of image caching (spec §10), as the library sees it: an
 /// interning of `(server, path, w, h, png)` into an opaque [`PosterKey`], a fetch it starts on a
 /// miss, and a decoded image it hands back through [`accept`]. `srv` is the server's raw id —
@@ -267,6 +275,18 @@ fn resolve_key(key: PosterKey) -> (u32, f32, f32) {
     })
 }
 
+/// The corner colours of the picture [`resolve_wh_on`] would draw for the same arguments — `None`
+/// until it is resident. For a ground keyed from artwork that carries no `UltraBlurColors`
+/// envelope (the Live TV guide's programme art). Probes the source like the draw does, so ask it
+/// for the picture the same frame draws.
+pub fn corners_on(srv: u16, path: &str, w: i32, h: i32, png: bool) -> Option<[[f32; 3]; 4]> {
+    if path.is_empty() {
+        return None;
+    }
+    let key = with_source(|s| s.probe(srv, path, w, h, png), None)?;
+    CACHE.with(|c| c.borrow().corners(key))
+}
+
 /// Is `key`'s texture resident right now? A peek for diagnostics: no LRU touch, no draw stamp.
 pub fn resident(key: PosterKey) -> bool {
     CACHE.with(|c| c.borrow().resident.contains_key(&key))
@@ -410,6 +430,47 @@ struct Entry {
     /// which always runs (and so reaches at least `1`) before the first `resolve` that could
     /// possibly touch a freshly-inserted entry — see [`TexCache::prepare`]'s doc.
     drawn_frame: u64,
+    /// The picture's four corner colours ([`corners_of`]), taken from the decoded pixels at upload
+    /// — what keys an ambient ground for art that comes with no `UltraBlurColors` envelope.
+    corners: [[f32; 3]; 4],
+}
+
+/// **The four corner colours of a decoded picture**, in `Painter::ambient`'s ring order (top-left,
+/// top-right, bottom-right, bottom-left — `UltraBlurColors::corners`' order): the mean of each
+/// quadrant, sampled on a coarse grid (at most 8×8 points a quadrant, so a 4K image costs the same
+/// 256 reads as a logo). Transparent pixels do not count — a logo's colour is its ink, not the
+/// empty canvas around it — and a quadrant with no opaque sample takes the picture's overall mean.
+/// The PMS server computes `UltraBlurColors` for Plex art; this is the same idea, computed here for
+/// art that has none.
+pub fn corners_of(w: usize, h: usize, rgba: &[u8]) -> [[f32; 3]; 4] {
+    if w == 0 || h == 0 || rgba.len() < w * h * 4 {
+        return [[0.0; 3]; 4];
+    }
+    const N: usize = 8;
+    let (hw, hh) = (w.div_ceil(2), h.div_ceil(2));
+    // (x0, y0) of each quadrant, in ring order.
+    let origins = [(0, 0), (w - hw, 0), (w - hw, h - hh), (0, h - hh)];
+    let mut sums = [[0.0f64; 4]; 4];
+    for (q, &(x0, y0)) in origins.iter().enumerate() {
+        for j in 0..N {
+            for i in 0..N {
+                let x = x0 + (i * hw + hw / 2) / N;
+                let y = y0 + (j * hh + hh / 2) / N;
+                let o = (y.min(h - 1) * w + x.min(w - 1)) * 4;
+                let a = rgba[o + 3] as f64 / 255.0;
+                for c in 0..3 {
+                    sums[q][c] += rgba[o + c] as f64 / 255.0 * a;
+                }
+                sums[q][3] += a;
+            }
+        }
+    }
+    let total: [f64; 4] = std::array::from_fn(|c| sums.iter().map(|q| q[c]).sum());
+    std::array::from_fn(|q| {
+        let s = if sums[q][3] > 0.5 { sums[q] } else { total };
+        let a = s[3].max(f64::EPSILON);
+        [(s[0] / a) as f32, (s[1] / a) as f32, (s[2] / a) as f32]
+    })
 }
 
 pub struct TexCache<K> {
@@ -554,6 +615,7 @@ impl<K: Copy + Eq + Hash> TexCache<K> {
                 }
                 continue;
             }
+            let corners = corners_of(d.w as usize, d.h as usize, &d.rgba);
             let tex = up.upload(&d);
             up.warm(tex);
             self.clock += 1;
@@ -568,9 +630,10 @@ impl<K: Copy + Eq + Hash> TexCache<K> {
                     old.tex = tex;
                     old.bytes = bytes;
                     old.last_used = self.clock;
+                    old.corners = corners;
                 }
                 None => {
-                    self.resident.insert(key, Entry { tex, last_used: self.clock, bytes, drawn_frame: 0 });
+                    self.resident.insert(key, Entry { tex, last_used: self.clock, bytes, drawn_frame: 0, corners });
                 }
             }
             n += 1;
@@ -690,6 +753,12 @@ impl<K: Copy + Eq + Hash> TexCache<K> {
         })
     }
 
+    /// A resident picture's corner colours ([`corners_of`]). A peek: no LRU touch, no draw stamp
+    /// (the draw that resolves the same key stamps it).
+    pub fn corners(&self, k: K) -> Option<[[f32; 3]; 4]> {
+        self.resident.get(&k).map(|e| e.corners)
+    }
+
     pub fn resolve_wh(&mut self, k: K) -> Option<(u16, u16)> {
         self.resolve(k).map(|t| (t.w, t.h))
     }
@@ -753,6 +822,50 @@ mod tests {
                 rgba: vec![0; 16].into_boxed_slice(),
             }),
         }
+    }
+
+    /// A 4×4 picture whose quadrants are four flat colours, the top-right one transparent.
+    fn quadrants() -> Vec<u8> {
+        let mut px = vec![0u8; 4 * 4 * 4];
+        for y in 0..4 {
+            for x in 0..4 {
+                let c: [u8; 4] = match (x < 2, y < 2) {
+                    (true, true) => [255, 0, 0, 255],
+                    (false, true) => [0, 0, 255, 0],
+                    (false, false) => [0, 255, 0, 255],
+                    (true, false) => [255, 255, 255, 255],
+                };
+                px[(y * 4 + x) * 4..][..4].copy_from_slice(&c);
+            }
+        }
+        px
+    }
+
+    #[test]
+    fn corner_colours_are_quadrant_means_in_ring_order_and_ignore_transparency() {
+        let c = corners_of(4, 4, &quadrants());
+        assert_eq!(c[0], [1.0, 0.0, 0.0], "top-left");
+        assert_eq!(c[2], [0.0, 1.0, 0.0], "bottom-right");
+        assert_eq!(c[3], [1.0, 1.0, 1.0], "bottom-left");
+        // The transparent quadrant takes the picture's mean: (red + green + white) / 3.
+        for (got, want) in c[1].iter().zip([2.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0]) {
+            assert!((got - want).abs() < 1e-5, "{:?}", c[1]);
+        }
+        assert_eq!(corners_of(0, 0, &[]), [[0.0; 3]; 4]);
+        assert_eq!(corners_of(4, 4, &[0; 3]), [[0.0; 3]; 4], "a short buffer reads nothing");
+    }
+
+    #[test]
+    fn an_upload_keeps_its_corner_colours_for_the_ground() {
+        let mut cache: TexCache<u32> = TexCache::new(4);
+        let mut up = StubUp { next: 0, freed: vec![], warmed: vec![] };
+        cache.accept(PosterReady { key: 7, result: Ok(Decoded { w: 4, h: 4, rgba: quadrants().into_boxed_slice() }) });
+        let mut present = Present::new();
+        let mut b = Budget::new();
+        b.begin_frame(0);
+        assert_eq!(cache.prepare(&mut b, &mut up, &mut PresentHandle(&mut present), || 0), 1);
+        assert_eq!(cache.corners(7).map(|c| c[0]), Some([1.0, 0.0, 0.0]));
+        assert_eq!(cache.corners(8), None);
     }
 
     #[test]

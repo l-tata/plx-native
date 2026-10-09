@@ -128,6 +128,22 @@ pub(crate) fn apply_more_action(ps: &mut plx_media::route::PlaybackSession, pa: 
         // Lab builds only. Nothing about playback changes: the snapshot is taken and the toast
         // reports, over whatever the player is doing.
         plx_appkit::more_menu::Action::SendDiagnostics => crate::lab::request_upload("menu", ps),
+        // performed by the loop's own arm (`player_requests`), which holds the pages a jump needs
+        plx_appkit::more_menu::Action::PlayQueueItem(_) => {}
+        // The Version page: remember the pick for this item and resolve it again where it is —
+        // the retry ritual, so the new version's part and streams replace the old ones.
+        plx_appkit::more_menu::Action::SetVersion(index) => {
+            if plx_media::route::with_versions(ps, |_, current| current) == index {
+                return;
+            }
+            let resume_ns = intended_pos(ps).max(0);
+            plx_media::player::stop_bufferfeed(ps, pa);
+            if plx_media::route::switch_version(ps, bridge.metadata_mut(), index, resume_ns) {
+                plx_machine::idle::invalidate();
+            } else {
+                log("version: the item could not be resolved again");
+            }
+        }
         plx_appkit::more_menu::Action::None => {}
     }
 }
@@ -599,6 +615,10 @@ pub(crate) fn player_requests(
             // …and its twin, which does NOT resume: the scrub bar is how a paused film is moved.
             // `repause_at` is an `App` field, which is exactly why this is a request.
             PlayerReq::CommitSeek(ns) => commit_seek(ns, repause_at),
+            // A Play queue row: the same stop-and-start ritual Up Next performs, inside the queue.
+            PlayerReq::More(plx_appkit::more_menu::Action::PlayQueueItem(item_id)) => {
+                let _ = play_queue_row(ps, pa, item_id, HUD_LINGER_MS, pages, bridge);
+            }
             PlayerReq::More(action) => apply_more_action(ps, pa, bridge, action),
             PlayerReq::CommitTrack(commit) => commit_track(ps, commit),
             PlayerReq::ArmInfoPress => {
@@ -709,7 +729,7 @@ pub(crate) fn exit_player(
     // through `nav_pop_to`'s Home floor; a live Content entry with no identity takes the explicit
     // Home floor in `return_from_player`, preserving `return_page`'s old anti-strand contract.
     return_from_player(pages);
-    *refresh_hubs_at = clock::now().wrapping_add(800).max(1);
+    *refresh_hubs_at = clock::now().wrapping_add(super::deck_refresh::PLAYBACK_SETTLE_MS).max(1);
 }
 
 /// The episode is OVER — drained to EOS, or the user skipped a `final` credits marker.
@@ -773,6 +793,18 @@ pub(crate) fn activate_ctrl_row(
                 false
             }
         }
+        // The "Skipped … · Back" pill an automatic skip leaves behind: rewind to the segment's
+        // start and keep playing. Not a skip, so no skip telemetry; the segment stays retired.
+        ControlSlot::Skip(plx_appkit::skip_pill::Prompt { action: SkipAction::Rewind(ns), marker, .. }) => {
+            log(&format!("autoskip: back to {:?} at {}s", marker.kind, marker.start_ms / 1000));
+            if let Some(player) = super::bridge::player_mut(pages) {
+                player.hud.undo = None;
+                player.publish();
+            }
+            request_seek(ns);
+            resume_if_paused(pa);
+            false
+        }
         ControlSlot::Skip(pr) => {
             plx_telemetry::diag::event(plx_telemetry::diag::schema::DiagEvent::FeatureUsed {
                 feature: match pr.kind {
@@ -797,6 +829,8 @@ pub(crate) fn activate_ctrl_row(
                     let _ = finish_playback(ps, pa, refresh_hubs_at, pages, bridge);
                     true
                 }
+                // matched by the arm above; a Rewind is never a skip
+                SkipAction::Rewind(_) => false,
             }
         }
         ControlSlot::Discs => false,
@@ -860,6 +894,96 @@ pub(crate) fn play_up_next(
         bridge,
     );
     true
+}
+
+/// **Jump to a row of the play queue** (the More menu's Play queue page). The row is cloned out of
+/// the session's queue BEFORE anything replaces it, then the ritual is [`play_up_next`]'s: retire
+/// the panels, stop the outgoing item (its `state=stopped` timeline commits its resume point), ask
+/// for the row INSIDE the same queue (`route::request_play_queue_row`), retire the old Info-card
+/// descriptor and start. The playing row, a row the queue no longer holds, and a refused request
+/// all do nothing (`false`).
+pub(crate) fn play_queue_row(
+    ps: &mut plx_media::route::PlaybackSession,
+    pa: &mut plx_media::player::adapter::PlayerAdapter,
+    item_id: i64,
+    hud_ms: u32,
+    pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
+    bridge: &mut super::bridge::Bridge,
+) -> bool {
+    if item_id <= 0 || plx_media::route::pq_item_id(ps) == item_id.to_string() {
+        return false;
+    }
+    let Some(u) = plx_media::route::with_queue(ps, |rows| {
+        rows.iter().find(|r| r.item_id == item_id).and_then(plx_media::route::queue_row_descriptor)
+    }) else {
+        return false;
+    };
+    log(&format!("queue: jump to item={} rk={}", u.item_id, u.rk));
+    let (rk, resume) = (u.rk.clone(), plx_data::metadata::resume_ns(u.resume_ms, u.dur_ms));
+    let sid = bridge.metadata_view().playing().map(|p| p.sid).unwrap_or_else(plx_plex::plex::current_server);
+    close_player_overlays(pages);
+    plx_media::player::stop_bufferfeed(ps, pa);
+    let ctx = if u.season > 0 || u.index > 0 {
+        plx_ui::fmt::episode_kicker(u.season, u.index, &u.ep_title)
+    } else {
+        String::new()
+    };
+    if !plx_media::route::request_play_queue_row(ps, bridge.metadata_mut(), u, &ctx) {
+        return false;
+    }
+    bridge.metadata_mut().run(plx_data::stores::metadata::MetadataCmd::RetirePlaying);
+    bridge.metadata_mut().run(plx_data::stores::metadata::MetadataCmd::RequestDetail { sid, rk });
+    start_playback(ps, pa, resume, Origin::Unchanged, hud_ms, None, pages, bridge);
+    true
+}
+
+/// **Shuffle a show or a season**: ask the server for a shuffled PlayQueue over it (on a worker —
+/// `route::request_shuffle`). The landing is started by [`drain_shuffle`] on a later frame.
+pub(crate) fn request_shuffle(ps: &plx_media::route::PlaybackSession, sid: plx_plex::plex::ServerId, rk: &str) {
+    if !plx_media::route::request_shuffle(ps, plx_media::route::item_sid(sid), rk) {
+        log("shuffle: no worker");
+    }
+}
+
+thread_local! {
+    /// A shuffle that landed while the engine was still held (a hero preview winding down): kept
+    /// until [`super::content::clear_engine_for_play`] clears, then started.
+    static HELD_SHUFFLE: std::cell::RefCell<Option<plx_media::route::ShuffleLanding>> = const { std::cell::RefCell::new(None) };
+}
+
+/// MAIN THREAD, once a frame: start the newest shuffle's first episode once its queue has landed —
+/// the detail page's Play ritual, with the shuffled queue as the playback's own
+/// (`route::request_play_seeded`), so Up Next and every episode after it keep coming from the
+/// shuffle. From the beginning, like any shuffle.
+pub(crate) fn drain_shuffle(
+    ps: &mut plx_media::route::PlaybackSession,
+    pa: &mut plx_media::player::adapter::PlayerAdapter,
+    pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
+    bridge: &mut super::bridge::Bridge,
+) {
+    match plx_media::route::take_shuffle_landing() {
+        Some(Some(landing)) => HELD_SHUFFLE.with(|h| *h.borrow_mut() = Some(landing)),
+        Some(None) => log("shuffle: nothing to play"),
+        None => {}
+    }
+    if HELD_SHUFFLE.with(|h| h.borrow().is_none()) {
+        return;
+    }
+    if !super::content::clear_engine_for_play(ps, pa, super::bridge::player(pages).is_some()) {
+        return;
+    }
+    let Some(landing) = HELD_SHUFFLE.with(|h| h.borrow_mut().take()) else { return };
+    let u = landing.first;
+    let title = if u.show_title.is_empty() { u.ep_title.clone() } else { u.show_title.clone() };
+    let ctx = plx_ui::fmt::episode_kicker(u.season, u.index, &u.ep_title);
+    log(&format!("shuffle: start S{}E{} rk={} queue={}", u.season, u.index, u.rk, landing.seed.id));
+    let rk = u.rk.clone();
+    if !plx_media::route::request_play_seeded(ps, bridge.metadata_mut(), landing.sid, &u, &title, &ctx, landing.seed) {
+        return;
+    }
+    bridge.metadata_mut().run(plx_data::stores::metadata::MetadataCmd::SetNowPlaying(None));
+    bridge.metadata_mut().run(plx_data::stores::metadata::MetadataCmd::RequestDetail { sid: landing.sid, rk });
+    start_playback(ps, pa, 0, Origin::Here, HUD_LINGER_MS, None, pages, bridge);
 }
 
 /// Direct-play a LEAF catalog item (movie or episode) — the hero-pill / Continue-Watching

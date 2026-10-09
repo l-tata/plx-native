@@ -23,5 +23,15 @@
   "settings.livetv.section": "Прамы эфір",
   "settings.livetv.title": "Прамы эфір",
   "settings.livetv.detail": "Каналы з вашага сервера Tunarr.",
-  "settings.livetv.off": "Выключана"
+  "settings.livetv.off": "Выключана",
+  "livetv.starts_in": "Пачнецца праз {time}",
+  "livetv.filter.all": "Усё",
+  "livetv.filter.movies": "Фільмы",
+  "livetv.filter.sports": "Спорт",
+  "livetv.filter.kids": "Дзецям",
+  "livetv.filter.news": "Навіны",
+  "livetv.filter.documentary": "Дакументальныя",
+  "livetv.filter.comedy": "Камедыя",
+  "livetv.filter.empty": "У катэгорыі «{filter}» нічога няма на гэтыя дзве гадзіны.",
+  "livetv.plex_hint": "Утрымлівайце {key}, каб глядзець з пачатку ў Plex"
 }

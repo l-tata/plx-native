@@ -19,6 +19,34 @@ use super::models::MediaContainer;
 use super::params::{Ceiling, TranscodeDelivery, TranscodeSpec};
 use super::probe::Location;
 
+/// **Which `Media[]` version of an item this session plays** — the version picker's choice, kept
+/// per `(server, ratingKey)` for the life of the process ("remembered for that item for the
+/// session"). It lives HERE, beside the two queries that name `mediaIndex`, because every
+/// transcode of an item — the first `/decision`, a seek's rebuild, a quality or track claim, an
+/// HLS prime — flows through [`Client::transcode_decision`]/`mde_decision` with nothing but the
+/// rating key: one owner answers all of them, so no reload can quietly fall back to version 0.
+/// Absent = version 0, which is every build before the picker.
+static MEDIA_PICKS: std::sync::Mutex<Vec<(super::ServerId, String, u32)>> = std::sync::Mutex::new(Vec::new());
+
+/// Pick version `media_index` of `rk` on `sid` for the rest of the session (0 forgets the pick).
+pub fn set_media_index(sid: super::ServerId, rk: &str, media_index: u32) {
+    let mut picks = MEDIA_PICKS.lock().unwrap_or_else(|e| e.into_inner());
+    picks.retain(|(s, r, _)| !(*s == sid && r == rk));
+    if media_index > 0 {
+        picks.push((sid, rk.to_owned(), media_index));
+    }
+}
+
+/// The version of `rk` on `sid` this session plays (0 = the first, the default).
+pub fn media_index_for(sid: super::ServerId, rk: &str) -> u32 {
+    MEDIA_PICKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(s, r, _)| *s == sid && r == rk)
+        .map_or(0, |(_, _, i)| *i)
+}
+
 // `DP_AUDIO_CODECS` — the AUDIO codec set the buffer-feed pipeline decodes — is defined in
 // `devcaps` (the platform layer intersects it with the device's own codec table) and re-exported
 // here, so the profile string below and `plex::DP_AUDIO_CODECS` keep naming it. The live set is
@@ -291,7 +319,7 @@ impl Client {
         let protocol = if hls { "hls" } else { "http" };
         let mut q = QueryBuilder::new("")
             .str("path", &format!("/library/metadata/{}", s.rating_key))
-            .int("mediaIndex", 0)
+            .int("mediaIndex", i64::from(media_index_for(self.id(), s.rating_key)))
             .int("partIndex", 0)
             .str("protocol", protocol)
             .int("directPlay", 0)
@@ -430,7 +458,7 @@ impl Client {
     ) -> Option<MediaContainer> {
         let q = QueryBuilder::new("/video/:/transcode/universal/decision")
             .str("path", &format!("/library/metadata/{rating_key}"))
-            .int("mediaIndex", 0)
+            .int("mediaIndex", i64::from(media_index_for(self.id(), rating_key)))
             .int("partIndex", 0)
             .str("protocol", "http")
             .int("hasMDE", 1)
@@ -827,6 +855,27 @@ mod tests {
         assert!(q.contains("directPlay=0"), "{q}");
         assert!(q.contains("videoResolution=3840x2160"), "{q}");
         assert!(!q.contains("directStream=0"), "{q}");
+    }
+
+    /// **The version picker's choice is the `mediaIndex` every transcode of that item asks for**,
+    /// kept per (server, ratingKey): another item, or the same key on another server, stays on
+    /// version 0, and forgetting the pick (0) returns the default byte for byte.
+    #[test]
+    fn a_picked_version_is_the_media_index_of_every_transcode_of_that_item() {
+        use super::super::transcoder::{media_index_for, set_media_index};
+        // a key no other test uses: the pick is process-wide and the suite runs in parallel
+        let rk = "versioned-7741";
+        let with_rk = |remux| TranscodeSpec { rating_key: rk, ..spec(remux, false) };
+        assert!(a_client().transcode_query(&with_rk(false)).contains("mediaIndex=0"));
+        set_media_index(ServerId::from_raw(1), rk, 2);
+        assert_eq!(media_index_for(ServerId::from_raw(1), rk), 2);
+        assert_eq!(media_index_for(ServerId::from_raw(2), rk), 0, "the same key on another server");
+        let q = a_client().transcode_query(&with_rk(true));
+        assert!(q.contains("mediaIndex=2") && !q.contains("mediaIndex=0"), "{q}");
+        assert!(a_client().transcode_query(&spec(false, false)).contains("mediaIndex=0"), "another item");
+        set_media_index(ServerId::from_raw(1), rk, 0);
+        assert!(a_client().transcode_query(&with_rk(false)).contains("mediaIndex=0"));
+        assert_eq!(media_index_for(ServerId::from_raw(1), rk), 0);
     }
 
     /// A remux whose subtitle the app draws names none: `subtitleStreamID=0&subtitles=none` (the

@@ -41,6 +41,10 @@ pub const ELEM_MARK_WATCHED: u32 = 3;
 pub const ELEM_MARK_UNWATCHED: u32 = 4;
 pub const ELEM_TRAILER: u32 = 5;
 pub const ELEM_GO_TO_SHOW: u32 = 6;
+pub const ELEM_SHUFFLE: u32 = 7;
+pub const ELEM_VERSION: u32 = 8;
+pub const ELEM_WATCHLIST_ADD: u32 = 9;
+pub const ELEM_WATCHLIST_REMOVE: u32 = 10;
 
 /// The hero's one focus group. Local to this screen — nothing outside `screens::detail` ever names
 /// it — so, like `screens::profiles`'s `ROSTER_GROUP`/`FOOTER_GROUP`, any small integer would do;
@@ -49,9 +53,9 @@ pub const ELEM_GO_TO_SHOW: u32 = 6;
 pub const HERO_GROUP: GroupId = GroupId(0);
 
 /// The most controls the row ever holds (see [`hero_ctls`]).
-pub const HERO_MAX: usize = 6;
+pub const HERO_MAX: usize = 9;
 /// How many disc slots [`disc_verb`] names.
-pub const DISCS: usize = 4;
+pub const DISCS: usize = 6;
 
 /// The Play/Resume pill's minimum width — a pathologically short label still gets a pill.
 const PW: f32 = 168.0;
@@ -82,6 +86,7 @@ const HERO_ICON_RATIO: f32 = 1.15;
 const HERO_ICON_GAP: f32 = 12.0;
 
 pub fn alt_label() -> &'static CStr { plx_platform::i18n::msg::browse_detail_also_available_c() }
+pub fn version_label() -> &'static CStr { plx_platform::i18n::msg::browse_detail_version_c() }
 
 fn mark_watched_label() -> &'static CStr { plx_platform::i18n::msg::browse_detail_mark_watched_c() }
 fn mark_unwatched_label() -> &'static CStr { plx_platform::i18n::msg::browse_detail_mark_unwatched_c() }
@@ -90,6 +95,9 @@ fn mark_show_unwatched_label() -> &'static CStr { plx_platform::i18n::msg::brows
 fn play_from_start_label() -> &'static CStr { plx_platform::i18n::msg::browse_detail_play_start_c() }
 fn trailer_label() -> &'static CStr { plx_platform::i18n::msg::browse_detail_trailer_c() }
 fn go_to_show_label() -> &'static CStr { plx_platform::i18n::msg::browse_menu_go_show_c() }
+fn shuffle_label() -> &'static CStr { plx_platform::i18n::msg::browse_menu_shuffle_c() }
+fn watchlist_add_label() -> &'static CStr { plx_platform::i18n::msg::browse_menu_watchlist_add_c() }
+fn watchlist_remove_label() -> &'static CStr { plx_platform::i18n::msg::browse_menu_watchlist_remove_c() }
 
 /// A control in the hero action row, named rather than numbered — ported verbatim from
 /// `ui/detail.rs::HeroCtl`.
@@ -111,6 +119,17 @@ pub enum HeroCtl {
     /// the *Go to Show* disc, present only on an EPISODE's page that knows its show — the way back
     /// up from an episode reached straight from Continue Watching, where BACK leaves for Home
     GoToShow,
+    /// the *Shuffle* disc, present only on a SHOW's page that has seasons: its episodes in a
+    /// shuffled PlayQueue, played one after another
+    Shuffle,
+    /// the *Version* pill, present only on a LEAF page whose item carries several `Media[]`
+    /// versions: it opens the version chooser (the item menu's Versions form)
+    Version,
+    /// the bookmark-plus face of the watchlist TOGGLE — worn while the title is not on the
+    /// profile's watchlist
+    WatchlistAdd,
+    /// its bookmark-minus face — worn while it is
+    WatchlistRemove,
 }
 
 impl HeroCtl {
@@ -124,6 +143,10 @@ impl HeroCtl {
             HeroCtl::MarkWatched => ELEM_MARK_WATCHED,
             HeroCtl::MarkUnwatched => ELEM_MARK_UNWATCHED,
             HeroCtl::GoToShow => ELEM_GO_TO_SHOW,
+            HeroCtl::Shuffle => ELEM_SHUFFLE,
+            HeroCtl::Version => ELEM_VERSION,
+            HeroCtl::WatchlistAdd => ELEM_WATCHLIST_ADD,
+            HeroCtl::WatchlistRemove => ELEM_WATCHLIST_REMOVE,
         }
     }
     /// The inverse of [`elem`](Self::elem) — `None` for any `u32` outside the seven identities
@@ -138,6 +161,10 @@ impl HeroCtl {
             ELEM_MARK_WATCHED => Some(HeroCtl::MarkWatched),
             ELEM_MARK_UNWATCHED => Some(HeroCtl::MarkUnwatched),
             ELEM_GO_TO_SHOW => Some(HeroCtl::GoToShow),
+            ELEM_SHUFFLE => Some(HeroCtl::Shuffle),
+            ELEM_VERSION => Some(HeroCtl::Version),
+            ELEM_WATCHLIST_ADD => Some(HeroCtl::WatchlistAdd),
+            ELEM_WATCHLIST_REMOVE => Some(HeroCtl::WatchlistRemove),
             _ => None,
         }
     }
@@ -158,6 +185,13 @@ pub struct HeroSet {
     pub mark: PosterMark,
     /// the page is an episode whose show is known — the Go to Show disc
     pub show: bool,
+    /// the page is a show with seasons — the Shuffle disc
+    pub shuffle: bool,
+    /// the page's leaf has several versions — the Version pill
+    pub version: bool,
+    /// the title's membership of the profile's watchlist, which decides the watchlist toggle's
+    /// face; `None` (the list unknown, or a title that cannot be on one) shows no toggle
+    pub watchlist: Option<bool>,
 }
 
 /// The row's controls, in drawn order, for a given set. A fixed 6-slot array (Play + Restart +
@@ -174,6 +208,14 @@ pub fn hero_ctls(set: HeroSet) -> ([HeroCtl; HERO_MAX], usize) {
         v[n] = HeroCtl::Trailer;
         n += 1;
     }
+    if set.shuffle {
+        v[n] = HeroCtl::Shuffle;
+        n += 1;
+    }
+    if set.version {
+        v[n] = HeroCtl::Version;
+        n += 1;
+    }
     if set.alt {
         v[n] = HeroCtl::Alt;
         n += 1;
@@ -184,6 +226,10 @@ pub fn hero_ctls(set: HeroSet) -> ([HeroCtl; HERO_MAX], usize) {
         HeroCtl::MarkWatched
     };
     n += 1;
+    if let Some(on) = set.watchlist {
+        v[n] = if on { HeroCtl::WatchlistRemove } else { HeroCtl::WatchlistAdd };
+        n += 1;
+    }
     if set.show {
         v[n] = HeroCtl::GoToShow;
         n += 1;
@@ -319,7 +365,7 @@ pub fn watch_names_show(d: &Detail) -> bool {
     hero_episode(d).is_some()
 }
 
-/// A disc's slot (`[restart, trailer, watch, show]`) and the verb it unfurls to — `None` for the two
+/// A disc's slot (`[restart, trailer, watch, show, shuffle, watchlist]`) and the verb it unfurls to — `None` for the two
 /// PILLS.
 pub fn disc_verb(ctl: HeroCtl, name_show: bool) -> Option<(usize, &'static CStr)> {
     match (ctl, name_show) {
@@ -330,8 +376,21 @@ pub fn disc_verb(ctl: HeroCtl, name_show: bool) -> Option<(usize, &'static CStr)
         (HeroCtl::MarkUnwatched, false) => Some((2, mark_unwatched_label())),
         (HeroCtl::MarkUnwatched, true) => Some((2, mark_show_unwatched_label())),
         (HeroCtl::GoToShow, _) => Some((3, go_to_show_label())),
+        (HeroCtl::Shuffle, _) => Some((4, shuffle_label())),
+        (HeroCtl::WatchlistAdd, _) => Some((5, watchlist_add_label())),
+        (HeroCtl::WatchlistRemove, _) => Some((5, watchlist_remove_label())),
         _ => None,
     }
+}
+
+/// Does `d`'s page offer *Version*: a leaf with more than one `Media[]` version.
+pub fn has_versions(d: &Detail) -> bool {
+    d.kind != "show" && d.versions.len() > 1
+}
+
+/// Does `d`'s page offer *Shuffle*: a show with at least one season to draw episodes from.
+pub fn shuffles(d: &Detail) -> bool {
+    d.kind == "show" && !d.rk.is_empty() && !d.seasons.is_empty()
 }
 
 /// Does `d`'s page offer *Go to Show*: an episode that names its show.
@@ -388,12 +447,18 @@ pub fn alt_pill_w(measure: &dyn Measure) -> f32 {
     pill_w(measure, alt_label(), theme::size::BODY, false, true)
 }
 
+pub fn version_pill_w(measure: &dyn Measure) -> f32 {
+    pill_w(measure, version_label(), theme::size::BODY, false, true)
+}
+
 /// Every measured width the row's accumulation needs, as one value — ported verbatim from
 /// `ui/detail.rs::HeroWidths`.
 #[derive(Clone, Copy, Debug)]
 pub struct HeroWidths {
     pub pill: f32,
     pub alt: f32,
+    /// the *Version* pill (a leaf with several `Media[]` versions)
+    pub version: f32,
     /// the discs, in [`disc_verb`]'s slot order, each already unfurled
     pub disc: [f32; DISCS],
 }
@@ -408,10 +473,13 @@ pub fn hero_btn_rect_at(set: HeroSet, i: usize, y: f32, cw: HeroWidths) -> Rect 
         w = match c {
             HeroCtl::Play => cw.pill,
             HeroCtl::Alt => cw.alt,
+            HeroCtl::Version => cw.version,
             HeroCtl::Restart => cw.disc[0],
             HeroCtl::Trailer => cw.disc[1],
             HeroCtl::MarkWatched | HeroCtl::MarkUnwatched => cw.disc[2],
             HeroCtl::GoToShow => cw.disc[3],
+            HeroCtl::Shuffle => cw.disc[4],
+            HeroCtl::WatchlistAdd | HeroCtl::WatchlistRemove => cw.disc[5],
         };
         if k >= i {
             break;
@@ -445,6 +513,7 @@ pub fn disc_caps(
         set,
         hero_pill_w(measure, set.restart),
         alt_pill_w(measure),
+        version_pill_w(measure),
         unfurl,
         label_w,
     )
@@ -454,6 +523,7 @@ pub(super) fn disc_caps_at(
     set: HeroSet,
     pill: f32,
     alt: f32,
+    version: f32,
     unfurl: [f32; DISCS],
     label_w: [f32; DISCS],
 ) -> [f32; DISCS] {
@@ -461,6 +531,7 @@ pub(super) fn disc_caps_at(
     let closed = HeroWidths {
         pill,
         alt,
+        version,
         disc: [CD; DISCS],
     };
     let last = hero_btn_rect_at(set, n.saturating_sub(1), 0.0, closed);
@@ -476,6 +547,7 @@ pub(super) fn disc_caps_at(
         HeroWidths {
             pill,
             alt,
+            version,
             disc: open,
         },
     );
@@ -498,6 +570,7 @@ pub fn hero_widths(
     HeroWidths {
         pill: hero_pill_w(measure, has_restart),
         alt: alt_pill_w(measure),
+        version: version_pill_w(measure),
         disc: disc_caps(measure, set, unfurl, named_show),
     }
 }
@@ -862,17 +935,48 @@ mod tests {
         TEST_METADATA.with(|cell| unsafe { &mut *cell.get() })
     }
 
+    /// **Shuffle and Version take their places in the row**: the Shuffle disc after the trailer,
+    /// the Version pill before *Also available*, each only when its page offers it; and the
+    /// page predicates say when that is (a show with seasons; a leaf with several versions).
+    #[test]
+    fn shuffle_and_version_take_their_places_in_the_row() {
+        let mut set = set_full(true, true, PosterMark::None, false);
+        set.shuffle = true;
+        set.version = true;
+        let (v, n) = hero_ctls(set);
+        assert_eq!(&v[..n], [HeroCtl::Play, HeroCtl::Restart, HeroCtl::Shuffle, HeroCtl::Version, HeroCtl::Alt, HeroCtl::MarkWatched]);
+        assert_eq!(HeroCtl::of_elem(ELEM_SHUFFLE), Some(HeroCtl::Shuffle));
+        assert_eq!(HeroCtl::of_elem(ELEM_VERSION), Some(HeroCtl::Version));
+        assert_eq!(disc_verb(HeroCtl::Shuffle, false).map(|(slot, _)| slot), Some(4));
+        assert_eq!(disc_verb(HeroCtl::Version, false), None, "a pill, not a disc");
+
+        let mut show = Detail { kind: "show".into(), rk: "1".into(), ..Default::default() };
+        assert!(!shuffles(&show), "no seasons, nothing to shuffle");
+        show.seasons.push(plx_data::metadata::Season {
+            rk: "s1".into(), index: 1, title: "Season 1".into(), leaf_count: 2, viewed_leaf_count: 0,
+        });
+        assert!(shuffles(&show));
+        let mut movie = Detail { kind: "movie".into(), rk: "2".into(), ..Default::default() };
+        movie.versions = vec![Default::default()];
+        assert!(!has_versions(&movie), "one version is no choice");
+        movie.versions.push(Default::default());
+        assert!(has_versions(&movie) && !has_versions(&show));
+    }
+
     fn set(restart: bool, alt: bool, mark: PosterMark) -> HeroSet {
         set_full(restart, alt, mark, false)
     }
 
     fn set_full(restart: bool, alt: bool, mark: PosterMark, trailer: bool) -> HeroSet {
         HeroSet {
+            watchlist: None,
             restart,
             trailer,
             alt,
             mark,
             show: false,
+            shuffle: false,
+            version: false,
         }
     }
 
@@ -1054,6 +1158,7 @@ mod tests {
         let cw = HeroWidths {
             pill: 200.0,
             alt: 260.0,
+            version: 260.0,
             disc: [CD; DISCS],
         };
         for restart in [false, true] {
@@ -1279,11 +1384,14 @@ mod tests {
     #[test]
     fn restart_and_the_watch_tail_are_independent() {
         let set = HeroSet {
+            watchlist: None,
             restart: true,
             trailer: false,
             alt: false,
             mark: PosterMark::Watched,
             show: false,
+            shuffle: false,
+            version: false,
         };
         let (controls, n) = hero_ctls(set);
         assert_eq!(
@@ -1295,13 +1403,17 @@ mod tests {
     #[test]
     fn the_actions_row_grows_an_also_available_control_only_for_a_second_source() {
         let without = HeroSet {
+            watchlist: None,
             restart: false,
             trailer: false,
             alt: false,
             mark: PosterMark::None,
             show: false,
+            shuffle: false,
+            version: false,
         };
         let with = HeroSet {
+            watchlist: None,
             alt: true,
             ..without
         };
@@ -1314,11 +1426,14 @@ mod tests {
         for alt in [false, true] {
             for trailer in [false, true] {
                 let set = HeroSet {
+                    watchlist: None,
                     restart: true,
                     trailer,
                     alt,
                     mark: PosterMark::InProgress,
                     show: false,
+                    shuffle: false,
+                    version: false,
                 };
                 let (controls, n) = hero_ctls(set);
                 assert!(controls[..n].iter().all(|ctl| matches!(
@@ -1435,18 +1550,24 @@ mod tests {
     #[test]
     fn hero_indices_mean_different_actions_in_the_two_control_sets() {
         let compact = HeroSet {
+            watchlist: None,
             restart: false,
             trailer: false,
             alt: false,
             mark: PosterMark::None,
             show: false,
+            shuffle: false,
+            version: false,
         };
         let wide = HeroSet {
+            watchlist: None,
             restart: true,
             trailer: false,
             alt: true,
             mark: PosterMark::None,
             show: false,
+            shuffle: false,
+            version: false,
         };
         assert_eq!(ctl_at(compact, 1), Some(HeroCtl::MarkWatched));
         assert_eq!(ctl_at(wide, 1), Some(HeroCtl::Restart));
@@ -1454,18 +1575,38 @@ mod tests {
     }
 
     #[test]
+    fn the_watchlist_toggle_wears_the_face_of_its_outcome_after_the_watch_toggle() {
+        let base = HeroSet { show: true, ..set(false, false, PosterMark::None) };
+        assert!(!hero_ctls(base).0[..hero_ctls(base).1].iter().any(|c| matches!(c, HeroCtl::WatchlistAdd | HeroCtl::WatchlistRemove)),
+            "the list unknown: no toggle");
+        let off = HeroSet { watchlist: Some(false), ..base };
+        let (v, n) = hero_ctls(off);
+        assert_eq!(&v[..n], [HeroCtl::Play, HeroCtl::MarkWatched, HeroCtl::WatchlistAdd, HeroCtl::GoToShow]);
+        let on = HeroSet { watchlist: Some(true), ..base };
+        assert_eq!(ctl_at(on, 2), Some(HeroCtl::WatchlistRemove));
+        assert_eq!(HeroCtl::of_elem(HeroCtl::WatchlistRemove.elem()), Some(HeroCtl::WatchlistRemove));
+        assert_eq!(disc_verb(HeroCtl::WatchlistAdd, false).map(|(slot, _)| slot), Some(5));
+        let widest = HeroSet { restart: true, trailer: true, alt: true, shuffle: true, version: true, watchlist: Some(true), ..base };
+        assert_eq!(hero_ctls(widest).1, HERO_MAX, "every control at once fits the row's array");
+    }
+
+    #[test]
     fn the_actions_row_accumulates_around_a_variable_width_control() {
         let set = HeroSet {
+            watchlist: None,
             restart: true,
             trailer: false,
             alt: true,
             mark: PosterMark::None,
             show: false,
+            shuffle: false,
+            version: false,
         };
         let widths = HeroWidths {
             pill: 210.0,
             alt: 300.0,
-            disc: [90.0, 120.0, 120.0, CD],
+            version: 300.0,
+            disc: [90.0, 120.0, 120.0, CD, CD, CD],
         };
         let (controls, n) = hero_ctls(set);
         for i in 1..n {
@@ -1492,23 +1633,24 @@ mod tests {
                         PosterMark::Watched,
                     ] {
                         for show in [false, true] {
-                        let set = HeroSet { show, ..set_full(restart, alt, mark, trailer) };
+                        // The watchlist toggle rides along with Go to Show here, so both widths are graded.
+                        let set = HeroSet { show, watchlist: show.then_some(false), ..set_full(restart, alt, mark, trailer) };
                         let (_, n) = hero_ctls(set);
                         for labels in [
-                            [10.0, 12.0, 12.0, 14.0],
-                            [201.0, 80.0, 316.0, 190.0],
-                            [400.0, 400.0, 400.0, 400.0],
-                            [900.0, 40.0, 40.0, 40.0],
+                            [10.0, 12.0, 12.0, 14.0, 0.0, 11.0],
+                            [201.0, 80.0, 316.0, 190.0, 0.0, 240.0],
+                            [400.0, 400.0, 400.0, 400.0, 0.0, 400.0],
+                            [900.0, 40.0, 40.0, 40.0, 0.0, 40.0],
                         ] {
                             for e in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
                                 for unfurl in [
-                                    [e, 0.0, 1.0 - e, 0.0],
-                                    [1.0 - e, 0.0, e, 0.0],
-                                    [e, e, 0.0, 0.0],
-                                    [0.0, e, e, 0.0],
-                                    [0.0, 0.0, 1.0 - e, e],
+                                    [e, 0.0, 1.0 - e, 0.0, 0.0, 0.0],
+                                    [1.0 - e, 0.0, e, 0.0, 0.0, e],
+                                    [e, e, 0.0, 0.0, 0.0, 0.0],
+                                    [0.0, e, e, 0.0, 0.0, 1.0 - e],
+                                    [0.0, 0.0, 1.0 - e, e, 0.0, 0.0],
                                 ] {
-                                    let disc = disc_caps_at(set, PW + 62.0, 340.0, unfurl, labels);
+                                    let disc = disc_caps_at(set, PW + 62.0, 340.0, 340.0, unfurl, labels);
                                     let last = hero_btn_rect_at(
                                         set,
                                         n - 1,
@@ -1516,6 +1658,7 @@ mod tests {
                                         HeroWidths {
                                             pill: PW + 62.0,
                                             alt: 340.0,
+                                            version: 340.0,
                                             disc,
                                         },
                                     );
@@ -1536,11 +1679,14 @@ mod tests {
     fn the_real_verbs_all_fit_the_widest_row() {
         let measure = plx_ui::fixture::FixtureMeasure;
         let wide = HeroSet {
+            watchlist: None,
             restart: true,
             trailer: true,
             alt: true,
             mark: PosterMark::Watched,
             show: false,
+            shuffle: false,
+            version: false,
         };
         let caps = disc_caps(&measure, wide, [1.0; DISCS], true);
         let (_, n) = hero_ctls(wide);
@@ -1551,6 +1697,7 @@ mod tests {
             HeroWidths {
                 pill: hero_pill_w(&measure, true),
                 alt: alt_pill_w(&measure),
+                version: alt_pill_w(&measure),
                 disc: caps,
             },
         );
@@ -1560,11 +1707,14 @@ mod tests {
         );
 
         let roomy = HeroSet {
+            watchlist: None,
             restart: false,
             trailer: true,
             alt: false,
             mark: PosterMark::Watched,
             show: false,
+            shuffle: false,
+            version: false,
         };
         let caps = disc_caps(&measure, roomy, [1.0; DISCS], false);
         assert!(caps[1] > CD, "Trailer unfurls when the row has room");
@@ -1587,11 +1737,14 @@ mod tests {
     #[test]
     fn a_verb_that_does_not_fit_is_dropped_whole() {
         let set = HeroSet {
+            watchlist: None,
             restart: true,
             trailer: true,
             alt: true,
             mark: PosterMark::Watched,
             show: false,
+            shuffle: false,
+            version: false,
         };
         assert_eq!(disc_caps(&HugeMeasure, set, [1.0; DISCS], true), [CD; DISCS]);
     }
@@ -1627,11 +1780,14 @@ mod tests {
     #[test]
     fn the_widest_action_row_clears_the_people_column() {
         let set = HeroSet {
+            watchlist: None,
             restart: true,
             trailer: true,
             alt: true,
             mark: PosterMark::InProgress,
             show: false,
+            shuffle: false,
+            version: false,
         };
         let (_, n) = hero_ctls(set);
         let last = hero_btn_rect_at(
@@ -1641,6 +1797,7 @@ mod tests {
             HeroWidths {
                 pill: PW + 62.0,
                 alt: 340.0,
+                version: 340.0,
                 disc: [CD; DISCS],
             },
         );

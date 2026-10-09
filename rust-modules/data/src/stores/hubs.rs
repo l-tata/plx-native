@@ -14,6 +14,13 @@ pub enum HubsCmd {
     Reset,
     /// The optimistic half of a view-state write on the hub catalog (`pms::LocalEdit`).
     EditItem { sid: plx_plex::plex::ServerId, rk: String, edit: crate::pms::LocalEdit },
+    /// Replace Home's On Now shelf (`livetv::on_now::rows`); an empty list removes it.
+    SetOnNow(crate::pms::ShelfRows),
+    /// Add the title with this guid to the profile's watchlist, or remove it: optimistic on the
+    /// shelf and the membership at once, then performed and read back by the watchlist worker.
+    /// `row` is the library copy the press was made on (empty from a detail page), which an add
+    /// puts at the head of the shelf until the list is read back.
+    EditWatchlist { guid: String, add: bool, row: crate::pms::ShelfRows },
 }
 
 pub use crate::pms::Landing as HubsResult;
@@ -163,6 +170,13 @@ impl HubsStore {
         crate::pms::owed(&self.adapter)
     }
 
+    /// Is any source's hub fetch still out? Unlike [`Self::owed`] this is the store's own single
+    /// flight (`Src::fetching`), which is what a caller deciding whether to ask AGAIN must read: a
+    /// landing taken but not yet applied still counts as in flight.
+    pub fn in_flight(&self) -> bool {
+        crate::pms::in_flight(&self.state)
+    }
+
     /// Test hook: how many spawned workers still owe a landing.
     #[cfg(any(test, feature = "test-support"))]
     pub fn owed_for_test(&self) -> u32 { crate::pms::owed_count_for_test(&self.adapter) }
@@ -234,8 +248,10 @@ impl HubsStore {
         directory: crate::stores::browse::DirectoryView<'_>,
     ) -> super::StoreOutcome {
         self.prepare_command(Some(&cmd));
+        // The minute tick re-sends an On Now shelf that has usually not moved; only a change is news.
+        let quiet = matches!(cmd, HubsCmd::SetOnNow(_));
         let answer = crate::pms::run_with_directory(&mut self.state, &self.adapter, cmd, directory);
-        self.bump();
+        if answer.changed || !quiet { self.bump(); }
         answer
     }
 }

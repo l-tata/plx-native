@@ -8,8 +8,53 @@
 //! the way every TV guide behaves), LEFT/RIGHT move it to the neighbouring airing's start. Until
 //! the viewer moves sideways the cursor FOLLOWS now, so a guide left open keeps pointing at what
 //! is on.
+//!
+//! The cursor walks [`Rows`] — the channels the guide SHOWS, which under a genre filter are a
+//! subset of the lineup (`filter::visible`) — so `row` is a position in what is drawn, never a
+//! lineup index; [`Rows::lineup_index`] is the way back.
 
 use plx_data::livetv::guide::{Channel, Lineup};
+
+/// **The channel rows on show**: the whole lineup, or the lineup indices a filter kept.
+#[derive(Clone, Copy)]
+pub struct Rows<'a> {
+    channels: &'a [Channel],
+    idx: Option<&'a [usize]>,
+}
+
+impl<'a> Rows<'a> {
+    /// Every channel of `lineup`.
+    pub fn all(lineup: &'a Lineup) -> Self {
+        Self { channels: &lineup.channels, idx: None }
+    }
+    /// The channels of `lineup` at `idx` (lineup indices, in order).
+    pub fn some(lineup: &'a Lineup, idx: &'a [usize]) -> Self {
+        Self { channels: &lineup.channels, idx: Some(idx) }
+    }
+    pub fn len(&self) -> usize {
+        self.idx.map_or(self.channels.len(), <[usize]>::len)
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// The lineup index of row `row`.
+    pub fn lineup_index(&self, row: usize) -> Option<usize> {
+        match self.idx {
+            Some(idx) => idx.get(row).copied(),
+            None => (row < self.channels.len()).then_some(row),
+        }
+    }
+    /// The row showing lineup index `i`, if it is shown.
+    pub fn row_of(&self, i: usize) -> Option<usize> {
+        match self.idx {
+            Some(idx) => idx.iter().position(|&r| r == i),
+            None => (i < self.channels.len()).then_some(i),
+        }
+    }
+    pub fn get(&self, row: usize) -> Option<&'a Channel> {
+        self.channels.get(self.lineup_index(row)?)
+    }
+}
 
 /// One guide column: the grid's time axis is labelled every half hour.
 pub const SLOT_MS: i64 = 30 * 60 * 1000;
@@ -55,16 +100,16 @@ impl Cursor {
     }
 
     /// Clamp to a lineup that may have shrunk, and keep the focused row visible.
-    pub fn fit(&mut self, lineup: &Lineup, visible: usize) {
-        self.row = self.row.min(lineup.len().saturating_sub(1));
+    pub fn fit(&mut self, rows: Rows<'_>, visible: usize) {
+        self.row = self.row.min(rows.len().saturating_sub(1));
         self.reveal_row(visible);
     }
 
     /// RIGHT: the start of the next airing on this row, or one half hour on when the row has no
     /// listing there. `false` at the end of the guide.
-    pub fn right(&mut self, lineup: &Lineup, now: i64) -> bool {
+    pub fn right(&mut self, rows: Rows<'_>, now: i64) -> bool {
         let limit = now + AHEAD_MS;
-        let next = match lineup.channels.get(self.row) {
+        let next = match rows.get(self.row) {
             Some(c) => next_start(c, self.at_ms).unwrap_or(floor_slot(self.at_ms) + SLOT_MS),
             None => return false,
         };
@@ -79,8 +124,8 @@ impl Cursor {
 
     /// LEFT: the start of the airing before the focused one, never before now (the airing on now
     /// is as far back as a live guide goes). `false` when already there.
-    pub fn left(&mut self, lineup: &Lineup, now: i64) -> bool {
-        let Some(c) = lineup.channels.get(self.row) else { return false };
+    pub fn left(&mut self, rows: Rows<'_>, now: i64) -> bool {
+        let Some(c) = rows.get(self.row) else { return false };
         let here = c.airing_at(self.at_ms).map(|i| c.airings[i].start_ms).unwrap_or(floor_slot(self.at_ms));
         // The airing containing `now` (or now itself) is the floor.
         let floor = c.airing_at(now).map(|i| c.airings[i].start_ms).unwrap_or(now);
@@ -108,8 +153,8 @@ impl Cursor {
 
     /// UP/DOWN by `delta` rows, keeping the moment. `false` when the move would leave the lineup
     /// (an UP on the first row is the page's to hand to the strip).
-    pub fn step_row(&mut self, lineup: &Lineup, delta: i32, visible: usize) -> bool {
-        let n = lineup.len();
+    pub fn step_row(&mut self, rows: Rows<'_>, delta: i32, visible: usize) -> bool {
+        let n = rows.len();
         let Some(to) = (self.row as i64).checked_add(i64::from(delta)) else { return false };
         if to < 0 || to as usize >= n || n == 0 {
             return false;
@@ -121,8 +166,8 @@ impl Cursor {
 
     /// CH▲ / CH▼: a page of rows, clamped to the lineup (unlike [`Self::step_row`], a page always
     /// lands somewhere while there is anywhere to land).
-    pub fn page(&mut self, lineup: &Lineup, dir: i32, visible: usize) -> bool {
-        let n = lineup.len();
+    pub fn page(&mut self, rows: Rows<'_>, dir: i32, visible: usize) -> bool {
+        let n = rows.len();
         if n == 0 {
             return false;
         }
@@ -204,7 +249,7 @@ mod tests {
         assert!(c.tick(NOW + 5 * MIN));
         assert_eq!(c.at_ms, NOW + 5 * MIN);
         let l = lineup();
-        assert!(c.right(&l, NOW + 5 * MIN));
+        assert!(c.right(Rows::all(&l), NOW + 5 * MIN));
         assert!(!c.follow);
         let at = c.at_ms;
         c.tick(NOW + 6 * MIN);
@@ -215,31 +260,31 @@ mod tests {
     fn right_walks_airings_and_left_walks_back_to_now() {
         let l = lineup();
         let mut c = Cursor::new(NOW);
-        assert!(c.right(&l, NOW));
+        assert!(c.right(Rows::all(&l), NOW));
         assert_eq!(c.at_ms, airing(30, 60).start_ms);
-        assert!(c.right(&l, NOW));
+        assert!(c.right(Rows::all(&l), NOW));
         assert_eq!(c.at_ms, airing(90, 30).start_ms);
-        assert!(c.left(&l, NOW));
+        assert!(c.left(Rows::all(&l), NOW));
         assert_eq!(c.at_ms, airing(30, 60).start_ms);
-        assert!(c.left(&l, NOW));
+        assert!(c.left(Rows::all(&l), NOW));
         assert_eq!(c.at_ms, NOW, "back on the airing that is on: the cursor is now again");
         assert!(c.follow);
-        assert!(!c.left(&l, NOW), "nothing before now");
+        assert!(!c.left(Rows::all(&l), NOW), "nothing before now");
     }
 
     #[test]
     fn up_and_down_keep_the_moment_and_stop_at_the_ends() {
         let l = lineup();
         let mut c = Cursor::new(NOW);
-        c.right(&l, NOW);
+        c.right(Rows::all(&l), NOW);
         let at = c.at_ms;
-        assert!(c.step_row(&l, 1, 3));
+        assert!(c.step_row(Rows::all(&l), 1, 3));
         assert_eq!((c.row, c.at_ms), (1, at));
-        assert!(!c.step_row(&l, -2, 3), "an UP past the first row is the strip's");
-        assert!(c.step_row(&l, 2, 3));
+        assert!(!c.step_row(Rows::all(&l), -2, 3), "an UP past the first row is the strip's");
+        assert!(c.step_row(Rows::all(&l), 2, 3));
         assert_eq!(c.row, 3);
         assert_eq!(c.top, 1, "the row was revealed");
-        assert!(!c.step_row(&l, 1, 3));
+        assert!(!c.step_row(Rows::all(&l), 1, 3));
     }
 
     #[test]
@@ -247,9 +292,9 @@ mod tests {
         let l = lineup();
         let mut c = Cursor::new(NOW);
         c.go_to_row(2, 4);
-        assert!(c.right(&l, NOW));
+        assert!(c.right(Rows::all(&l), NOW));
         assert_eq!(c.at_ms, floor_slot(NOW) + SLOT_MS);
-        assert!(c.left(&l, NOW));
+        assert!(c.left(Rows::all(&l), NOW));
         assert_eq!(c.at_ms, NOW);
     }
 
@@ -258,7 +303,7 @@ mod tests {
         let l = lineup();
         let mut c = Cursor::new(NOW);
         for _ in 0..3 {
-            c.right(&l, NOW);
+            c.right(Rows::all(&l), NOW);
         }
         // airing(90,30) ends at +120; the next RIGHT on row 1 lands at its stop.
         assert!(c.at_ms < c.window_ms + WINDOW_MS);
@@ -269,16 +314,34 @@ mod tests {
     }
 
     #[test]
+    fn filtered_rows_walk_only_the_channels_shown() {
+        let l = lineup();
+        let idx = [1, 3];
+        let rows = Rows::some(&l, &idx);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.get(1).map(|c| c.number.as_str()), Some("4"));
+        assert_eq!((rows.lineup_index(1), rows.row_of(3), rows.row_of(2)), (Some(3), Some(1), None));
+        let mut c = Cursor::new(NOW);
+        assert!(c.step_row(rows, 1, 4));
+        assert!(!c.step_row(rows, 1, 4), "two rows shown");
+        assert!(c.right(rows, NOW), "RIGHT walks the shown channel's airings");
+        assert_eq!(c.at_ms, airing(30, 0).start_ms);
+        let all = Rows::all(&l);
+        assert_eq!((all.lineup_index(2), all.row_of(9), all.get(9).is_none()), (Some(2), None, true));
+    }
+
+    #[test]
     fn paging_clamps_and_fit_survives_a_shrunk_lineup() {
         let l = lineup();
         let mut c = Cursor::new(NOW);
-        assert!(c.page(&l, 1, 3));
+        assert!(c.page(Rows::all(&l), 1, 3));
         assert_eq!(c.row, 3);
-        assert!(!c.page(&l, 1, 3));
-        assert!(c.page(&l, -1, 3));
+        assert!(!c.page(Rows::all(&l), 1, 3));
+        assert!(c.page(Rows::all(&l), -1, 3));
         assert_eq!(c.row, 0);
         c.row = 3;
-        c.fit(&Lineup { channels: l.channels[..1].to_vec(), ..Default::default() }, 3);
+        let shrunk = Lineup { channels: l.channels[..1].to_vec(), ..Default::default() };
+        c.fit(Rows::all(&shrunk), 3);
         assert_eq!((c.row, c.top), (0, 0));
     }
 }

@@ -636,6 +636,19 @@ pub struct Session {
     /// committed replay fixtures included — serializes exactly as it did before.
     #[serde(default, deserialize_with = "de_soft_deck_press", skip_serializing_if = "is_default_deck_press")]
     pub deck_press: DeckPress,
+    /// **Whether the player skips intro / credits markers on its own** — see [`AutoSkip`].
+    /// Install-wide like [`Session::playback_quality`]. Absence is Off: the Skip pill every build
+    /// before the field offered, and nothing skipped without a press. Skipped at the default so a
+    /// session predating this field — committed replay fixtures included — serializes exactly as
+    /// it did before.
+    #[serde(default, deserialize_with = "de_soft_auto_skip", skip_serializing_if = "is_default_auto_skip")]
+    pub auto_skip: AutoSkip,
+    /// **How long a browsing page waits before the ambient screensaver** — see [`Screensaver`].
+    /// Install-wide like [`Session::auto_skip`]: a TV's idle behaviour is a fact about the set.
+    /// Absence is the default (five minutes); skipped at the default so a session predating this
+    /// field serializes exactly as it did before.
+    #[serde(default, deserialize_with = "de_soft_screensaver", skip_serializing_if = "is_default_screensaver")]
+    pub screensaver: Screensaver,
     /// **The Tunarr server Live TV reads** — its origin (`http://192.0.2.20:8000`), empty when
     /// Live TV is not set up. Install-wide like [`Session::playback_quality`]: a tuner on the LAN
     /// is a fact about the television's network, not about whoever is watching. Skipped when empty
@@ -759,6 +772,10 @@ struct CanonicalSessionPreferences {
     skip_interval: SkipInterval,
     #[serde(default, deserialize_with = "de_soft_deck_press", skip_serializing_if = "is_default_deck_press")]
     deck_press: DeckPress,
+    #[serde(default, deserialize_with = "de_soft_auto_skip", skip_serializing_if = "is_default_auto_skip")]
+    auto_skip: AutoSkip,
+    #[serde(default, deserialize_with = "de_soft_screensaver", skip_serializing_if = "is_default_screensaver")]
+    screensaver: Screensaver,
     #[serde(default, deserialize_with = "de_soft_string", skip_serializing_if = "String::is_empty")]
     livetv_source: String,
     #[serde(default, deserialize_with = "de_soft_string", skip_serializing_if = "String::is_empty")]
@@ -801,6 +818,8 @@ impl Default for CanonicalSessionPreferences {
             next_episode_mode: NextEpisodeMode::Countdown,
             skip_interval: SkipInterval::Seconds10,
             deck_press: DeckPress::Details,
+            auto_skip: AutoSkip::Off,
+            screensaver: Screensaver::Minutes5,
             livetv_source: String::new(),
             livetv_channel: String::new(),
             plaintext_consent: Vec::new(),
@@ -855,6 +874,8 @@ fn split_public(session: &Session) -> Result<plx_platform::storage::state::Publi
         next_episode_mode: session.next_episode_mode,
         skip_interval: session.skip_interval,
         deck_press: session.deck_press,
+        auto_skip: session.auto_skip,
+        screensaver: session.screensaver,
         livetv_source: session.livetv_source.clone(),
         livetv_channel: session.livetv_channel.clone(),
         plaintext_consent: session.plaintext_consent.clone(),
@@ -931,6 +952,8 @@ pub fn join_canonical(
         next_episode_mode: preferences.next_episode_mode,
         skip_interval: preferences.skip_interval,
         deck_press: preferences.deck_press,
+        auto_skip: preferences.auto_skip,
+        screensaver: preferences.screensaver,
         livetv_source: preferences.livetv_source.clone(),
         livetv_channel: preferences.livetv_channel.clone(),
         plaintext_consent: preferences.plaintext_consent,
@@ -966,6 +989,8 @@ fn public_session(public: &plx_platform::storage::state::PublicPayload) -> Sessi
         next_episode_mode: preferences.next_episode_mode,
         skip_interval: preferences.skip_interval,
         deck_press: preferences.deck_press,
+        auto_skip: preferences.auto_skip,
+        screensaver: preferences.screensaver,
         livetv_source: preferences.livetv_source.clone(),
         livetv_channel: preferences.livetv_channel.clone(),
         plaintext_consent: preferences.plaintext_consent,
@@ -1424,6 +1449,91 @@ pub enum DeckPress {
     Details,
     #[serde(rename = "play")]
     Play,
+}
+
+/// Whether the player skips a marker segment by itself — install-wide, like [`SubtitleTone`].
+/// Absence is `Off`: the Skip Intro / Skip Credits pill every build before this preference offered,
+/// and nothing skipped without a press. `Intro` skips an intro segment the moment the playhead
+/// enters it; `IntroAndCredits` skips credits too — except a final credits segment with a queued
+/// successor while the Up Next countdown owns it (the countdown is the better offer, and skipping
+/// would start the next episode silently).
+#[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoSkip {
+    #[default]
+    #[serde(rename = "off")]
+    Off,
+    #[serde(rename = "intro")]
+    Intro,
+    #[serde(rename = "intro_credits")]
+    IntroAndCredits,
+}
+
+impl AutoSkip {
+    /// Every option, the order the picker lists them in.
+    pub const LADDER: [AutoSkip; 3] = [AutoSkip::Off, AutoSkip::Intro, AutoSkip::IntroAndCredits];
+
+    /// An in-memory index back to an option — out of range is the default, for the reason
+    /// [`SubtitleTone::from_index`] gives: the ladder can grow or shrink.
+    pub fn from_index(i: u8) -> AutoSkip {
+        Self::LADDER.get(i as usize).copied().unwrap_or_default()
+    }
+
+    pub fn index(self) -> u8 {
+        Self::LADDER.iter().position(|&m| m == self).unwrap_or(0) as u8
+    }
+
+    /// Does this setting skip an intro segment by itself?
+    pub fn skips_intro(self) -> bool {
+        matches!(self, AutoSkip::Intro | AutoSkip::IntroAndCredits)
+    }
+
+    /// Does this setting skip a credits segment by itself?
+    pub fn skips_credits(self) -> bool {
+        self == AutoSkip::IntroAndCredits
+    }
+}
+
+/// How long a browsing page must be left alone before it fades to the ambient screensaver
+/// (`app::ambient`) — install-wide, like [`AutoSkip`]. Absence is five minutes.
+#[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screensaver {
+    #[serde(rename = "off")]
+    Off,
+    #[serde(rename = "2m")]
+    Minutes2,
+    #[default]
+    #[serde(rename = "5m")]
+    Minutes5,
+    #[serde(rename = "10m")]
+    Minutes10,
+    #[serde(rename = "20m")]
+    Minutes20,
+}
+
+impl Screensaver {
+    /// Every option, the order the picker lists them in.
+    pub const LADDER: [Screensaver; 5] =
+        [Screensaver::Off, Screensaver::Minutes2, Screensaver::Minutes5, Screensaver::Minutes10, Screensaver::Minutes20];
+
+    /// An in-memory index back to an option; out of range is the default.
+    pub fn from_index(i: u8) -> Screensaver {
+        Self::LADDER.get(i as usize).copied().unwrap_or_default()
+    }
+
+    pub fn index(self) -> u8 {
+        Self::LADDER.iter().position(|&m| m == self).unwrap_or(2) as u8
+    }
+
+    /// The idle delay in minutes, `None` when the screensaver is off.
+    pub fn minutes(self) -> Option<u32> {
+        match self {
+            Screensaver::Off => None,
+            Screensaver::Minutes2 => Some(2),
+            Screensaver::Minutes5 => Some(5),
+            Screensaver::Minutes10 => Some(10),
+            Screensaver::Minutes20 => Some(20),
+        }
+    }
 }
 
 impl DeckPress {
@@ -2415,6 +2525,38 @@ fn is_default_deck_press(mode: &DeckPress) -> bool {
     *mode == DeckPress::default()
 }
 
+/// The auto-skip mode is a preference too: a spelling this build does not know degrades to Off.
+fn de_soft_auto_skip<'de, D>(d: D) -> Result<AutoSkip, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Ok(v) = serde_json::Value::deserialize(d) else {
+        return Ok(AutoSkip::default());
+    };
+    Ok(serde_json::from_value::<AutoSkip>(v).unwrap_or_default())
+}
+
+/// `skip_serializing_if` needs a function, not just `PartialEq` with `Default::default()`.
+fn is_default_auto_skip(mode: &AutoSkip) -> bool {
+    *mode == AutoSkip::default()
+}
+
+/// The screensaver delay is a preference too: a spelling this build does not know degrades to the
+/// default.
+fn de_soft_screensaver<'de, D>(d: D) -> Result<Screensaver, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Ok(v) = serde_json::Value::deserialize(d) else {
+        return Ok(Screensaver::default());
+    };
+    Ok(serde_json::from_value::<Screensaver>(v).unwrap_or_default())
+}
+
+fn is_default_screensaver(mode: &Screensaver) -> bool {
+    *mode == Screensaver::default()
+}
+
 /// The audio-enhancement toggle is a preference too: an unknown shape degrades to both flags
 /// off rather than failing the enclosing [`Session`].
 fn de_soft_audio_enhancements<'de, D>(d: D) -> Result<crate::plex::AudioEnhancements, D::Error>
@@ -2647,6 +2789,26 @@ impl Session {
 
     pub fn deck_press(&self) -> DeckPress {
         self.deck_press
+    }
+
+    pub fn auto_skip(&self) -> AutoSkip {
+        self.auto_skip
+    }
+
+    pub fn with_auto_skip(&self, mode: AutoSkip) -> Self {
+        let mut next = self.clone();
+        next.auto_skip = mode;
+        next
+    }
+
+    pub fn screensaver(&self) -> Screensaver {
+        self.screensaver
+    }
+
+    pub fn with_screensaver(&self, mode: Screensaver) -> Self {
+        let mut next = self.clone();
+        next.screensaver = mode;
+        next
     }
 
     pub fn livetv_source(&self) -> &str {
@@ -5729,6 +5891,110 @@ mod next_episode_mode_tests {
             assert_eq!(join_canonical(&public, &protected).unwrap().next_episode_mode(), mode);
             assert_eq!(public_session(&public).next_episode_mode(), mode);
         }
+    }
+}
+
+/// `Session::auto_skip`: soft-parse, omit-at-default (so committed replay fixtures and every
+/// session written before the field existed serialize unchanged) and round-trip.
+#[cfg(test)]
+mod auto_skip_tests {
+    use super::*;
+
+    #[test]
+    fn absent_or_malformed_is_off() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"auto_skip": null}),
+            serde_json::json!({"auto_skip": "future"}),
+            serde_json::json!({"auto_skip": 2}),
+        ] {
+            let session: Session = serde_json::from_value(value.clone())
+                .unwrap_or_else(|e| panic!("{value}: a bad preference must not fail the session: {e}"));
+            assert_eq!(session.auto_skip(), AutoSkip::Off, "{value}");
+        }
+    }
+
+    #[test]
+    fn the_default_is_not_serialized() {
+        let session = Session::default();
+        assert_eq!(session.auto_skip(), AutoSkip::Off);
+        assert!(!serde_json::to_string(&session).unwrap().contains("auto_skip"));
+        let prefs = serde_json::to_string(&split_public(&session).unwrap().preferences).unwrap();
+        assert!(!prefs.contains("auto_skip"), "{prefs}");
+    }
+
+    #[test]
+    fn a_pick_round_trips_through_both_formats() {
+        for mode in [AutoSkip::Intro, AutoSkip::IntroAndCredits] {
+            let session = Session::default().with_auto_skip(mode);
+            let json = serde_json::to_string(&session).unwrap();
+            assert!(json.contains("auto_skip"), "{json}");
+            let round: Session = serde_json::from_str(&json).unwrap();
+            assert_eq!(round.auto_skip(), mode);
+
+            let (public, protected) = split_canonical(&session).unwrap();
+            assert_eq!(join_canonical(&public, &protected).unwrap().auto_skip(), mode);
+            assert_eq!(public_session(&public).auto_skip(), mode);
+        }
+    }
+
+    #[test]
+    fn the_kinds_each_option_skips() {
+        assert!(!AutoSkip::Off.skips_intro() && !AutoSkip::Off.skips_credits());
+        assert!(AutoSkip::Intro.skips_intro() && !AutoSkip::Intro.skips_credits());
+        assert!(AutoSkip::IntroAndCredits.skips_intro() && AutoSkip::IntroAndCredits.skips_credits());
+        for m in AutoSkip::LADDER {
+            assert_eq!(AutoSkip::from_index(m.index()), m);
+        }
+        assert_eq!(AutoSkip::from_index(99), AutoSkip::Off);
+    }
+}
+
+/// `Session::screensaver`: soft-parse, omit-at-default and round-trip.
+#[cfg(test)]
+mod screensaver_tests {
+    use super::*;
+
+    #[test]
+    fn absent_or_malformed_is_five_minutes() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"screensaver": null}),
+            serde_json::json!({"screensaver": "1h"}),
+            serde_json::json!({"screensaver": 5}),
+        ] {
+            let session: Session = serde_json::from_value(value.clone())
+                .unwrap_or_else(|e| panic!("{value}: a bad preference must not fail the session: {e}"));
+            assert_eq!(session.screensaver(), Screensaver::Minutes5, "{value}");
+        }
+        let session = Session::default();
+        assert!(!serde_json::to_string(&session).unwrap().contains("screensaver"));
+        let prefs = serde_json::to_string(&split_public(&session).unwrap().preferences).unwrap();
+        assert!(!prefs.contains("screensaver"), "{prefs}");
+    }
+
+    #[test]
+    fn a_pick_round_trips_through_both_formats() {
+        for mode in [Screensaver::Off, Screensaver::Minutes2, Screensaver::Minutes20] {
+            let session = Session::default().with_screensaver(mode);
+            let json = serde_json::to_string(&session).unwrap();
+            assert!(json.contains("screensaver"), "{json}");
+            let round: Session = serde_json::from_str(&json).unwrap();
+            assert_eq!(round.screensaver(), mode);
+            let (public, protected) = split_canonical(&session).unwrap();
+            assert_eq!(join_canonical(&public, &protected).unwrap().screensaver(), mode);
+            assert_eq!(public_session(&public).screensaver(), mode);
+        }
+    }
+
+    #[test]
+    fn every_option_has_an_index_and_a_delay() {
+        for m in Screensaver::LADDER {
+            assert_eq!(Screensaver::from_index(m.index()), m);
+        }
+        assert_eq!(Screensaver::from_index(99), Screensaver::Minutes5);
+        assert_eq!(Screensaver::Off.minutes(), None);
+        assert_eq!(Screensaver::Minutes10.minutes(), Some(10));
     }
 }
 

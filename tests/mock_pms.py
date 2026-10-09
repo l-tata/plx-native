@@ -750,6 +750,50 @@ class Library:
         })
         return it
 
+    def shuffle_queue(self, it):
+        """The rows of a `shuffle=1` PlayQueue over a show or a season: every episode under it in a
+        shuffled order that depends only on the library seed and the container's ratingKey (never
+        the clock), so two servers started with one seed shuffle identically; anything else,
+        itself."""
+        if it["type"] == "show":
+            eps = [x for x in self.items.values()
+                   if x["type"] == "episode" and x["grandparentRatingKey"] == it["ratingKey"]]
+        elif it["type"] == "season":
+            eps = [x for x in self.items.values()
+                   if x["type"] == "episode" and x["parentRatingKey"] == it["ratingKey"]]
+        else:
+            return [it]
+        eps.sort(key=lambda x: (x["parentIndex"], x["index"]))
+        random.Random(f"{self.seed}:{it['ratingKey']}").shuffle(eps)
+        return eps
+
+    def add_second_versions(self):
+        """`--multi-version`: every generated movie and episode gains a SECOND `Media[]` version —
+        a 4K HEVC HDR10 copy beside its 1080p H.264 one — for the version picker. Appended, so
+        `Media[0]` (what a client without a picker plays) is unchanged."""
+        for it in self.items.values():
+            if it["type"] not in ("movie", "episode") or not it.get("Media"):
+                continue
+            first = it["Media"][0]
+            part = first["Part"][0]["id"] + 500_000
+            it["Media"] = list(it["Media"]) + [{
+                "id": int(it["ratingKey"]) + 500_000, "duration": it["duration"], "bitrate": 60000,
+                "width": 3840, "height": 2160, "aspectRatio": 1.78, "audioChannels": 6,
+                "audioCodec": "eac3", "videoCodec": "hevc", "videoResolution": "4k",
+                "container": "mkv", "videoFrameRate": "24p", "videoProfile": "main 10",
+                "Part": [{
+                    "id": part, "key": f"/library/parts/{part}/{1_700_000_000 + part}/file.mkv",
+                    "duration": it["duration"], "size": 66_571_993_088, "container": "mkv",
+                    "Stream": [
+                        {"id": part * 10 + 1, "streamType": 1, "codec": "hevc", "index": 0,
+                         "width": 3840, "height": 2160, "colorTrc": "smpte2084",
+                         "displayTitle": "4K HDR10 (HEVC Main 10)"},
+                        {"id": part * 10 + 2, "streamType": 2, "codec": "eac3", "index": 1,
+                         "channels": 6, "language": "en", "languageCode": "eng",
+                         "displayTitle": "English (EAC3 5.1)", "selected": True}],
+                }],
+            }]
+
     # --- derived state ---------------------------------------------------------------------
 
     def _roll_up(self):
@@ -766,6 +810,11 @@ class Library:
                 p = self.items[int(pk)]
                 p["leafCount"] += 1
                 p["viewedLeafCount"] += 1 if it.get("viewCount", 0) > 0 else 0
+            if it.get("lastViewedAt"):
+                # A show or season was last viewed when its latest episode was, as PMS reports it.
+                for pk in (it["parentRatingKey"], it["grandparentRatingKey"]):
+                    p = self.items[int(pk)]
+                    p["lastViewedAt"] = max(p.get("lastViewedAt", 0), it["lastViewedAt"])
         for it in self.items.values():
             if it["type"] == "season":
                 self.items[int(it["parentRatingKey"])]["childCount"] += 1
@@ -790,6 +839,19 @@ class Library:
         if a:
             rows = [it for it in rows if any(str(t["id"]) == a for t in
                     it.get("Role", []) + it.get("Director", []) + it.get("Writer", []))]
+        # The further filters the Filter menu offers (`browse::filters`), each matched the way PMS
+        # matches it: a year or decade, a rating, a studio by name, a director by tag id, a
+        # resolution bucket; `hdr=1` matches nothing here, which has no HDR file.
+        for field, match in (
+                ("year", lambda it, v: str(it.get("year")) == v),
+                ("decade", lambda it, v: str(it.get("year", 0) // 10 * 10) == v),
+                ("contentRating", lambda it, v: it.get("contentRating") == v),
+                ("studio", lambda it, v: it.get("studio") == v),
+                ("director", lambda it, v: any(str(t["id"]) == v for t in it.get("Director", []))),
+                ("resolution", lambda it, v: any(m.get("videoResolution") == v for m in it.get("Media", []))),
+                ("hdr", lambda it, v: False)):
+            if q.get(field):
+                rows = [it for it in rows if match(it, q[field])]
         c = q.get("collection")
         if c:
             rows = [it for it in rows if any(str(t["id"]) == c for t in it.get("Collection", []))]
@@ -806,6 +868,50 @@ class Library:
         }.get(field, lambda it: it["titleSort"])
         rows.sort(key=keyf, reverse=(direction == "desc"))
         return rows
+
+    def playlists(self):
+        """Two synthetic video playlists (ratingKeys 60001+): a few films, then films and
+        episodes — `/playlists?playlistType=video`, their metadata rows and their items."""
+        films = sorted((it for it in self.items.values() if it["type"] == "movie"),
+                       key=lambda it: int(it["ratingKey"]))
+        episodes = sorted((it for it in self.items.values() if it["type"] == "episode"),
+                          key=lambda it: int(it["ratingKey"]))
+        members = {60001: films[1:6], 60002: films[10:13] + episodes[:4]}
+        rows = []
+        for rk, items in members.items():
+            rows.append({"ratingKey": str(rk), "key": f"/playlists/{rk}/items", "type": "playlist",
+                         "title": "s%08x" % rk, "summary": "", "smart": False, "playlistType": "video",
+                         "composite": f"/playlists/{rk}/composite/1700000000",
+                         "leafCount": len(items), "duration": sum(it.get("duration", 0) for it in items)})
+        return rows, members
+
+    def filter_values(self, key, field):
+        """A further filter's value directory (`/library/sections/{k}/{field}`), or None for a
+        field this mock does not list."""
+        rows = [it for it in self.items.values() if it["librarySectionID"] == int(key)
+                and it["type"] in ("movie", "show")]
+        def tags(name):
+            seen = {}
+            for it in rows:
+                for t in it.get(name, []):
+                    seen.setdefault(str(t["id"]), t["tag"])
+            return [{"key": k, "title": v} for k, v in sorted(seen.items(), key=lambda kv: kv[1])]
+        def plain(values):
+            return [{"key": str(v), "title": str(v)} for v in sorted(set(values))]
+        if field == "year":
+            return plain(it["year"] for it in rows)
+        if field == "decade":
+            return [{"key": str(d), "title": f"{d}s"} for d in sorted({it["year"] // 10 * 10 for it in rows})]
+        if field == "contentRating":
+            return plain(it["contentRating"] for it in rows if it.get("contentRating"))
+        if field == "studio":
+            return plain(it["studio"] for it in rows if it.get("studio"))
+        if field == "resolution":
+            return [{"key": r, "title": r.upper() if r == "4k" else f"{r}p"}
+                    for r in sorted({m.get("videoResolution") for it in rows for m in it.get("Media", [])} - {None})]
+        if field in ("director", "actor"):
+            return tags("Director" if field == "director" else "Role")
+        return None
 
     def first_characters(self, key, q=None):
         """Counts in the unfiltered ascending titleSort order, exactly the rail's query —
@@ -1525,6 +1631,11 @@ class MockPms:
 
     def __init__(self, lib):
         self.lib = lib
+        # The plex.tv stand-in's watchlist (Discover's `/library/sections/watchlist/all`): guids,
+        # most recently added first. Built on the first read from the library (every seventh film
+        # and the second show) plus two catalog-only titles no library holds; edits last until the
+        # mock stops and land in the write log.
+        self.watchlist = None
         # `--home-hubs N` (#395): `/hubs` answers exactly N hubs; 0 keeps the library's own.
         self.home_hubs = 0
         # `--section-hubs N` (#412): `/hubs/sections/<id>` answers exactly N hubs; 0 keeps the
@@ -1532,6 +1643,10 @@ class MockPms:
         self.section_hubs = 0
         self.section_hubs_linked = 0
         self.lock = threading.Lock()
+        # PlayQueues by id, for GET /playQueues/{id}: the ordinary queue is always id 1 (what the
+        # recorded cases carry); a shuffle takes the next id from 101 up.
+        self.play_queues = {}
+        self.next_queue_id = 100
         self.requests = []  # (path, status) in arrival order, for the harness
         self.unknown = []
         self.writes = []
@@ -1576,6 +1691,39 @@ class MockPms:
         pairs = urllib.parse.parse_qsl(u.query, keep_blank_values=True)
         clean = [(k, "<redacted>" if "token" in k.lower() else v) for k, v in pairs]
         return urllib.parse.urlunsplit(("", "", u.path, urllib.parse.urlencode(clean), ""))
+
+    def watchlist_rows(self):
+        """The watchlist as Discover lists it: catalog rows keyed by the guid's tail."""
+        lib = self.lib
+        if self.watchlist is None:
+            films = sorted((it for it in lib.items.values() if it["type"] == "movie"),
+                           key=lambda it: int(it["ratingKey"]))
+            shows = sorted((it for it in lib.items.values() if it["type"] == "show"),
+                           key=lambda it: int(it["ratingKey"]))
+            self.watchlist = ([it["guid"] for it in films[2::7]] + [it["guid"] for it in shows[1:2]]
+                              + ["plex://movie/s%s" % hashlib.md5(b"watchlist-%d" % n).hexdigest()[:8]
+                                 for n in (1, 2)])
+        by_guid = {it.get("guid"): it for it in lib.items.values()}
+        rows = []
+        for guid in self.watchlist:
+            kind, _, tail = guid[len("plex://"):].partition("/")
+            it = by_guid.get(guid)
+            rows.append({"guid": guid, "ratingKey": tail, "type": kind,
+                         "title": it["title"] if it else "s" + tail[-8:],
+                         "year": it.get("year", 2001) if it else 2001})
+        return rows
+
+    def watchlist_edit(self, add, key):
+        lib = self.lib
+        self.watchlist_rows()
+        guid = next((it["guid"] for it in lib.items.values()
+                     if it.get("guid", "").rsplit("/", 1)[-1] == key),
+                    next((g for g in self.watchlist if g.rsplit("/", 1)[-1] == key), f"plex://movie/{key}"))
+        with self.lock:
+            if guid in self.watchlist:
+                self.watchlist.remove(guid)
+            if add:
+                self.watchlist.insert(0, guid)
 
     def note_write(self, method, path, body=b""):
         safe = self.safe_path(path)
@@ -1680,6 +1828,18 @@ class MockPms:
                                         "descKey": "titleSort:desc", "title": "Title"}]}]}
         return {"Type": [{"key": "/library/sections/1/all?type=1", "type": "movie", "title": "movie",
                           "active": True,
+                          # The section's Filter menu, as a 1.43 movie library advertises it.
+                          "Filter": [{"filter": f, "filterType": t, "key": f"/library/sections/1/{f}", "title": n,
+                                      "type": "filter"}
+                                     for f, t, n in (("genre", "string", "Genre"), ("year", "integer", "Year"),
+                                                     ("decade", "integer", "Decade"),
+                                                     ("contentRating", "string", "Content Rating"),
+                                                     ("resolution", "string", "Resolution"),
+                                                     ("hdr", "boolean", "HDR"),
+                                                     ("director", "string", "Director"),
+                                                     ("actor", "string", "Actor"),
+                                                     ("studio", "string", "Studio"),
+                                                     ("unwatched", "boolean", "Unplayed"))],
                           "Sort": [{"key": "titleSort", "defaultDirection": "asc", "title": "Title"},
                                    {"key": "addedAt", "defaultDirection": "desc", "title": "Date Added"},
                                    {"key": "originallyAvailableAt", "defaultDirection": "desc", "title": "Release Date"},
@@ -1741,10 +1901,11 @@ class MockPms:
             return rows[start:start + size], {"totalSize": len(rows), "offset": start}
 
         write_path = (p in ("/:/timeline", "/:/scrobble", "/:/unscrobble", "/:/progress",
+                            "/actions/addToWatchlist", "/actions/removeFromWatchlist",
                             "/actions/removeFromContinueWatching", "/status/sessions/close",
                             "/video/:/transcode/universal/stop", "/playQueues")
                       or p.startswith("/library/parts/")
-                      or (segs[:1] == ["playQueues"] and len(segs) == 2)
+                      or (segs[:1] == ["playQueues"] and len(segs) == 2 and method != "GET")
                       or (method == "PUT" and len(segs) == 4 and segs[:2] == ["library", "metadata"]
                           and segs[3] == "subtitles"))
         if write_path and not (method in ("GET", "HEAD") and p.startswith("/library/parts/")):
@@ -1795,6 +1956,13 @@ class MockPms:
                 return j({"error": "method not allowed"}, 405)
             with self.lock:
                 return j(dict(self.user_profile))
+        # plex.tv's Discover watchlist, answered by the same stand-in (`discover::watchlist_base`).
+        if p == "/library/sections/watchlist/all":
+            page, extra = paged(self.watchlist_rows())
+            return j(self.container(Metadata=page, **extra))
+        if p in ("/actions/addToWatchlist", "/actions/removeFromWatchlist") and method == "PUT":
+            self.watchlist_edit(p.endswith("addToWatchlist"), q.get("ratingKey", ""))
+            return j(self.container())
         if p == "/api/v2/home/users":
             return j({"users": home_roster(self.home_users)})
         if method == "POST" and p.startswith("/api/v2/home/users/") and p.endswith("/switch"):
@@ -1815,6 +1983,14 @@ class MockPms:
                                     version="1.41.0.0000-synthetic",
                                     myPlexSubscription=self.plex_pass,
                                     platform="Linux", myPlex=True))
+        if p == "/library/all":
+            # `find_by_guid`: which items of this server carry the guid (and, with `type`, of
+            # that metadata type) — "Also available" and the watchlist's library copies.
+            guid = q.get("guid", "")
+            kind = {"1": "movie", "2": "show", "4": "episode"}.get(q.get("type", ""))
+            rows = [it for it in lib.items.values()
+                    if guid and it.get("guid") == guid and (kind is None or it["type"] == kind)]
+            return j(self.container(Metadata=rows, size=len(rows)))
         if p == "/library/sections":
             return j(self.container(Directory=[dict(s, agent="tv.plex.agents.movie",
                                                     scanner="Plex Movie", language="en-US",
@@ -1848,9 +2024,29 @@ class MockPms:
                 return j(self.container(Directory=[{"key": str(g["id"]), "title": g["tag"],
                                                     "fastKey": f"/library/sections/{segs[2]}/all?genre={g['id']}"}
                                                    for g in lib.genres.values()]))
+            values = lib.filter_values(segs[2], d)
+            if values is not None:
+                return j(self.container(Directory=values))
             if d == "firstCharacter":
                 return j(self.container(Directory=lib.first_characters(segs[2], q)))
             return j(self.container(Directory=[]))
+        if p == "/playlists":
+            rows, _ = lib.playlists()
+            if q.get("playlistType", "video") != "video":
+                rows = []
+            return j(self.container(Metadata=rows, size=len(rows)))
+        if len(segs) == 3 and segs[0] == "playlists" and segs[2] == "items":
+            _, members = lib.playlists()
+            rk = int(segs[1]) if segs[1].isdigit() else -1
+            if rk not in members:
+                return j(self.container(Metadata=[]), 404)
+            page, extra = paged([dict(it, playlistItemID=n) for n, it in enumerate(members[rk], 1)])
+            return j(self.container(Metadata=page, **extra))
+        if len(segs) == 3 and segs[:2] == ["library", "metadata"] and segs[2].isdigit() \
+                and 60000 < int(segs[2]) < 60010:
+            rows, _ = lib.playlists()
+            row = next((r for r in rows if r["ratingKey"] == segs[2]), None)
+            return j(self.container(Metadata=[row] if row else []), 200 if row else 404)
         if len(segs) >= 3 and segs[:2] == ["library", "metadata"]:
             ids = segs[2]
             if len(segs) == 3:
@@ -2010,24 +2206,63 @@ class MockPms:
                         it["viewOffset"] = int(t)
                         it["lastViewedAt"] = int(time.time())
             return j(self.container())
+        if p == "/playQueues" and q.get("playlistID", "").isdigit():
+            # A playlist's queue: its items in order, the `key` item selected.
+            _, members = lib.playlists()
+            items = members.get(int(q["playlistID"]), [])
+            rows = [dict(x, playQueueItemID=n) for n, x in enumerate(items, start=1)]
+            start = q.get("key", "").rsplit("/", 1)[-1]
+            sel = next((r["playQueueItemID"] for r in rows if r["ratingKey"] == start), 1 if rows else 0)
+            return j(self.container(Metadata=rows, playQueueID=2, playQueueSelectedItemID=sel,
+                                    playQueueSelectedItemOffset=max(sel - 1, 0),
+                                    playQueueTotalCount=len(rows), playQueueVersion=1))
         if p == "/playQueues":
             uri = q.get("uri", "")
             rk = uri.rsplit("/", 1)[-1]
             it = lib.items.get(int(rk)) if rk.isdigit() else None
             # Only the demo library follows `continuous=1` past the item: the seeded library's
-            # queue of one is what the harness's recorded cases were taken against.
+            # queue of one is what the harness's recorded cases were taken against. A `shuffle=1`
+            # queue over a show or season is new, so it takes its OWN id range (100+) and leaves
+            # the ordinary queue's fixed id 1 — what those recordings carry — alone.
+            shuffled = q.get("shuffle") == "1" and it is not None and it["type"] in ("show", "season")
             if it is None:
                 queue = []
+            elif shuffled:
+                queue = lib.shuffle_queue(it)
             elif q.get("continuous") == "1" and isinstance(lib, CatalogLibrary):
                 queue = lib.continuous_queue(it)
             else:
                 queue = [it]
-            rows = [dict(x, playQueueItemID=n) for n, x in enumerate(queue, start=1)]
-            return j(self.container(Metadata=rows, playQueueID=1, playQueueSelectedItemID=1,
+            with self.lock:
+                if shuffled:
+                    self.next_queue_id += 1
+                    qid = self.next_queue_id
+                    base = qid * 1000  # item ids unique across queues, as PMS's are
+                else:
+                    qid, base = 1, 0
+                rows = [dict(x, playQueueItemID=base + n) for n, x in enumerate(queue, start=1)]
+                self.play_queues[qid] = rows
+            return j(self.container(Metadata=rows, playQueueID=qid,
+                                    playQueueSelectedItemID=rows[0]["playQueueItemID"] if rows else 0,
+                                    playQueueSelectedItemOffset=0, playQueueTotalCount=len(rows),
+                                    playQueueShuffled=shuffled, playQueueVersion=1))
+        if segs[:1] == ["playQueues"] and len(segs) == 2:
+            # GET /playQueues/{id}?center=&window=: the stored queue's window around `center`
+            # (spec: `window` rows each side; the selection is NOT moved by `center`).
+            qid = int(segs[1]) if segs[1].isdigit() else 1
+            with self.lock:
+                rows = list(self.play_queues.get(qid, []))
+            center = q.get("center", "")
+            ids = [r["playQueueItemID"] for r in rows]
+            at = ids.index(int(center)) if center.isdigit() and int(center) in ids else 0
+            window = int(q["window"]) if q.get("window", "").isdigit() else len(rows)
+            lo = at - window if q.get("includeBefore", "1") != "0" else at + 1
+            hi = at + window + 1 if q.get("includeAfter", "1") != "0" else at
+            shown = rows[max(lo, 0):max(hi, 0)]
+            return j(self.container(Metadata=shown, playQueueID=qid,
+                                    playQueueSelectedItemID=ids[0] if ids else 0,
                                     playQueueSelectedItemOffset=0, playQueueTotalCount=len(rows),
                                     playQueueVersion=1))
-        if segs[:1] == ["playQueues"] and len(segs) == 2:
-            return j(self.container(Metadata=[], playQueueID=int(segs[1]) if segs[1].isdigit() else 1))
         if p.startswith("/library/parts/"):
             part_id = int(segs[2]) if len(segs) > 2 and segs[2].isdigit() else -1
             if method == "PUT":
@@ -2288,7 +2523,7 @@ def serve(port, seed=1, host="127.0.0.1", verbose=False, movies=48, rail_fixture
           authorize_after=None, plex_pass=True, loudness_analysis=True,
           refuse_enhancements=False, ignore_enhancements=False, transcode_fixture=None,
           home_hubs=0, section_hubs=0, section_hubs_linked=0, decision_delay_ms=0,
-          home_users=1):
+          home_users=1, multi_version=False):
     """Start a mock PMS in a daemon thread; returns (server, pms). Loopback only by default: the
     app on the simulator is on this machine, and a LAN-facing listener would be one more thing
     the outbound guard has to reason about. `catalog` serves the demo library instead of a seed.
@@ -2319,6 +2554,8 @@ def serve(port, seed=1, host="127.0.0.1", verbose=False, movies=48, rail_fixture
     else:
         lib = Library(seed=seed, movies=movies, rail_fixture=rail_fixture, media=media,
                       extra_media=extra_media, loudness_analysis=loudness_analysis)
+    if multi_version:
+        lib.add_second_versions()
     pms = MockPms(lib)
     pms.plex_pass = plex_pass
     pms.home_hubs = home_hubs
@@ -2583,7 +2820,45 @@ def selftest():
 
     _selftest_plaintext_only_lan()
     _selftest_section_hubs()
+    _selftest_shuffle_queue()
     print("mock_pms selftest: ok")
+
+
+def _selftest_shuffle_queue():
+    """A `shuffle=1` PlayQueue over a show holds every episode, out of order but deterministically,
+    under its own id; GET /playQueues/{id} windows it around `center` without moving the
+    selection; the ordinary queue keeps id 1."""
+    import urllib.request
+    srv, pms = serve(0, seed=7)
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+    def call(path, method="GET"):
+        req = urllib.request.Request(base + path, data=b"" if method == "POST" else None, method=method)
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.load(r)["MediaContainer"]
+
+    show = next(it for it in pms.lib.items.values() if it["type"] == "show")
+    eps = sorted((x for x in pms.lib.items.values()
+                  if x["type"] == "episode" and x["grandparentRatingKey"] == show["ratingKey"]),
+                 key=lambda x: (x["parentIndex"], x["index"]))
+    uri = urllib.parse.quote(f"server://{pms.lib.machine}/com.plexapp.plugins.library/library/metadata/{show['ratingKey']}")
+    a = call(f"/playQueues?type=video&uri={uri}&shuffle=1&repeat=0", "POST")
+    b = call(f"/playQueues?type=video&uri={uri}&shuffle=1&repeat=0", "POST")
+    assert a["playQueueID"] > 100 and b["playQueueID"] == a["playQueueID"] + 1
+    order = [m["ratingKey"] for m in a["Metadata"]]
+    assert sorted(order) == sorted(e["ratingKey"] for e in eps), "every episode, once"
+    assert order != [e["ratingKey"] for e in eps], "shuffled"
+    assert order == [m["ratingKey"] for m in b["Metadata"]], "deterministic"
+    assert a["playQueueSelectedItemID"] == a["Metadata"][0]["playQueueItemID"]
+    ids = [m["playQueueItemID"] for m in a["Metadata"]]
+    w = call(f"/playQueues/{a['playQueueID']}?center={ids[3]}&window=1&includeBefore=1&includeAfter=1")
+    assert [m["playQueueItemID"] for m in w["Metadata"]] == ids[2:5]
+    assert w["playQueueSelectedItemID"] == ids[0], "center does not move the selection"
+    assert w["playQueueTotalCount"] == len(ids)
+    one = call(f"/playQueues?type=video&uri={urllib.parse.quote('server://m/x/library/metadata/' + eps[0]['ratingKey'])}&continuous=1&shuffle=0", "POST")
+    assert one["playQueueID"] == 1, "the ordinary queue keeps its fixed id"
+    assert not pms.unknown, pms.unknown
+    _teardown(srv)
 
 
 def _teardown(srv):
@@ -2711,6 +2986,8 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--movies", type=int, default=48, help="movie count, 0–1000 (keys must not overlap shows)")
     ap.add_argument("--rail-fixture", action="store_true", help="synthetic A/C/F/M/Z sort-title groups for rail tests")
+    ap.add_argument("--multi-version", action="store_true",
+                    help="give every movie and episode a second (4K HEVC HDR10) Media[] version, for the version picker")
     ap.add_argument("--media", type=pathlib.Path,
                     help="opt-in mockverify directory; ffprobe derives its stream metadata")
     ap.add_argument("--extra-media", type=pathlib.Path, action="append", default=[],
@@ -2805,6 +3082,7 @@ def main():
     try:
         srv, pms = serve(a.port, seed=a.seed, host=a.host, verbose=a.verbose,
                          movies=a.movies, rail_fixture=a.rail_fixture, media=a.media,
+                         multi_version=a.multi_version,
                          extra_media=a.extra_media, catalog=a.catalog, catalog_cache=a.catalog_cache,
                          hero=a.hero, plaintext_only_lan=a.plaintext_only_lan,
                          advertise_ip=a.advertise_ip, insecure_fail_mode=a.insecure_fail_mode,

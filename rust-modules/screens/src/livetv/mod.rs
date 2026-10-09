@@ -11,23 +11,34 @@
 //!   address field on the television's own keyboard, and — when a server is configured — *Try
 //!   again* and *Turn off Live TV*.
 //! * **Loading** — the first load of a configured server.
-//! * **Guide** — an info pane for the airing under the cursor over a grid of channel rows against
-//!   a two-hour time axis with a NOW marker. The cursor is a moment ([`grid::Cursor`]); OK tunes
-//!   the focused channel, digits jump to a channel number, CH▲/▼ page.
+//! * **Guide** — an info pane for the airing under the cursor (its artwork, title, episode, times,
+//!   how long is left, category and description, over a ground keyed from the artwork), a genre
+//!   strip ([`filter`]), and a grid of channel rows — each led by the channel's logo tile
+//!   (`plx_ui::channel_tile`) — against a two-hour time axis with a NOW marker. The cursor is a
+//!   moment ([`grid::Cursor`]); OK tunes the focused channel, digits jump to a channel number,
+//!   CH▲/▼ page. When the focused airing is a film or an episode in the viewer's Plex library
+//!   (`plx_data::livetv::plexmatch`, looked up once focus has rested on it for [`MATCH_DWELL_MS`]),
+//!   the pane says so and a HELD OK opens it there (`LiveTvReq::Detail`) to watch from the start.
 //!
 //! **Focus.** The page declares ONE focusable element to the engine ([`ELEM`]) and keeps its own
-//! cursor inside it — the guide's moment-and-row, or the setup's row — the way the person page's
-//! biography keeps its page (`person_bio.rs`). An UP the cursor cannot take (the first guide row,
-//! the first setup row) is returned to the engine, whose `Link` carries it to the strip; the
-//! strip's DOWN comes back the same way.
+//! cursor inside it — the guide's moment-and-row or its genre strip, or the setup's row — the way
+//! the person page's biography keeps its page (`person_bio.rs`). An UP the cursor cannot take (the
+//! genre strip, the first setup row) is returned to the engine, whose `Link` carries it to the
+//! top strip; the top strip's DOWN comes back the same way. On the guide the element is a CARD to
+//! the engine, so OK arms a press that can be held: a release tunes, a hold opens the Plex match.
 
+mod draw;
+pub mod filter;
 pub mod grid;
 
 use std::borrow::Cow;
 
 use crate::registry::{AppFx, HomeTab, LiveTvLike, LiveTvReq, PageMemory};
-use grid::Cursor;
-use plx_data::livetv::{Discovery, LiveTvCmd, LiveTvView, Status};
+use filter::Filter;
+use grid::{Cursor, Rows};
+use plx_data::livetv::guide::{Airing, Channel, Lineup};
+use plx_data::livetv::plexmatch::{Hit, Want};
+use plx_data::livetv::{Discovery, LiveTvCmd, LiveTvView, PlexMatch, Status};
 use plx_data::stores::{StoreCmd, StoreId};
 use plx_machine::machine::{
     Canon, Cx, Delivery, Edge, Effects, EntryId, FocusKey, Fx, GroupId, Handled, InputKind,
@@ -36,15 +47,13 @@ use plx_machine::machine::{
 use plx_machine::present::Provenance;
 use plx_ui::consts::{MARGIN_X, MARGIN_Y, SCR_H, SCR_W};
 use plx_ui::frame::Budget;
-use plx_ui::label::{HAlign, Label};
 use plx_ui::screen::{
     At, AxisMask, Dir, DrawFrame, EdgeRule, ElemKind, Enter, FocusTarget, Focusable, GroupKind,
     GroupSpec, Link, Placed, RenderStrategy, Screen, ScreenEvent, Seat, Step,
 };
 use plx_ui::text_buffer::TextBuffer;
-use plx_ui::text_view::TextView;
-use plx_ui::widgets::{StatusKind, StatusOverlay, TabPill};
-use plx_ui::{theme, Painter, Rect, View};
+use plx_ui::widgets::{StatusKind, StatusOverlay};
+use plx_ui::{theme, Rect};
 
 /// The page's one engine element, and its group.
 pub const ELEM: u32 = 1;
@@ -56,26 +65,48 @@ pub const STRIP_LIVETV_ELEM: u32 = plx_ui::dispatch::STRIP_BASE + 5;
 /// How long a typed channel number waits for its next digit.
 const DIGIT_MS: u32 = 1_500;
 
+/// How long a guide airing must hold the cursor before it is looked up in the viewer's Plex
+/// library: long enough that walking across the grid asks nothing, short enough that the hint is
+/// there by the time the viewer has read the title.
+pub const MATCH_DWELL_MS: u32 = 600;
+
 /// The fields [`LiveTvScreen`] canonicalises, for the recorder's shape pin (§5.4).
-pub const SHAPE: &str = "LiveTvScreen{entry:u32,instance:u32,cursor:{row:u64,at:i64,window:i64,top:u64,follow:bool},setup_sel:u64,force_setup:bool,editing:bool,address:str,typed:str,searched:bool,remembered:str,seated:bool}";
+pub const SHAPE: &str = "LiveTvScreen{entry:u32,instance:u32,cursor:{row:u64,at:i64,window:i64,top:u64,follow:bool},setup_sel:u64,force_setup:bool,editing:bool,address:str,typed:str,searched:bool,remembered:str,seated:bool,filter:str,on_strip:bool,strip_sel:u64}";
 
 // ---- geometry ----------------------------------------------------------------------------------
 
 const TOP: f32 = plx_ui::widgets::TOP_BAR_BOTTOM + theme::space::MD;
-/// The guide's info pane: channel line, title, facts, two lines of description.
-const INFO_W: f32 = 1_400.0;
-/// The time axis band and the rows under it.
-const AXIS_TOP: f32 = 432.0;
+/// The guide's info pane: its text column on the left, the artwork on the right edge.
+const INFO_H: f32 = 216.0;
+const INFO_W: f32 = 1_200.0;
+/// The artwork's box: as tall as a 16:9 picture of [`ART_MAX_W`]; a poster stands narrower in it.
+const ART_H: f32 = 180.0;
+const ART_MAX_W: f32 = ART_H * 16.0 / 9.0;
+/// The genre strip.
+const STRIP_TOP: f32 = TOP + INFO_H + theme::space::MD;
+const STRIP_H: f32 = 48.0;
+const CHIP_GAP: f32 = theme::space::SM;
+/// The longest a guide category's chip may be before its label is cut (a genre's own word always
+/// fits: `livetv_chip_labels_fit` holds it).
+const CHIP_LABEL_MAX: f32 = 260.0;
+/// The time axis band and the rows under it. The axis is drawn once, above the rows, and never
+/// scrolls: paging moves the rows under it.
+const AXIS_TOP: f32 = STRIP_TOP + STRIP_H + theme::space::SM;
 const AXIS_H: f32 = 40.0;
 const ROWS_TOP: f32 = AXIS_TOP + AXIS_H;
 const ROW_H: f32 = 80.0;
 const ROW_GAP: f32 = 8.0;
 const CELL_GAP: f32 = 6.0;
 const CELL_RAD: f32 = theme::space::XS;
-const CH_W: f32 = 280.0;
+/// The channel column: the logo tile (16:9 at the row's height) and the name beside it.
+const CH_W: f32 = 340.0;
+const TILE_W: f32 = (ROW_H - ROW_GAP) * 16.0 / 9.0;
 const CELLS_X: f32 = MARGIN_X + CH_W + theme::space::SM;
 const CELLS_W: f32 = SCR_W - MARGIN_X - CELLS_X;
 const NOW_W: f32 = 3.0;
+/// A programme cell's genre edge: its width and its inset from the cell's corners.
+const EDGE_W: f32 = 4.0;
+const EDGE_INSET: f32 = 10.0;
 /// The setup page's controls.
 const SETUP_LIST_TOP: f32 = 470.0;
 const SETUP_ROW_H: f32 = 64.0;
@@ -163,6 +194,22 @@ pub struct LiveTvScreen {
     /// The cursor has been put on [`Self::remembered`]'s row — once, the first time the guide has
     /// rows to put it on; after that the cursor is the viewer's.
     seated: bool,
+    /// The genre the grid is narrowed to ([`filter`]).
+    filter: Filter,
+    /// The cursor is on the genre strip rather than in the grid, on chip [`Self::strip_sel`].
+    on_strip: bool,
+    strip_sel: usize,
+    /// The lineup rows on show under [`Self::filter`] — derived (the lineup, the filter and the
+    /// window decide it, [`filter::visible`]) and kept with what it was derived from, so the cursor
+    /// can be re-seated on its channel when it changes.
+    rows: Vec<usize>,
+    rows_from: Option<(u64, i64, Filter)>,
+    /// The strip's chips for the lineup at a revision ([`filter::chips`]), derived likewise.
+    chips: Vec<Filter>,
+    chips_from: Option<u64>,
+    /// The Plex lookup's dwell: the [`Want::key`] the cursor rests on, since when, and when it was
+    /// last asked (a lookup refused because another is in flight is asked again a dwell later).
+    rest: Option<(String, u32, Option<u32>)>,
     /// The wall-clock minute last drawn, so the NOW marker moves once a minute and no more often.
     minute: i64,
     ground: plx_ui::widgets::PageGround,
@@ -184,6 +231,14 @@ impl LiveTvScreen {
             searched: false,
             remembered: plx_plex::plex::session::peek().livetv_channel().to_owned(),
             seated: false,
+            filter: Filter::All,
+            on_strip: false,
+            strip_sel: 0,
+            rows: Vec::new(),
+            rows_from: None,
+            chips: Vec::new(),
+            chips_from: None,
+            rest: None,
             minute: now / 60_000,
             ground: plx_ui::widgets::PageGround::new(),
         }
@@ -240,6 +295,71 @@ impl LiveTvScreen {
 
     fn face<H: LiveTvLike>(&self, cx: &Cx<'_, H>) -> Face {
         Face::of(H::livetv(cx), self.force_setup)
+    }
+
+    // ---- the guide's derived rows ----------------------------------------------------------------
+
+    /// The rows on show, as the cursor walks them.
+    fn shown<'a>(&'a self, lineup: &'a Lineup) -> Rows<'a> {
+        Rows::some(lineup, &self.rows)
+    }
+
+    /// Re-derive [`Self::rows`] and [`Self::chips`] when what they come from moved, keeping the
+    /// cursor on its channel (or the next one shown) and the strip's cursor on a chip that exists.
+    /// A filter whose chip the reloaded guide no longer offers falls back to *All*. `true` when
+    /// the rows changed.
+    fn derive(&mut self, view: LiveTvView<'_>) -> bool {
+        let lineup = view.lineup();
+        let revision = view.revision();
+        if self.chips_from != Some(revision) {
+            self.chips = filter::chips(lineup);
+            self.chips_from = Some(revision);
+            if !self.chips.contains(&self.filter) {
+                self.filter = Filter::All;
+            }
+        }
+        self.strip_sel = self.strip_sel.min(self.chips.len().saturating_sub(1));
+        let from = (revision, self.cursor.window_ms, self.filter.clone());
+        if self.rows_from.as_ref() == Some(&from) {
+            return false;
+        }
+        let rows = filter::visible(lineup, &self.filter, self.cursor.window_ms, self.cursor.window_ms + grid::WINDOW_MS);
+        self.rows_from = Some(from);
+        if rows == self.rows {
+            return false;
+        }
+        let was = self.rows.get(self.cursor.row).copied();
+        self.rows = rows;
+        self.cursor.row = filter::reseat(&self.rows, was);
+        self.cursor.fit(Rows::some(lineup, &self.rows), visible_rows());
+        true
+    }
+
+    /// The channel and airing under the cursor, when the cursor is in the grid.
+    fn focus_airing<'a>(&self, lineup: &'a Lineup) -> Option<(&'a Channel, Option<&'a Airing>)> {
+        let ch = lineup.channels.get(*self.rows.get(self.cursor.row)?)?;
+        Some((ch, ch.airing_at(self.cursor.at_ms).map(|i| &ch.airings[i])))
+    }
+
+    /// What is known in the viewer's Plex library about the airing under the cursor.
+    fn focus_match<'a>(&self, view: LiveTvView<'a>) -> Option<&'a Hit> {
+        if self.on_strip {
+            return None;
+        }
+        let (_, airing) = self.focus_airing(view.lineup())?;
+        let want = Want::of(airing?)?;
+        match view.plex_match(&want.key())? {
+            PlexMatch::Found(hit) => Some(hit),
+            PlexMatch::Looking | PlexMatch::None => None,
+        }
+    }
+
+    /// Tune the channel under the cursor.
+    fn tune<H: LiveTvLike>(&self, view: LiveTvView<'_>, fx: &mut Effects<'_, H>) -> Handled {
+        if let Some(index) = self.shown(view.lineup()).lineup_index(self.cursor.row) {
+            Self::ask(LiveTvReq::Tune { index }, fx);
+        }
+        Handled::Yes
     }
 
     /// OK on the setup row under the cursor.
@@ -301,15 +421,58 @@ impl LiveTvScreen {
         Handled::Yes
     }
 
-    /// A key while this page's element holds focus. `Handled::No` hands it to the engine (the
-    /// strip link, the strip's own keys).
+    /// A key on the genre strip.
+    fn key_chips<H: LiveTvLike>(&mut self, key: Key, view: LiveTvView<'_>, measure: &dyn plx_machine::machine::Measure, fx: &mut Effects<'_, H>) -> Handled {
+        let n = draw::strip_fit(&self.chips, measure);
+        match key {
+            // The top strip's, through the engine's link.
+            Key::Up => return Handled::No,
+            Key::Down => {
+                if self.rows.is_empty() {
+                    return Handled::Yes;
+                }
+                self.on_strip = false;
+            }
+            Key::Left => {
+                if self.strip_sel == 0 {
+                    return Handled::Yes;
+                }
+                self.strip_sel -= 1;
+            }
+            Key::Right => {
+                if self.strip_sel + 1 >= n {
+                    return Handled::Yes;
+                }
+                self.strip_sel += 1;
+            }
+            Key::Ok => {
+                let Some(chosen) = self.chips.get(self.strip_sel).cloned() else { return Handled::Yes };
+                if chosen != self.filter {
+                    self.filter = chosen;
+                    self.derive(view);
+                }
+            }
+            Key::Back => {
+                Self::ask(LiveTvReq::Back, fx);
+                return Handled::Yes;
+            }
+            Key::Other => return Handled::No,
+        }
+        fx.invalidate(Provenance::Input);
+        Handled::Yes
+    }
+
+    /// A key while this page's element holds focus on the guide. `Handled::No` hands it to the
+    /// engine (the top strip's link; OK, which the engine arms as a holdable press).
     fn key_guide<H: LiveTvLike>(&mut self, key: Key, sym: u32, wcode: u32, now_ms: u32, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
         let view = H::livetv(cx);
+        self.derive(view);
         let lineup = view.lineup();
         let wall = plx_base::wallclock::now_ms();
         let visible = visible_rows();
         if let Some(dir) = plx_ui::consts::page_dir(sym, wcode) {
-            if self.cursor.page(lineup, dir, visible) {
+            self.on_strip = false;
+            if self.cursor.page(Rows::some(lineup, &self.rows), dir, visible) {
                 fx.invalidate(Provenance::Input);
             }
             return Handled::Yes;
@@ -322,28 +485,38 @@ impl LiveTvScreen {
                 self.typed.push(d as char);
             }
             self.typed_at = now_ms;
-            if let Some(row) = lineup.index_for_typed(&self.typed) {
-                self.cursor.go_to_row(row, visible);
+            if let Some(index) = lineup.index_for_typed(&self.typed) {
+                // A channel the filter hides is still the channel asked for: the filter gives way.
+                if !self.rows.contains(&index) {
+                    self.filter = Filter::All;
+                    self.derive(view);
+                }
+                if let Some(row) = self.rows.iter().position(|&r| r == index) {
+                    self.on_strip = false;
+                    self.cursor.go_to_row(row, visible);
+                }
             }
             fx.invalidate(Provenance::Input);
             return Handled::Yes;
         }
+        if self.on_strip {
+            return self.key_chips(key, view, cx.measure, fx);
+        }
+        let rows = Rows::some(lineup, &self.rows);
         let moved = match key {
             Key::Up => {
-                if !self.cursor.step_row(lineup, -1, visible) {
-                    return Handled::No;
+                if !self.cursor.step_row(rows, -1, visible) {
+                    // The first row's UP reaches the genre strip, on the chip that is in force.
+                    self.on_strip = true;
+                    self.strip_sel = self.chips.iter().position(|c| *c == self.filter).unwrap_or(0);
                 }
                 true
             }
-            Key::Down => self.cursor.step_row(lineup, 1, visible),
-            Key::Left => self.cursor.left(lineup, wall),
-            Key::Right => self.cursor.right(lineup, wall),
-            Key::Ok => {
-                if !lineup.is_empty() {
-                    Self::ask(LiveTvReq::Tune { index: self.cursor.row.min(lineup.len() - 1) }, fx);
-                }
-                return Handled::Yes;
-            }
+            Key::Down => self.cursor.step_row(rows, 1, visible),
+            Key::Left => self.cursor.left(rows, wall),
+            Key::Right => self.cursor.right(rows, wall),
+            // Armed by the engine as a press: its release tunes, its hold opens the Plex match.
+            Key::Ok => return if self.rows.is_empty() { Handled::Yes } else { Handled::No },
             Key::Back => {
                 Self::ask(LiveTvReq::Back, fx);
                 return Handled::Yes;
@@ -351,6 +524,8 @@ impl LiveTvScreen {
             Key::Other => return Handled::No,
         };
         if moved {
+            // A sideways move can slide the window, which can change the rows a filter keeps.
+            self.derive(view);
             fx.invalidate(Provenance::Input);
         }
         Handled::Yes
@@ -414,16 +589,19 @@ impl LiveTvScreen {
         Handled::Yes
     }
 
-    fn tick<H: LiveTvLike>(&mut self, now_ms: u32, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) {
+    fn tick<H: LiveTvLike>(&mut self, now_ms: u32, dt: f32, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) {
         let view = H::livetv(cx);
         let wall = plx_base::wallclock::now_ms();
         if self.cursor.tick(wall) {
             // A following cursor moves every frame; only the minute is drawn.
         }
-        self.cursor.fit(view.lineup(), visible_rows());
+        if self.derive(view) {
+            fx.invalidate(Provenance::Lifecycle);
+        }
+        self.cursor.fit(Rows::some(view.lineup(), &self.rows), visible_rows());
         if !self.seated && !view.lineup().is_empty() {
             self.seated = true;
-            if let Some(row) = view.lineup().index_of_number(&self.remembered) {
+            if let Some(row) = view.lineup().index_of_number(&self.remembered).and_then(|i| self.rows.iter().position(|&r| r == i)) {
                 self.cursor.go_to_row(row, visible_rows());
                 fx.invalidate(Provenance::Lifecycle);
             }
@@ -445,6 +623,51 @@ impl LiveTvScreen {
         if !view.configured() && !self.searched && matches!(view.discovery(), Discovery::Idle) {
             self.searched = true;
             Self::store(LiveTvCmd::Discover, fx);
+        }
+        let guide = self.face(cx) == Face::Guide;
+        self.key_ground(view, guide, dt);
+        self.dwell(view, guide && self.focused(cx), now_ms, fx);
+    }
+
+    /// Dissolve the page ground toward the focused airing's artwork (its programme picture, else
+    /// its channel's logo — exactly the picture the info pane draws, at the same key): HELD while
+    /// that picture is on its way, the flat surface when the airing has no picture at all.
+    fn key_ground(&mut self, view: LiveTvView<'_>, guide: bool, dt: f32) {
+        let art = if guide { self.focus_airing(view.lineup()).map(|(ch, a)| draw::info_art(ch, a)) } else { None };
+        match art {
+            Some(Some(url)) => {
+                let corners = plx_ui::tex::corners_on(plx_ui::tex::PLAIN_URL, url, ART_MAX_W as i32, ART_H as i32, false);
+                self.ground.key(corners, plx_ui::widgets::PageGround::CARD_W, dt);
+            }
+            _ => self.ground.key_target([theme::SURFACE_APP; 4], dt),
+        }
+    }
+
+    /// The Plex lookup's dwell: once the cursor has rested on one airing for [`MATCH_DWELL_MS`],
+    /// ask the store to look it up (it answers from its cache, or starts one lookup at a time).
+    fn dwell<H: LiveTvLike>(&mut self, view: LiveTvView<'_>, on: bool, now_ms: u32, fx: &mut Effects<'_, H>) {
+        let want = if on && !self.on_strip {
+            self.focus_airing(view.lineup()).and_then(|(_, a)| a).and_then(Want::of)
+        } else {
+            None
+        };
+        let Some(want) = want else {
+            self.rest = None;
+            return;
+        };
+        let key = want.key();
+        match &mut self.rest {
+            Some((k, since, asked)) if *k == key => {
+                let due = match asked {
+                    Some(at) => now_ms.wrapping_sub(*at) >= MATCH_DWELL_MS,
+                    None => now_ms.wrapping_sub(*since) >= MATCH_DWELL_MS,
+                };
+                if due && view.plex_match(&key).is_none() {
+                    *asked = Some(now_ms);
+                    Self::store(LiveTvCmd::Match(want), fx);
+                }
+            }
+            _ => self.rest = Some((key, now_ms, None)),
         }
     }
 }
@@ -482,12 +705,14 @@ impl<H: LiveTvLike> Machine<H> for LiveTvScreen {
                 Handled::Yes
             }
             ScreenEvent::StoreChanged(store, _) if *store == StoreId::LiveTv.ord() => {
-                self.cursor.fit(H::livetv(cx).lineup(), visible_rows());
+                let view = H::livetv(cx);
+                self.derive(view);
+                self.cursor.fit(Rows::some(view.lineup(), &self.rows), visible_rows());
                 fx.invalidate(Provenance::Landing(MachineId::Store(StoreId::LiveTv.ord())));
                 Handled::Yes
             }
             ScreenEvent::Tick(t) => {
-                self.tick(t.ms, cx, fx);
+                self.tick(t.ms, t.dt(), cx, fx);
                 Handled::Yes
             }
             ScreenEvent::Activate(elem) => {
@@ -497,7 +722,8 @@ impl<H: LiveTvLike> Machine<H> for LiveTvScreen {
                             self.activate_setup(cx, fx);
                             Handled::Yes
                         }
-                        Face::Guide => self.key_guide(Key::Ok, 0, 0, cx.tick.ms, cx, fx),
+                        Face::Guide if self.on_strip => self.key_chips(Key::Ok, H::livetv(cx), cx.measure, fx),
+                        Face::Guide => self.tune(H::livetv(cx), fx),
                         Face::Loading => Handled::Yes,
                     };
                 }
@@ -505,6 +731,21 @@ impl<H: LiveTvLike> Machine<H> for LiveTvScreen {
             }
             ScreenEvent::PressCommit(_) => match cx.focus.current {
                 Some(key) if key.elem >= plx_ui::dispatch::STRIP_BASE => self.activate_strip(key.elem, fx),
+                Some(key) if key == self.key() && self.face(cx) == Face::Guide && !self.on_strip => self.tune(H::livetv(cx), fx),
+                _ => Handled::No,
+            },
+            // A held OK on an airing that is in the viewer's Plex library opens it there; on any
+            // other airing the hold is just a slow press, and tunes.
+            ScreenEvent::PressHold(_) => match cx.focus.current {
+                Some(key) if key == self.key() && self.face(cx) == Face::Guide && !self.on_strip => {
+                    match self.focus_match(H::livetv(cx)) {
+                        Some(hit) => Self::ask(LiveTvReq::Detail { sid: hit.sid, rk: hit.rk.clone() }, fx),
+                        None => {
+                            self.tune(H::livetv(cx), fx);
+                        }
+                    }
+                    Handled::Yes
+                }
                 _ => Handled::No,
             },
             ScreenEvent::Input(input) => match &input.kind {
@@ -548,7 +789,10 @@ impl<H: LiveTvLike> Machine<H> for LiveTvScreen {
 }
 
 impl<H: LiveTvLike> Focusable<H> for LiveTvScreen {
-    fn groups(&self, _cx: &Cx<'_, H>, out: &mut Vec<GroupSpec>) {
+    fn groups(&self, cx: &Cx<'_, H>, out: &mut Vec<GroupSpec>) {
+        // On the guide the element is a CARD to the engine, so OK arms a press that can be HELD
+        // (the Plex match); a setup row activates on the down edge like any bare element.
+        let elem = if self.face(cx) == Face::Guide && !self.on_strip { ElemKind::Card } else { ElemKind::Bare };
         out.push(GroupSpec {
             id: GROUP,
             kind: GroupKind::Free,
@@ -557,7 +801,7 @@ impl<H: LiveTvLike> Focusable<H> for LiveTvScreen {
             edge: [EdgeRule::Stop; 4],
             extent: Rect::new(MARGIN_X, TOP, SCR_W - 2.0 * MARGIN_X, SCR_H - TOP - MARGIN_Y),
             len: 1,
-            elem: ElemKind::Bare,
+            elem,
         });
     }
     fn group_of(&self, key: &u32, _cx: &Cx<'_, H>) -> Option<GroupId> {
@@ -571,6 +815,10 @@ impl<H: LiveTvLike> Focusable<H> for LiveTvScreen {
             return None;
         }
         let rect = match self.face(cx) {
+            Face::Guide if self.on_strip => draw::strip_rects(&self.chips, cx.measure)
+                .get(self.strip_sel)
+                .copied()
+                .unwrap_or(Rect::new(MARGIN_X, STRIP_TOP, CH_W, STRIP_H)),
             Face::Guide => self.focus_cell_rect(H::livetv(cx)),
             Face::Setup => setup_row_rect(self.setup_sel),
             Face::Loading => Rect::new(MARGIN_X, TOP, SCR_W - 2.0 * MARGIN_X, ROW_H),
@@ -593,11 +841,13 @@ impl LogicalState for LiveTvScreen {
         c.u64(self.setup_sel as u64).bool(self.force_setup).bool(self.editing)
             .str(self.address.text()).str(&self.typed).bool(self.searched)
             .str(&self.remembered).bool(self.seated);
+        c.str(&self.filter.canon()).bool(self.on_strip).u64(self.strip_sel as u64);
     }
     fn probe(&self, out: &mut String) {
         out.push_str(&format!(
-            "livetv row={} top={} setup_sel={} force_setup={} editing={}",
-            self.cursor.row, self.cursor.top, self.setup_sel, self.force_setup, self.editing
+            "livetv row={} top={} setup_sel={} force_setup={} editing={} filter={} on_strip={} strip_sel={}",
+            self.cursor.row, self.cursor.top, self.setup_sel, self.force_setup, self.editing,
+            self.filter.canon(), self.on_strip, self.strip_sel
         ));
     }
 }
@@ -651,8 +901,6 @@ impl<H: LiveTvLike> Screen<H> for LiveTvScreen {
     }
 }
 
-// ---- drawing --------------------------------------------------------------------------------------
-
 fn guide_frame() -> Rect {
     Rect::new(MARGIN_X, TOP, SCR_W - 2.0 * MARGIN_X, SCR_H - TOP - MARGIN_Y)
 }
@@ -667,241 +915,6 @@ fn x_of(t: i64, window: i64) -> f32 {
 
 fn row_y(row: usize, top: usize) -> f32 {
     ROWS_TOP + (row.saturating_sub(top)) as f32 * ROW_H
-}
-
-/// One line of text in `frame`, cut to fit with an ellipsis.
-fn line(p: Painter, measure: &dyn plx_machine::machine::Measure, text: &str, sz: i32, col: [f32; 4], bold: bool, frame: Rect, h: HAlign) {
-    if text.is_empty() || frame.w <= 0.0 {
-        return;
-    }
-    let fitted = measure.fit_line(text, frame.w, sz, bold);
-    let label = Label::new(fitted.as_ptr(), sz, col).h(h);
-    if bold { label.bold().draw(p, frame) } else { label.draw(p, frame) };
-}
-
-impl LiveTvScreen {
-    /// The rect of the guide cell under the cursor (or of the focused row's band when the row has
-    /// nothing listed there) — what the engine places focus at.
-    fn focus_cell_rect(&self, view: LiveTvView<'_>) -> Rect {
-        let c = &self.cursor;
-        let y = row_y(c.row, c.top);
-        let window_end = c.window_ms + grid::WINDOW_MS;
-        let cell = view
-            .lineup()
-            .channels
-            .get(c.row)
-            .and_then(|ch| ch.airing_at(c.at_ms).map(|i| &ch.airings[i]))
-            .map(|a| (a.start_ms.max(c.window_ms), a.stop_ms.min(window_end)));
-        match cell {
-            Some((x0, x1)) => {
-                let (l, r) = (x_of(x0, c.window_ms), x_of(x1, c.window_ms));
-                Rect::new(l + CELL_GAP * 0.5, y, (r - l - CELL_GAP).max(1.0), ROW_H - ROW_GAP)
-            }
-            None => Rect::new(CELLS_X, y, CELLS_W, ROW_H - ROW_GAP),
-        }
-    }
-
-    fn draw_guide(&self, p: Painter, view: LiveTvView<'_>, focused: bool, measure: &dyn plx_machine::machine::Measure) {
-        let lineup = view.lineup();
-        if lineup.is_empty() {
-            StatusOverlay::new(guide_frame(), plx_platform::i18n::msg::livetv_empty_c(), StatusKind::Empty)
-                .draw_measured(&plx_ui::Env::inert(), p, measure);
-            return;
-        }
-        let c = self.cursor;
-        let now = plx_base::wallclock::now_ms();
-        self.draw_info(p, view, measure);
-        // The time axis: a label every half hour.
-        for k in 0..(grid::WINDOW_MS / grid::SLOT_MS) {
-            let t = c.window_ms + k * grid::SLOT_MS;
-            let x = x_of(t, c.window_ms);
-            line(p, measure, &plx_ui::fmt::wall_time(t), theme::size::CAPTION, theme::TEXT_TERTIARY, false,
-                Rect::new(x + theme::space::XS, AXIS_TOP, grid::SLOT_MS as f32 / grid::WINDOW_MS as f32 * CELLS_W - theme::space::XS, AXIS_H), HAlign::Left);
-        }
-        if !self.typed.is_empty() {
-            line(p, measure, &self.typed, theme::size::HEADLINE, theme::TEXT_PRIMARY, true,
-                Rect::new(MARGIN_X, AXIS_TOP, CH_W, AXIS_H), HAlign::Left);
-        }
-        let window_end = c.window_ms + grid::WINDOW_MS;
-        let visible = visible_rows();
-        for row in c.top..(c.top + visible).min(lineup.len()) {
-            let ch = &lineup.channels[row];
-            let y = row_y(row, c.top);
-            let on_row = focused && row == c.row;
-            let band = ROW_H - ROW_GAP;
-            // The channel column.
-            let chr = Rect::new(MARGIN_X, y, CH_W, band);
-            let fill = if on_row { theme::GUIDE_CELL_NOW } else { theme::GUIDE_CELL };
-            p.rect(chr, CELL_RAD, fill, fill, 0.0);
-            let num_w = measure.width_str(&ch.number, theme::size::BODY, true) + theme::space::SM;
-            line(p, measure, &ch.number, theme::size::BODY, theme::TEXT_PRIMARY, true,
-                Rect::new(chr.x + theme::space::SM, y, num_w, band), HAlign::Left);
-            line(p, measure, &ch.name, theme::size::LABEL, theme::TEXT_SECONDARY, false,
-                Rect::new(chr.x + theme::space::SM + num_w, y, chr.w - 2.0 * theme::space::SM - num_w, band), HAlign::Left);
-            // The airings in the window.
-            let mut any = false;
-            for a in ch.airings.iter().filter(|a| a.stop_ms > c.window_ms && a.start_ms < window_end) {
-                any = true;
-                let (l, r) = (x_of(a.start_ms.max(c.window_ms), c.window_ms), x_of(a.stop_ms.min(window_end), c.window_ms));
-                let cell = Rect::new(l + CELL_GAP * 0.5, y, (r - l - CELL_GAP).max(1.0), band);
-                let is_focus = on_row && a.covers(c.at_ms);
-                let on_now = a.covers(now);
-                let (fill, ink, sub) = if is_focus {
-                    (theme::ACCENT, theme::ACCENT_INK, theme::ACCENT_INK)
-                } else if on_now {
-                    (theme::GUIDE_CELL_NOW, theme::TEXT_PRIMARY, theme::TEXT_SECONDARY)
-                } else {
-                    (theme::GUIDE_CELL, theme::TEXT_PRIMARY, theme::TEXT_SECONDARY)
-                };
-                p.rect(cell, CELL_RAD, fill, fill, 0.0);
-                if on_now && !is_focus {
-                    let elapsed = (x_of(now, c.window_ms) - cell.x).clamp(0.0, cell.w);
-                    if elapsed > 0.0 {
-                        p.rect(Rect::new(cell.x, cell.y, elapsed, cell.h), CELL_RAD, theme::GUIDE_CELL_ELAPSED, theme::GUIDE_CELL_ELAPSED, 0.0);
-                    }
-                }
-                let inner = Rect::new(cell.x + theme::space::SM, cell.y + theme::space::XS, cell.w - 2.0 * theme::space::SM, cell.h * 0.5 - theme::space::XS);
-                let title = if a.title.is_empty() { plx_platform::i18n::msg::livetv_no_info() } else { a.title.as_str() };
-                line(p, measure, title, theme::size::LABEL, ink, true, inner, HAlign::Left);
-                let times = format!("{} – {}", plx_ui::fmt::wall_time(a.start_ms), plx_ui::fmt::wall_time(a.stop_ms));
-                line(p, measure, &times, theme::size::MICRO, sub, false,
-                    Rect::new(inner.x, cell.y + cell.h * 0.5, inner.w, cell.h * 0.5 - theme::space::XS), HAlign::Left);
-            }
-            if !any {
-                let cell = Rect::new(CELLS_X, y, CELLS_W, band);
-                let (fill, ink) = if on_row { (theme::ACCENT, theme::ACCENT_INK) } else { (theme::GUIDE_CELL, theme::TEXT_TERTIARY) };
-                p.rect(cell, CELL_RAD, fill, fill, 0.0);
-                line(p, measure, plx_platform::i18n::msg::livetv_no_info(), theme::size::LABEL, ink, false,
-                    Rect::new(cell.x + theme::space::SM, y, cell.w - 2.0 * theme::space::SM, band), HAlign::Left);
-            }
-        }
-        // NOW.
-        if now >= c.window_ms && now < window_end {
-            let x = x_of(now, c.window_ms);
-            let rows_h = (visible.min(lineup.len())) as f32 * ROW_H - ROW_GAP;
-            p.rect(Rect::new(x - NOW_W * 0.5, AXIS_TOP + AXIS_H * 0.5, NOW_W, rows_h + AXIS_H * 0.5), NOW_W * 0.5, theme::GUIDE_NOW, theme::GUIDE_NOW, 0.0);
-        }
-    }
-
-    /// The info pane: the focused airing's channel, title, facts and description.
-    fn draw_info(&self, p: Painter, view: LiveTvView<'_>, measure: &dyn plx_machine::machine::Measure) {
-        let c = self.cursor;
-        let Some(ch) = view.lineup().channels.get(c.row) else { return };
-        let airing = ch.airing_at(c.at_ms).map(|i| &ch.airings[i]);
-        let x = MARGIN_X;
-        let mut y = TOP;
-        let channel = format!("{} \u{b7} {}", ch.number, ch.name);
-        let cap = measure.line_h(theme::size::CAPTION);
-        line(p, measure, &channel, theme::size::CAPTION, theme::TEXT_SECONDARY, false, Rect::new(x, y, INFO_W, cap), HAlign::Left);
-        y += cap + theme::space::XS;
-        let title_h = measure.line_h(theme::size::TITLE);
-        let title = airing.map(|a| a.title.as_str()).filter(|t| !t.is_empty()).unwrap_or(plx_platform::i18n::msg::livetv_no_info());
-        line(p, measure, title, theme::size::TITLE, theme::TEXT_PRIMARY, true, Rect::new(x, y, INFO_W, title_h), HAlign::Left);
-        y += title_h + theme::space::XS;
-        let Some(a) = airing else {
-            if let Some(e) = view.guide_error() {
-                let _ = e;
-                let body_h = measure.line_h(theme::size::BODY);
-                line(p, measure, plx_platform::i18n::msg::livetv_guide_missing(), theme::size::BODY, theme::TEXT_SECONDARY, false,
-                    Rect::new(x, y, INFO_W, body_h), HAlign::Left);
-            }
-            return;
-        };
-        let mut facts = vec![format!("{} – {}", plx_ui::fmt::wall_time(a.start_ms), plx_ui::fmt::wall_time(a.stop_ms))];
-        for part in [&a.episode, &a.sub_title, &a.category] {
-            if !part.is_empty() {
-                facts.push(part.clone());
-            }
-        }
-        let body_h = measure.line_h(theme::size::BODY);
-        line(p, measure, &facts.join(" \u{b7} "), theme::size::BODY, theme::TEXT_SECONDARY, false, Rect::new(x, y, INFO_W, body_h), HAlign::Left);
-        y += body_h + theme::space::XS;
-        if !a.desc.is_empty() {
-            let view = TextView::new(&a.desc, theme::size::LABEL, theme::TEXT_READING).with_measure(measure).max_lines(2);
-            let h = view.measure_h(INFO_W).min(AXIS_TOP - y - theme::space::XS);
-            view.draw(p, Rect::new(x, y, INFO_W, h.max(0.0)));
-        }
-    }
-
-    fn draw_setup(&self, p: Painter, view: LiveTvView<'_>, focused: bool, tick_ms: u32, measure: &dyn plx_machine::machine::Measure) {
-        let x = MARGIN_X;
-        let mut y = TOP + theme::space::MD;
-        let title_h = measure.line_h(theme::size::TITLE);
-        line(p, measure, plx_platform::i18n::msg::livetv_setup_title(), theme::size::TITLE, theme::TEXT_PRIMARY, true,
-            Rect::new(x, y, INFO_W, title_h), HAlign::Left);
-        y += title_h + theme::space::SM;
-        let body = TextView::new(plx_platform::i18n::msg::livetv_setup_body(), theme::size::BODY, theme::TEXT_READING).with_measure(measure).max_lines(3);
-        let body_h = body.measure_h(1_100.0);
-        body.draw(p, Rect::new(x, y, 1_100.0, body_h));
-        y += body_h + theme::space::SM;
-        let note: Option<String> = if let Status::Failed(_) = view.status() {
-            Some(plx_platform::i18n::msg::livetv_setup_failed(view.source()))
-        } else if matches!(view.discovery(), Discovery::Done(found) if found.is_empty()) {
-            Some(plx_platform::i18n::msg::livetv_setup_none_found().to_owned())
-        } else {
-            None
-        };
-        if let Some(note) = note {
-            line(p, measure, &note, theme::size::BODY, theme::TEXT_SECONDARY, false,
-                Rect::new(x, y, INFO_W, measure.line_h(theme::size::BODY)), HAlign::Left);
-        }
-        let items = setup_items(view, self.force_setup);
-        let sel = self.setup_sel.min(items.len().saturating_sub(1));
-        for (i, item) in items.iter().enumerate() {
-            let r = setup_row_rect(i);
-            let on = focused && i == sel;
-            match item {
-                Item::Address => self.draw_field(p, r, on, tick_ms, measure),
-                _ => {
-                    let text: String = match item {
-                        Item::Search if matches!(view.discovery(), Discovery::Searching) => plx_platform::i18n::msg::livetv_setup_searching().to_owned(),
-                        Item::Search => plx_platform::i18n::msg::livetv_setup_search().to_owned(),
-                        Item::Found(k) => match view.discovery() {
-                            Discovery::Done(found) => found.get(*k).map(|f| format!("{} \u{b7} {}", f.name, f.origin)).unwrap_or_default(),
-                            _ => String::new(),
-                        },
-                        Item::Retry => plx_platform::i18n::msg::livetv_setup_retry().to_owned(),
-                        Item::Back => plx_platform::i18n::msg::livetv_setup_back().to_owned(),
-                        Item::TurnOff => plx_platform::i18n::msg::livetv_setup_turn_off().to_owned(),
-                        Item::Address => unreachable!(),
-                    };
-                    let fitted = measure.fit_line(&text, FIELD_W - 2.0 * FIELD_PAD, theme::size::BODY, true);
-                    let w = (measure.width(&fitted, theme::size::BODY, true) + 44.0).min(FIELD_W);
-                    TabPill::new(fitted.as_ptr(), theme::size::BODY, Rect::new(r.x, r.y, w, r.h))
-                        .focused(on)
-                        .draw(&plx_ui::Env::inert(), p);
-                }
-            }
-        }
-    }
-
-    /// The address field: the typed text and a caret while the keyboard is up, the hint while it
-    /// is empty.
-    fn draw_field(&self, p: Painter, r: Rect, on: bool, tick_ms: u32, measure: &dyn plx_machine::machine::Measure) {
-        let fill = if on { theme::CONTROL_IDLE_FILL } else { theme::CONTROL_IDLE_FILL_UNKEYED };
-        p.rect(r, r.h * 0.5, fill, fill, 0.0);
-        if on {
-            p.rring(r, r.h * 0.5, 2.0, theme::CONTROL_RIM_FOCUS_UNKEYED);
-        }
-        let inner = Rect::new(r.x + FIELD_PAD, r.y, r.w - 2.0 * FIELD_PAD, r.h);
-        let text = self.address.text();
-        if text.is_empty() && !self.editing {
-            line(p, measure, plx_platform::i18n::msg::livetv_setup_address(), theme::size::BODY, theme::CONTROL_IDLE_INK, true, inner, HAlign::Left);
-            return;
-        }
-        if text.is_empty() {
-            line(p, measure, plx_platform::i18n::msg::livetv_setup_address_hint(), theme::size::BODY, theme::TEXT_TERTIARY, false, inner, HAlign::Left);
-        } else {
-            line(p, measure, text, theme::size::BODY, theme::FIELD_EDITING_INK, false, inner, HAlign::Left);
-        }
-        if self.editing && (tick_ms / 530) % 2 == 0 {
-            let before = &text[..self.address.caret().min(text.len())];
-            let cx = inner.x + measure.width_str(before, theme::size::BODY, false);
-            let cap = measure.cap_h(theme::size::BODY);
-            p.rect(Rect::new(cx.min(inner.x + inner.w), r.y + (r.h - cap * 1.4) * 0.5, 2.0, cap * 1.4), 1.0,
-                theme::FIELD_EDITING_INK, theme::FIELD_EDITING_INK, 0.0);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -941,5 +954,88 @@ mod tests {
         let n = visible_rows();
         assert!(n >= 5, "{n}");
         assert!(ROWS_TOP + n as f32 * ROW_H <= SCR_H - MARGIN_Y + 0.5);
+        assert!(TOP + ART_H + theme::space::XS + plx_ui::widgets::KeyHint::height() <= STRIP_TOP, "the Plex hint clears the strip");
+        assert!(MARGIN_X + INFO_W + theme::space::LG <= SCR_W - MARGIN_X - ART_MAX_W, "the text column clears the widest art");
+    }
+
+    const MIN: i64 = 60_000;
+
+    fn guide(now: i64) -> plx_data::livetv::guide::Lineup {
+        use plx_data::livetv::guide::{Airing, Channel, Lineup};
+        let window = grid::floor_slot(now);
+        let a = |title: &str, start: i64, len: i64, cats: &[&str]| Airing {
+            title: title.into(),
+            start_ms: window + start * MIN,
+            stop_ms: window + (start + len) * MIN,
+            categories: cats.iter().map(|c| c.to_string()).collect(),
+            ..Default::default()
+        };
+        let ch = |n: &str, airings: Vec<Airing>| Channel { number: n.into(), name: format!("Channel {n}"), airings, ..Default::default() };
+        Lineup {
+            channels: vec![
+                ch("1", vec![a("Film", 0, 120, &["Movie"])]),
+                ch("2", vec![a("Match", 0, 60, &["Sports"]), a("Later film", 60, 60, &["Movie"])]),
+                ch("3", vec![a("Bulletin", 0, 120, &["News"])]),
+                ch("4", vec![a("Another film", 0, 120, &["Movie"])]),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_genre_filter_hides_channels_without_a_match_and_keeps_the_cursor_on_its_channel() {
+        let now = plx_base::wallclock::now_ms();
+        let mut s = LiveTvState::default();
+        s.install_for_test("http://192.0.2.20:8000", guide(now), now);
+        let mut page = LiveTvScreen::new(EntryId(1), InstanceId(1));
+        page.derive(s.view());
+        assert_eq!(page.rows, [0, 1, 2, 3], "All shows every channel");
+        assert_eq!(page.chips[1], Filter::Genre(plx_data::livetv::guide::Genre::Movie));
+        page.cursor.go_to_row(3, visible_rows());
+        page.filter = Filter::Genre(plx_data::livetv::guide::Genre::Movie);
+        assert!(page.derive(s.view()));
+        assert_eq!(page.rows, [0, 1, 3], "the news channel has no film in the window");
+        assert_eq!(page.rows[page.cursor.row], 3, "the cursor stayed on channel 4");
+        page.filter = Filter::Genre(plx_data::livetv::guide::Genre::News);
+        page.derive(s.view());
+        assert_eq!((page.rows.clone(), page.cursor.row), (vec![2], 0), "its channel hidden, the cursor takes the last shown");
+        assert!(!page.derive(s.view()), "nothing moved: nothing re-derived");
+        page.filter = Filter::Category("Cooking".into());
+        page.chips_from = None;
+        page.derive(s.view());
+        assert_eq!(page.filter, Filter::All, "a filter the guide no longer offers gives way to All");
+    }
+
+    #[test]
+    fn the_info_pane_prefers_the_programme_picture_and_joins_the_episode_facts() {
+        use plx_data::livetv::guide::{Airing, Channel};
+        let ch = Channel { icon: "http://192.0.2.20/logo.png".into(), ..Default::default() };
+        let with = Airing { icon: "http://192.0.2.20/poster.jpg".into(), ..Default::default() };
+        assert_eq!(draw::info_art(&ch, Some(&with)), Some("http://192.0.2.20/poster.jpg"));
+        assert_eq!(draw::info_art(&ch, Some(&Airing::default())), Some("http://192.0.2.20/logo.png"));
+        assert_eq!(draw::info_art(&Channel::default(), None), None);
+        let ep = Airing { episode: "S02E05".into(), sub_title: "Dance Mode".into(), ..Default::default() };
+        assert_eq!(draw::episode_line(&ep), "S02E05 \u{b7} Dance Mode");
+        assert_eq!(draw::episode_line(&Airing { sub_title: "Pilot".into(), ..Default::default() }), "Pilot");
+        assert_eq!(draw::episode_line(&Airing::default()), "");
+    }
+
+    /// Every chip the app names itself — *All* and the six genres — fits the strip whole, in every
+    /// shipped language, at the device's whole-pixel advances.
+    #[test]
+    fn livetv_chip_labels_fit() {
+        use plx_base::fontcov::advances::ShippedMeasure;
+        use plx_data::livetv::guide::Genre;
+        let mut chips = vec![Filter::All];
+        chips.extend(Genre::ALL.iter().map(|g| Filter::Genre(*g)));
+        for language in plx_platform::i18n::SHIPPED {
+            let _guard = plx_platform::i18n::language_on_this_thread_for_test(language);
+            assert_eq!(draw::strip_fit(&chips, &ShippedMeasure), chips.len(), "{language:?}");
+            for chip in &chips {
+                let label = chip.label();
+                let w = plx_machine::machine::Measure::width_str(&ShippedMeasure, &label, theme::size::CAPTION, true);
+                assert!(w <= CHIP_LABEL_MAX, "{language:?} {label} is {w}px");
+            }
+        }
     }
 }

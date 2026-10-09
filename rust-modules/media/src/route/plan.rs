@@ -13,7 +13,7 @@ use plx_plex::plex::ServerId;
 use std::sync::atomic::Ordering;
 
 use super::decision::{
-    measure_remote_original, measure_remote_remux, put_selection, resolve_playqueue,
+    measure_remote_original, measure_remote_remux, put_selection, resolve_playqueue, continue_playqueue,
     server_decision, forced_server_decision, ActiveEncoderState, AutomaticRouteIntent, MdeVerdict, PlayerControl,
     ENCODER_GENERATION,
 };
@@ -413,7 +413,7 @@ pub(super) fn transcode_spec_carrying_burn<'a>(
 }
 
 
-pub use plx_plex::plex::session::{PlaybackQuality as Quality, DeckPress, DirectPlayMode, NextEpisodeMode, SkipInterval, SubtitleSize, SubtitlePosition};
+pub use plx_plex::plex::session::{PlaybackQuality as Quality, AutoSkip, Screensaver, DeckPress, DirectPlayMode, NextEpisodeMode, SkipInterval, SubtitleSize, SubtitlePosition};
 
 
 /// The ladder IN ORDER, best first. The ONE place row order lives, so the picker's index mapping
@@ -1013,6 +1013,32 @@ pub struct UpNext {
     pub thumb: String,
     pub dur_ms: i64,
     pub resume_ms: i64,
+    /// The row's `playQueueItemID` — its identity in the queue it came from, which a playback that
+    /// CONTINUES in that queue ([`QueueSeed`]) selects. 0 = a server that omitted it.
+    pub item_id: i64,
+}
+
+/// **A playback that starts INSIDE an existing PlayQueue** instead of creating its own.
+///
+/// Every ordinary playback POSTs a fresh `continuous=1` queue for its item (`resolve_playqueue`),
+/// which is exactly right for "this episode, then the rest of the show in order" and exactly wrong
+/// for a SHUFFLED queue, whose next episode is wherever the shuffle put it. A seed carries the
+/// queue the new playback belongs to: the resolve worker then asks the server for that queue's
+/// window around `item_id` (`refetch`, `GET /playQueues/{id}`) — or takes `rows` as they are when
+/// they were fetched a moment ago (the shuffle POST itself) — and installs it as this playback's
+/// queue, with `item_id` as the playQueueItemID the timeline reports.
+///
+/// `sticky` says whether the playback AFTER this one continues here too. A shuffled queue is
+/// sticky, so Up Next keeps playing from it; a row jumped to from the Play queue panel of an
+/// ordinary queue continues in that queue for the jump but leaves `sticky` as the queue had it, so
+/// a non-shuffled playback's Up Next behaves exactly as it always did.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub struct QueueSeed {
+    pub id: i64,
+    pub item_id: i64,
+    pub rows: Vec<plx_plex::plex::QueueRow>,
+    pub refetch: bool,
+    pub sticky: bool,
 }
 
 
@@ -1036,6 +1062,30 @@ pub(super) fn up_next_of(r: &plx_plex::plex::QueueRow) -> Option<UpNext> {
         thumb: r.thumb.clone(),
         dur_ms: r.dur_ms,
         resume_ms: r.resume_ms,
+        item_id: r.item_id,
+    })
+}
+
+/// The descriptor that STARTS any queue row — [`up_next_of`] without its episodes-only gate, for
+/// the Play queue panel, which lists (and so must be able to start) whatever the queue holds.
+/// `None` only for a row with nothing to play.
+pub fn queue_row_descriptor(r: &plx_plex::plex::QueueRow) -> Option<UpNext> {
+    if r.rk.is_empty() {
+        return None;
+    }
+    Some(UpNext {
+        rk: r.rk.clone(),
+        part: r.part.clone(),
+        vcodec: r.vcodec.clone(),
+        acodec: r.acodec.clone(),
+        show_title: r.show_title.clone(),
+        ep_title: r.title.clone(),
+        season: r.season,
+        index: r.index,
+        thumb: r.thumb.clone(),
+        dur_ms: r.dur_ms,
+        resume_ms: r.resume_ms,
+        item_id: r.item_id,
     })
 }
 
@@ -1093,6 +1143,15 @@ pub struct ResolveEnv {
     pub src_kbps: i64,
     /// Trailer sessions omit `continuous=1` so EOS cannot Up-Next into a sibling extra.
     pub omit_queue_continuous: bool,
+    /// Continue in this existing PlayQueue instead of creating one ([`QueueSeed`]); `None` is the
+    /// ordinary per-playback `continuous=1` POST.
+    pub queue_seed: Option<QueueSeed>,
+    /// The `Media[]` version this resolve plays (`plex::media_index_for` at the request; 0 = the
+    /// first). Its part and streams arrive through the caller's fields and `cached_item`.
+    pub media_index: u32,
+    /// A playlist's ratingKey when this item heads that playlist's queue
+    /// (`route::request_play_playlist`); empty otherwise.
+    pub playlist: String,
     /// Hero preview. Skip the PlayQueue entirely, and refuse anything that is not a direct play.
     pub preview: bool,
     /// The viewer's Plex Pass audio-DSP preference (`player::audio_enhancements`), captured at the
@@ -1288,6 +1347,8 @@ pub struct Plan {
     pub up_next: Option<UpNext>,
     /// that same PlayQueue's whole returned window, projected on the worker (see `queue`)
     pub queue: Vec<plx_plex::plex::QueueRow>,
+    /// the queue's successors are to come from it too ([`QueueSeed::sticky`])
+    pub queue_sticky: bool,
 }
 
 
@@ -1345,18 +1406,23 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
     let session = new_sess(rk);
     plan.sess = session.clone();
     if !rk.is_empty() && !env.preview {
-        let q = resolve_playqueue(
-            client,
-            rk,
-            &session,
-            &env.machine_id,
-            !env.omit_queue_continuous,
-        );
+        let q = match &env.queue_seed {
+            Some(seed) => continue_playqueue(client, rk, seed),
+            None => resolve_playqueue(
+                client,
+                rk,
+                &session,
+                &env.machine_id,
+                !env.omit_queue_continuous,
+                &env.playlist,
+            ),
+        };
         plan.machine_id = q.machine_id;
         plan.pq_id = q.id;
         plan.pq_item_id = q.item_id;
         plan.up_next = q.up_next;
         plan.queue = q.rows;
+        plan.queue_sticky = q.sticky;
     }
     // the playing item's OWN track lists (menu + audio pick + esInfo fps read them) — the
     // loaded detail can be a different item (show page / straight-from-Home play)

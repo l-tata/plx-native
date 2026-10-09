@@ -121,6 +121,11 @@ pub(crate) unsafe fn run(app: &mut App) {
         // the restructure moves this loop onto (spec §3.3/§8.4); on THIS loop navcommit
         // precedes tick_drain, and the FRAMEDROP line prints them in the algorithm's order.
         let mut fr = Frame::begin(&app.player.session, app.bridge.metadata_view());
+        // An automatic skip's undo window: the "Skipped … · Back" pill stands in for the discs
+        // (`player_hud::with_undo`), resolved here so input, update and draw see the same row.
+        if let Some(player) = super::bridge::player(&app.pages) {
+            fr.ctrl = plx_appkit::player_hud::with_undo(fr.ctrl, player.hud.undo, clock::now());
+        }
         let first_controlled_frame = app.boot_initial.is_some() && app.prev == 0;
         let fr = &mut fr;
         app.instr.mark(plx_base::diag::heartbeat::Phase::Top);
@@ -924,6 +929,8 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
             // lost one is queued for a fresh discovery (requested by the upgrade retry's frame
             // step) that re-proves eligibility before minting again (`plex::grant`).
             plx_plex::plex::grant::network_changed();
+            // Continue Watching may have moved while the app was away (`deck_refresh`).
+            app.deck_refresh.foreground(clock::now());
             // Reacquire only on DID foreground, before playback restoration and rendering.
             restore_window(app.win);
             plx_machine::idle::invalidate();
@@ -960,6 +967,10 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
             (state & 0xff) == 1,
             state & 0x100 != 0,
         ));
+        // A press that wakes the ambient screensaver only wakes it.
+        if super::ambient::swallow_key(app, sym, (state & 0xff) == 1) {
+            return;
+        }
         // **Does the TREE own this key?** (phase 5b, `app/bridge.rs`'s coexistence
         // contract.) Asked once, here, above all three edges — because the dispatcher's
         // press machine wants ALL of them: `Edge::Down` arms, `Edge::Repeat` is the
@@ -1615,25 +1626,21 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
                 }
             }
         }
-        // post-playback home refresh (armed by every exit_player): refetch the hubs so
-        // Continue Watching shows the new resume point / next episode; the small delay lets
-        // the final timeline PUT land server-side first. The request is worker-only; the
-        // landing logs the resulting item count when it actually commits.
+        // post-playback home refresh (armed by every exit_player): Continue Watching is owed a
+        // refetch so it shows the new resume point / next episode; the small delay lets the
+        // final timeline PUT land server-side first. The deck schedule below issues it — never
+        // beside a hub fetch still in flight.
         if app.refresh_hubs_at != 0
             && fr.now.wrapping_sub(app.refresh_hubs_at) < 0x8000_0000
             && !matches!(app.route(), AppArg::Player)
         {
+            app.deck_refresh.playback_stopped(app.refresh_hubs_at);
             app.refresh_hubs_at = 0;
-            app.hubs_asked_at = fr.now;
-            super::bridge::execute_endpoint_outcomes(
-                &mut app.pages,
-                app.bridge.hubs_run(plx_data::stores::hubs::HubsCmd::RefetchHubs).endpoints,
-            );
             // …and every library's OWN shelves, for the same reason and at the same moment:
             // a finished playback moves Continue Watching and watch state, so invalidate each
             // Bridge-owned Browse store through `Bridge::browse_run`.
             app.bridge.browse_run(plx_data::stores::browse::BrowseCmd::HubsInvalidateAll);
-            log("home: hubs refresh queued after playback");
+            log("home: hubs refresh owed after playback");
         }
         // The top bar's clock repaints when its minute turns, on the pages that draw the bar.
         if super::bridge::clock_minute_moved(&mut app.clock_minute, plx_base::wallclock::now_ms())
@@ -1641,17 +1648,24 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
         {
             plx_machine::idle::invalidate();
         }
-        // Home left open (or come back to after the set slept) refetches its hubs once they are
-        // stale, so Continue Watching and On Deck follow what was watched elsewhere — the
-        // official client's behaviour, and the one refresh the shelves had no trigger for.
-        if matches!(app.route(), AppArg::Home) && hubs_stale(fr.now, app.hubs_asked_at) {
-            app.hubs_asked_at = fr.now;
+        // Continue Watching follows what was watched — here after a stop, elsewhere while Home
+        // was away or the set slept, and on a cadence while Home stays on screen (the official
+        // client's behaviour). ONE schedule pays every reason, one request at a time
+        // (`deck_refresh`).
+        if app.deck_refresh.step(
+            fr.now,
+            matches!(app.route(), AppArg::Home),
+            !matches!(app.route(), AppArg::Player),
+            app.bridge.hubs_in_flight(),
+        ) {
             super::bridge::execute_endpoint_outcomes(
                 &mut app.pages,
                 app.bridge.hubs_run(plx_data::stores::hubs::HubsCmd::RefetchHubs).endpoints,
             );
-            log("home: hubs refresh queued (stale)");
+            log("home: hubs refresh queued (deck)");
         }
+        // Home's live row follows the guide and the minute (`on_now`).
+        super::on_now::step(app);
         // (The lost-keyup safety net and the CLIENT-SIDE LONG-PRESS REPEAT stood here — the one
         // hold-to-move path for every discrete focus list, driven by `App::held_key` at 110 ms so
         // the feel was identical everywhere and independent of the remote's hardware repeat delay.
@@ -1677,6 +1691,7 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
         // Focus follows the control row's OCCUPANT, on both edges. Driven by slot identity
         // rather than a "was something shown" bool, because the two edges have different jobs
         // and the previous bool implemented neither of the ones its comment promised.
+        let mut auto_skip: Option<plx_appkit::skip_pill::Prompt> = None;
         if let Some(player) = super::bridge::player_mut(&mut app.pages) {
             // Keyed on the SEGMENT, not the slot, and `last_offer` is only ever advanced to
             // a real offer — never cleared back to None. `active_marker` is gated on `is_playing`,
@@ -1695,11 +1710,17 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
                 if let Some((kind, start)) = offer {
                     log(&format!("marker offer: {kind:?} at {}s", start / 1000));
                 }
-                // A segment beginning puts the HUD ON SCREEN and offers the row — the timer,
-                // the DISMISSAL and the ring in one act, because raising the timer alone left
-                // the tile behind a transport nobody drew. `HudState::raise_for_offer` is where
-                // that rule, its resting-position clause and the bug are written down.
-                player.hud.raise_for_offer(fr.now, fr.ctrl.primary_btn());
+                // Settings > Playback > Skip intro & credits: an offer the setting names is
+                // TAKEN on this same fresh edge instead of raised (performed below, once the
+                // screen borrow ends). Once per segment per playback, because this edge is.
+                auto_skip = plx_appkit::player_hud::auto_skip_for(fr.ctrl, plx_media::route::auto_skip());
+                if auto_skip.is_none() {
+                    // A segment beginning puts the HUD ON SCREEN and offers the row — the timer,
+                    // the DISMISSAL and the ring in one act, because raising the timer alone left
+                    // the tile behind a transport nobody drew. `HudState::raise_for_offer` is where
+                    // that rule, its resting-position clause and the bug are written down.
+                    player.hud.raise_for_offer(fr.now, fr.ctrl.primary_btn());
+                }
             } else if plx_appkit::player_hud::standin_left_the_ring(
                 player.hud.was_standin,
                 fr.ctrl,
@@ -1715,6 +1736,9 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
             }
             player.hud.was_standin = !fr.ctrl.is_discs();
             player.publish();
+        }
+        if let Some(pr) = auto_skip {
+            perform_auto_skip(app, fr, pr);
         }
         // While the countdown runs, hold the HUD up — a timer nobody can see is a cut to the
         // next episode out of nowhere. `hud.dismissed` has to clear with it, not just the
@@ -1785,6 +1809,37 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
         {
             plx_media::player::finish_paused_seek(&mut app.adapters.player);
         }
+}
+
+/// **Take a marker offer without a press** (Settings > Playback > Skip intro & credits) — the same
+/// action the Skip pill performs (`playback::activate_ctrl_row`), minus the press. A seek retires
+/// the segment first (`metadata::mark_skipped`: the landing keyframe is usually still inside it, and
+/// a viewer who seeks back must watch it rather than be skipped again), then opens the undo window
+/// — the "Skipped … · Back" pill and LEFT-to-rewind, `HudState::open_undo`. A `Finish` is a final
+/// credits segment of the LAST item (`skip_pill::auto_skips`), so it leaves the player.
+unsafe fn perform_auto_skip(app: &mut App, fr: &mut Frame, pr: plx_appkit::skip_pill::Prompt) {
+    use plx_appkit::skip_pill::SkipAction;
+    log(&format!("autoskip: {:?} {}s-{}s", pr.kind, pr.marker.start_ms / 1000, pr.marker.end_ms / 1000));
+    match pr.action {
+        SkipAction::Seek(ns) => {
+            app.bridge.metadata_mut().run(plx_data::stores::metadata::MetadataCmd::MarkSkipped(pr.marker));
+            request_seek(ns);
+            if let Some(player) = super::bridge::player_mut(&mut app.pages) {
+                player.hud.open_undo(pr.marker, fr.now);
+                player.publish();
+            }
+        }
+        SkipAction::Finish => {
+            let _ = finish_playback(
+                &mut app.player.session,
+                &mut app.adapters.player,
+                &mut app.refresh_hubs_at,
+                &mut app.pages,
+                &mut app.bridge,
+            );
+        }
+        SkipAction::Rewind(_) => {}
+    }
 }
 
 /// Results and requests that land BEFORE nav commit: the OK arm and the press machine, the
@@ -2302,6 +2357,10 @@ pub(crate) unsafe fn update(app: &mut App, fr: &mut Frame) {
             menu_play_tick(&mut app.player.session, &mut app.adapters.player,
                 &mut app.pages, &mut app.bridge, &mut app.menu_play_await, fr.now);
         }
+        // A Shuffle press's queue: started once it lands (`playback::drain_shuffle`), from
+        // wherever the viewer is by then — the same route-unconditional reason as the wait above.
+        super::playback::drain_shuffle(&mut app.player.session, &mut app.adapters.player,
+            &mut app.pages, &mut app.bridge);
         // Server-side view-state WRITES (Mark as Watched / Unwatched, Remove from Deck): send
         // the next queued one, land the last one's answer and kick the refresh it owes. Route-
         // unconditional for the same reason as the two pumps around it — the user can walk off
@@ -2321,6 +2380,8 @@ pub(crate) unsafe fn update(app: &mut App, fr: &mut Frame) {
         // still refreshes the banner's listing.
         app.bridge.livetv_pump();
         super::livetv::pump(app, fr.now);
+        super::resume_place::pump(app, fr.now);
+        super::ambient::pump(app, fr.now, fr.player);
         if let Some(target) = app.bridge.take_detail_refresh() {
             refresh_content(&mut app.pages, &mut app.bridge, target);
         }
@@ -2570,6 +2631,8 @@ pub(crate) unsafe fn draw(app: &mut App, fr: &mut Frame) -> (i32, i32, i32, i32)
                         drop(_visible_walk);
                         app.glass.draw_nav_blur();
                         app.glass.draw_dial();
+                        // The ambient screensaver covers the finished page (nothing while it is down).
+                        super::ambient::draw(app, fr.now);
                         // The on-screen counter, off the player route (chrome over video). It draws
                         // the last completed `fps=` window — frames actually swapped, not loop
                         // iterations. It necessarily HOLDS its last painted value on a settled
@@ -3134,9 +3197,12 @@ mod lifecycle_regression_tests {
             ptr: Pointer::IDLE,
             menu_play_await: Default::default(),
             livetv: Default::default(),
+            resume: Default::default(),
+            ambient: Default::default(),
             prev: Default::default(),
             refresh_hubs_at: Default::default(),
-            hubs_asked_at: Default::default(),
+            deck_refresh: crate::app::deck_refresh::DeckRefresh::new(0),
+            on_now: Default::default(),
             clock_minute: Default::default(),
             plaintext_upgrade: Default::default(),
             ev: [0; 128],
@@ -4600,28 +4666,6 @@ mod lifecycle_regression_tests {
             rig.app.route().id(),
         );
         assert_eq!(rig.app.pages.nav.top_page().map(|e| e.id), Some(origin));
-    }
-}
-
-/// How long Home's hubs are trusted before Home refetches them on its own.
-const HUBS_STALE_MS: u32 = 15 * 60 * 1000;
-
-/// Have the hubs gone unrefreshed for [`HUBS_STALE_MS`] at frame time `now`? Wrapping, like every
-/// frame-clock comparison here.
-fn hubs_stale(now: u32, asked_at: u32) -> bool {
-    now.wrapping_sub(asked_at) >= HUBS_STALE_MS
-}
-
-#[cfg(test)]
-mod hubs_stale_tests {
-    use super::*;
-
-    #[test]
-    fn home_refetches_after_a_quarter_hour_and_not_before() {
-        assert!(!hubs_stale(1_000, 1_000));
-        assert!(!hubs_stale(1_000 + HUBS_STALE_MS - 1, 1_000));
-        assert!(hubs_stale(1_000 + HUBS_STALE_MS, 1_000));
-        assert!(hubs_stale(HUBS_STALE_MS / 2, u32::MAX - HUBS_STALE_MS / 2), "across the clock's wrap");
     }
 }
 

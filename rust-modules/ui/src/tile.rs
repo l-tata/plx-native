@@ -25,6 +25,9 @@ pub enum TileKind {
     Season,
     Episode,
     Collection,
+    /// A live channel (Home's On Now shelf): its programme's art, else a tile naming the channel;
+    /// its caption is the channel and the time the programme has left.
+    Channel,
     Other,
 }
 

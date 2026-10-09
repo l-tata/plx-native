@@ -19,18 +19,27 @@ pub struct CollectionRef {
     pub sec: i64,
     pub tag: i64,
     pub name: String,
+    /// A video PLAYLIST rather than a collection: the same page (a header over a member grid),
+    /// whose members are `/playlists/{rk}/items` and which can be played in order. Playlist and
+    /// collection ratingKeys share one metadata id space, so identity needs no second rule.
+    pub playlist: bool,
 }
 
 impl CollectionRef {
+    /// A video playlist, by its ratingKey (`/playlists?playlistType=video` rows).
+    pub fn by_playlist(sid: ServerId, rk: &str, name: &str) -> Self {
+        Self { sid, rk: rk.to_owned(), sec: 0, tag: 0, name: name.to_owned(), playlist: true }
+    }
+
     /// A link that knows the collection's ratingKey (a promoted shelf, a library tile).
     pub fn by_rk(sid: ServerId, rk: &str, sec: i64, name: &str) -> Self {
-        Self { sid, rk: rk.to_owned(), sec, tag: 0, name: name.to_owned() }
+        Self { sid, rk: rk.to_owned(), sec, tag: 0, name: name.to_owned(), playlist: false }
     }
 
     /// A link that knows only the collection's tag id within a section (a member's
     /// `collection.related` hub, a tag-shaped search hit).
     pub fn by_tag(sid: ServerId, sec: i64, tag: i64, name: &str) -> Self {
-        Self { sid, rk: String::new(), sec, tag, name: name.to_owned() }
+        Self { sid, rk: String::new(), sec, tag, name: name.to_owned(), playlist: false }
     }
 
     /// THE collection identity rule. Two ratingKeys compare when both sides carry one; otherwise
@@ -95,6 +104,21 @@ impl Client {
             .int("X-Plex-Container-Size", size)
             .build();
         self.collection_get(&path)
+    }
+
+    /// `GET /playlists/{ratingKey}/items`, paged like a collection's children — a playlist's
+    /// members, in the playlist's order.
+    pub fn playlist_items(&self, rating_key: &str, start: i64, size: i64) -> CollectionOutcome {
+        let path = QueryBuilder::new(format!("/playlists/{rating_key}/items"))
+            .int("X-Plex-Container-Start", start)
+            .int("X-Plex-Container-Size", size)
+            .build();
+        self.collection_get(&path)
+    }
+
+    /// `GET /playlists?playlistType=video` — the server's video playlists (smart ones included).
+    pub fn video_playlists(&self) -> Option<MediaContainer> {
+        self.get_json(&QueryBuilder::new("/playlists".to_string()).str("playlistType", "video").build())
     }
 
     fn collection_get(&self, path: &str) -> CollectionOutcome {
@@ -341,7 +365,7 @@ mod tests {
     #[test]
     fn collection_identity_never_compares_a_tag_with_a_rating_key() {
         let sid = ServerId::from_raw(2);
-        let at = |rk: &str, tag| CollectionRef { sid, rk: rk.into(), sec: 4, tag, name: "A".into() };
+        let at = |rk: &str, tag| CollectionRef { sid, rk: rk.into(), sec: 4, tag, name: "A".into(), playlist: false };
         assert!(at("50077", 77).same_collection(&at("50077", 99)),
             "two resolved identities compare their ratingKey");
         assert!(!at("50077", 77).same_collection(&at("50078", 77)),

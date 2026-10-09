@@ -99,10 +99,25 @@ pub(crate) fn requests(app: &mut App, now: u32) {
                     }
                 }
             }
+            LiveTvReq::Detail { sid, rk } => {
+                let hit = plx_data::livetv::plexmatch::Hit { sid, rk };
+                if !app.bridge.livetv_view().knows_match(&hit) { continue; }
+                let arg = AppArg::Content(plx_screens::registry::ContentArg::Detail { sid: hit.sid, rk: hit.rk });
+                bridge::nav_push_with_return(&mut app.pages, arg, ret);
+            }
             LiveTvReq::Retry => retry(app, now),
             LiveTvReq::OpenSetup => {}
         }
     }
+}
+
+/// Tune the channel numbered `number` in the loaded guide — OK on Home's On Now card
+/// (`HomeReq::Tune`). A number the guide no longer lists (it reloaded under the card) does nothing.
+pub(crate) fn tune_number(app: &mut App, number: &str, now: u32) {
+    let lineup = Arc::clone(app.bridge.livetv_view().lineup());
+    let Some(index) = lineup.index_of_number(number) else { return };
+    let previous = plx_media::route::live(&app.player.session).map(|l| l.index).filter(|&p| p != index);
+    tune(app, lineup, index, previous, now);
 }
 
 /// Tune the playing channel again — the failure read-out's *Try again* and the banner's OK on a

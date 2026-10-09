@@ -248,6 +248,9 @@ impl plx_screens::registry::MetadataLike for AppHost {
     fn subtitle_search<'a>(cx: &Cx<'a, Self>) -> Option<plx_data::subsearch::SubSearchView<'a>> {
         Some(cx.views.subtitle_search)
     }
+    fn on_watchlist(cx: &Cx<'_, Self>, guid: &str) -> Option<bool> {
+        cx.views.hubs.on_watchlist(guid)
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -751,6 +754,11 @@ impl Bridge {
         matches!(page.probe_viewport(d.input.engine.current(InputOwner::Entry(entry.id))).0, "grid" | "shelf")
     }
 
+    /// The library kind the Library page was last entered for, if any.
+    pub(crate) fn library_kind(&self) -> Option<plx_data::browse::SecKind> {
+        self.mounter.library_kind
+    }
+
     pub(crate) fn enter_library(&mut self, kind: plx_data::browse::SecKind) {
         self.mounter.library_kind = Some(kind);
         self.library_commands.clear();
@@ -1000,6 +1008,9 @@ impl Bridge {
             let sid = match &e.arg { AppArg::Content(ContentArg::Detail { sid, .. }) => *sid, _ => return None };
             let rect = page.focused_rect::<AppHost>(ret.focus, &cx, At::Drawn);
             let meta = <AppHost as plx_screens::registry::MetadataLike>::metadata(&cx);
+            if let Some((rk, labels, current)) = page.focused_versions(ret.focus, meta) {
+                return Some(strip_menu_arg(sid, &rk, ItemMenuKind::Versions { labels, current }, entry, ret.focus, rect));
+            }
             if let Some((rk, mark)) = page.focused_season(ret.focus, meta) {
                 return Some(strip_menu_arg(sid, &rk, ItemMenuKind::Season { mark }, entry, ret.focus, rect));
             }
@@ -1195,6 +1206,12 @@ impl Bridge {
         self.stores.hubs.snapshot()
     }
 
+    /// Has a Home hub fetch not landed yet? The deck schedule waits for it rather than issuing a
+    /// second request beside it (`app::deck_refresh`).
+    pub(crate) fn hubs_in_flight(&self) -> bool {
+        self.stores.hubs.in_flight()
+    }
+
     /// Synchronous addressed Hubs command against this owner's retained Browse directory. Used by
     /// callers outside the per-frame dispatch (server activation, boot).
     pub(crate) fn hubs_run(&mut self, cmd: plx_data::stores::hubs::HubsCmd) -> plx_data::stores::StoreOutcome {
@@ -1377,7 +1394,7 @@ impl Bridge {
 
 /// Before this the set's clock has not been set (it boots at its epoch until the network answers),
 /// and a clock reading 1970 is worse than none.
-const CLOCK_SET_AFTER_MS: i64 = 1_577_836_800_000; // 2020-01-01
+pub(crate) const CLOCK_SET_AFTER_MS: i64 = 1_577_836_800_000; // 2020-01-01
 
 /// The top bar's clock (`widgets::top_clock`).
 fn draw_top_clock(p: plx_ui::Painter) {
@@ -2758,6 +2775,8 @@ pub(crate) fn follow_auth_landing(pages: &mut Dispatcher<AppHost>, bridge: &mut 
         plx_media::route::restore_next_episode_mode(saved.next_episode_mode());
         plx_media::route::restore_skip_interval(saved.skip_interval());
         plx_media::route::restore_deck_press(saved.deck_press());
+        plx_media::route::restore_auto_skip(saved.auto_skip());
+        plx_media::route::restore_screensaver(saved.screensaver());
         plx_media::player::restore_subtitle_tone(saved.subtitle_tone());
         plx_media::player::restore_audio_enhancements(saved.audio_enhancements());
         let endpoints = super::boot::install_pms_owned(bridge, &c.origin,

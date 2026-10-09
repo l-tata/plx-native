@@ -128,10 +128,11 @@ class LibraryRail(unittest.TestCase):
     def test_default_generated_data_is_stable(self):
         # #266 added canNormalizeLoudness to every generated audio stream and five fixed
         # enhancement fixture movies (own section id, invisible to sections 1/2) to every
-        # Library — both hashes moved when that landed.
+        # Library — both hashes moved when that landed. They moved again when a show began
+        # reporting the lastViewedAt of its latest viewed episode (Recently Added in Your Genres).
         hashes = {
-            1: "c900e01d9e26ead0c63f0e2cfbf5bfad1cf410ba9a047ca701f41806246e2564",
-            7: "e59fb64f00c787449263070404aed8060e07bcf644ebcc3a2184626e416d6616",
+            1: "124ea5c3e8c5de9e73d0e1bc3dacae3de4759175c7c3eb3e8a2b4b66d80090a7",
+            7: "4f92dcdb80f199a7594daea160d1864ac2bf395436c957599012ff0a7a66d20e",
         }
         for seed, expected in hashes.items():
             payload = json.dumps(Library(seed=seed).__dict__, sort_keys=True).encode()

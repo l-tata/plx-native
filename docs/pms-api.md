@@ -690,7 +690,7 @@ GET /library/metadata/{rk}?includeMarkers=1&includeChapters=1
 ### Up Next — the `continuous=1` PlayQueue already carries it (verified live 2026-07-29)
 
 There is no "what plays next" endpoint to call: the `POST /playQueues?continuous=1` the app makes
-for **every** playback (§7) returns the show's remaining episodes after the selected one, each a
+for every ordinary playback (§7) returns the show's remaining episodes after the selected one, each a
 **full** `Metadata` row — `thumb`, `parentIndex`/`index`, `duration`, `viewOffset`, `summary`, and
 `Media[0].videoCodec`/`audioCodec` + `Part[0].key`. That is everything both the Up Next card and a
 subsequent direct-play need, so the feature costs zero extra round-trips.
@@ -701,6 +701,13 @@ subsequent direct-play need, so the feature costs zero extra round-trips.
 - The queue does **not** span past the available episodes: the last episode a server holds for a
   show returns `playQueueTotalCount: 1`, i.e. no successor. A movie behaves the same way.
 - The POST needs an `X-Plex-Client-Identifier`; without it PMS answers with an empty body.
+- **Shuffle and continuing in a queue (implemented from the spec, not yet verified live).** Shuffle
+  POSTs `shuffle=1` (no `continuous`) with the SHOW's or SEASON's key in the `uri`; the server picks
+  the first row (`playQueueSelectedItemID`). A playback that continues inside an existing queue (a
+  shuffle's next episode, a row picked from the player's Play queue page) does not POST again: it
+  reads `GET /playQueues/{id}?center={playQueueItemID}&window=25` and reports the new row's
+  `playQueueItemID` on the timeline. Per the spec `center` does not move the server's selection,
+  so the client reads the successor after ITS row, not after `playQueueSelectedItemID`.
 
 ### Show chain (verified against a show, ratingKey 1857)
 
@@ -736,7 +743,10 @@ Episode entry (verified, trimmed):
 ```
 
 Note: episodes can have **multiple `Media[]` versions** (this one: 4K HDR + 1080p).
-The picker must iterate `Media[]` and choose by codec/resolution, not take `[0]` blindly.
+The picker must iterate `Media[]` and choose by codec/resolution, not take `[0]` blindly. PlxNative
+plays `Media[0]` unless the viewer picks another version (the detail page's Version pill, the
+player's More > Version); the pick is kept per item for the session, plays `Media[i].Part[0].key`
+directly and sends `mediaIndex=i` on every transcode and MDE decision of that item.
 Episode container metadata also carries `grandparentTitle`/`grandparentThumb` at the
 `MediaContainer` level for header rendering.
 

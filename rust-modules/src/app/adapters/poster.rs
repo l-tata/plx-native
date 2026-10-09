@@ -43,6 +43,7 @@
 //! into a fixed [`PT_KEYLEN`]-byte array (see [`Pslot::key`]), and a `u16` compare is also the
 //! cheaper half of the per-frame identity scan, so it goes first.
 mod fan;
+mod plain;
 mod refresh;
 mod trace;
 
@@ -606,6 +607,23 @@ pub(crate) fn resident_art_survives_for_test(sid: ServerId, change: impl FnOnce(
 fn built_key(srv: ServerId, path: &str, w: c_int, h: c_int, png: bool) -> Option<&'static str> {
     if path.is_empty() {
         return None;
+    }
+    // A plain URL (a Live TV server's art) names no server and carries no token: its key is the
+    // URL and the box (`plain.rs`), memoised under generation 0 like any other.
+    if plain::is_plain(srv) {
+        let memo = unsafe {
+            (*std::ptr::addr_of_mut!(KEY_MEMO)).get_or_insert_with(|| KeyMemo {
+                map: std::collections::HashMap::new(),
+            })
+        };
+        let s = memo.get_or_build(srv.raw(), path, w, h, png, 0, || plain::plain_key(path, w, h).unwrap_or_default());
+        if s.is_empty() || s.len() > KEY_MAX {
+            if !s.is_empty() {
+                warn_key_refused(s.len());
+            }
+            return None;
+        }
+        return Some(s);
     }
     let c = plx_plex::plex::client_for(srv)?;
     // SAFETY: main-thread only (every caller is a draw path), and the borrow is consumed by the
@@ -1753,9 +1771,21 @@ fn poster_worker() {
         let mut px = std::ptr::null_mut();
         let mut stale = None;
         let mut transient = false;
+        // A plain URL has no server to revoke: it reads disk and the network on its own
+        // (`plain.rs`), under the same account epoch.
+        if plain::is_plain(srv) {
+            if cache_gen == plx_platform::imgcache::generation() {
+                let loaded = plain::load(&key_s, cache_gen);
+                if let Some((dw, dh, rgba)) = loaded.art {
+                    px = img::img_malloc_copy(&rgba, || format!("{dw}x{dh} plain-url art"));
+                    (w, h) = (dw as c_int, dh as c_int);
+                }
+                trace::disk(idx, gen, if loaded.from_disk { "hit" } else { "net" });
+                transient = loaded.transient;
+            }
         // Revoked servers cannot use disk as a route around sign-out. Keep this client snapshot
         // for both identity and transport; a later registry repoint must not mix the two.
-        if let Some(client) = plx_plex::plex::client_for(srv)
+        } else if let Some(client) = plx_plex::plex::client_for(srv)
             .filter(|c| cache_gen == plx_platform::imgcache::generation() && c.token_gen() == token_gen)
         {
             if let Some((rk, stamp)) = fan::parse_fan_key(&key_s) {

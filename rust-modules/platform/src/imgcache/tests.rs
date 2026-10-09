@@ -437,3 +437,14 @@ fn unavailable_storage_is_harmless_and_stats_do_not_initialize_it() {
     assert!(!cache.write_at(0, &poster(0), b"image"));
     assert_eq!(cache.stats().miss, 1);
 }
+
+#[test]
+fn an_url_key_names_the_url_and_the_box_and_refuses_anything_else() {
+    let a = classify_url("http://192.0.2.20:8000/images/logo.png", 128, 128).unwrap();
+    assert_eq!(a, classify_url("http://192.0.2.20:8000/images/logo.png", 128, 128).unwrap());
+    assert_ne!(a, classify_url("http://192.0.2.20:8000/images/logo.png", 256, 256).unwrap());
+    assert_ne!(a, classify_url("http://192.0.2.20:8000/images/other.png", 128, 128).unwrap());
+    assert!(classify_url("file:///etc/passwd", 128, 128).is_none());
+    assert!(classify_url("/images/logo.png", 128, 128).is_none());
+    assert!(classify_url("http://192.0.2.20/x.png", 0, 128).is_none());
+}
