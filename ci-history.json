@@ -1,5 +1,7 @@
-{"updated":"2026-10-09T08:57:19Z",
-"ci":[],
+{"updated":"2026-10-09T08:58:30Z",
+"ci":[
+{"id":37907603998,"at":"2026-10-09T08:51:56Z","sha":"d76ffbbd1","title":"Live TV from Tunarr with channel surfing; lenient streaming; Go to Show; top-bar clock","pr":null,"conclusion":"success","attempt":1,"jobs":{"host unit tests (default features)":360,"host unit tests (hostsim)":273,"cross-build (armv7) + artifact assertions":379,"host lint + type-checks":135,"host harness tests":149,"host python/shell/C gates":93,"host checks (NOT a device gate)":5}}
+],
 "sim":[
 {"id":37907603922,"at":"2026-10-09T08:51:56Z","sha":"d76ffbbd1","title":"Live TV from Tunarr with channel surfing; lenient streaming; Go to Show; top-bar clock","pr":null,"conclusion":"failure","attempt":1,"jobs":{"macOS tests against bundled FFmpeg and ASS":289,"Linux simulator build + launch":306,"Windows launcher syntax":12},"failed":["macOS simulator build + launch"]}
 ],
