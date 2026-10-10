@@ -74,9 +74,8 @@ fn kind_of(kind: c_int) -> TileKind {
         // A playlist is a set of titles with no watch state of its own: the collection's tile
         // (its count as the caption, its name on the neutral tile when it has no art).
         KIND_COLLECTION | KIND_PLAYLIST => TileKind::Collection,
-        // A suggested channel draws as a channel: its poster, else a tile naming it, captioned
-        // with why it is suggested.
-        KIND_CHANNEL | KIND_CHANNEL_IDEA => TileKind::Channel,
+        KIND_CHANNEL => TileKind::Channel,
+        KIND_CHANNEL_IDEA => TileKind::Suggestion,
         _ => TileKind::Other,
     }
 }
@@ -107,7 +106,7 @@ mod tests {
         assert_eq!(kind(KIND_COLLECTION), TileKind::Collection);
         assert_eq!(kind(KIND_CHANNEL), TileKind::Channel);
         assert_eq!(kind(KIND_PLAYLIST), TileKind::Collection);
-        assert_eq!(kind(KIND_CHANNEL_IDEA), TileKind::Channel);
+        assert_eq!(kind(KIND_CHANNEL_IDEA), TileKind::Suggestion);
         assert_eq!(kind(9), TileKind::Other);
     }
 
