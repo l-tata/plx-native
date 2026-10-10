@@ -1492,17 +1492,32 @@ mod live_prime_tests {
     /// carry the live cushion.
     #[test]
     fn a_live_channel_does_not_start_on_the_file_cushion() {
-        assert!(decoder_ready(PRIME_NS, PRIME_AUDIO_NS, true, false), "a file still starts at once");
-        assert!(!decoder_ready(PRIME_NS, PRIME_AUDIO_NS, true, true), "a channel waits for its cushion");
-        assert!(!decoder_ready(LIVE_PRIME_NS, PRIME_AUDIO_NS, true, true), "audio needs its cushion too");
-        assert!(decoder_ready(LIVE_PRIME_NS, LIVE_PRIME_NS, true, true));
+        assert!(decoder_ready(PRIME_NS, PRIME_AUDIO_NS, true, false, false), "a file still starts at once");
+        assert!(!decoder_ready(PRIME_NS, PRIME_AUDIO_NS, true, true, false), "a channel waits for its cushion");
+        assert!(!decoder_ready(LIVE_PRIME_NS, PRIME_AUDIO_NS, true, true, false), "audio needs its cushion too");
+        assert!(decoder_ready(LIVE_PRIME_NS, LIVE_PRIME_NS, true, true, false));
         assert!(LIVE_PRIME_NS >= 1_000_000_000, "at least a second of each lane");
     }
 
     #[test]
     fn an_audioless_channel_still_starts_on_video_alone() {
-        assert!(decoder_ready(PRIME_VIDEO_MAX_NS.max(LIVE_PRIME_NS), 0, false, true));
-        assert!(!decoder_ready(PRIME_NS, 0, false, true));
+        assert!(decoder_ready(PRIME_VIDEO_MAX_NS.max(LIVE_PRIME_NS), 0, false, true, false));
+        assert!(!decoder_ready(PRIME_NS, 0, false, true, false));
+    }
+
+    /// **The 4K tune that never started.** A high-bitrate channel fills the pipeline's 8 MB video
+    /// source buffer before the live cushion is in, and the pipeline then takes nothing more until
+    /// it plays. A full video lane starts the channel once the file depths are in; short of them
+    /// it still waits, and a file ignores the signal.
+    #[test]
+    fn a_full_video_lane_starts_a_high_bitrate_channel() {
+        let vbuf = 1_100_000_000; // what 8 MB holds at ~60 Mbit/s
+        assert!(!decoder_ready(vbuf, vbuf, true, true, false), "without the signal it would wait for ever");
+        assert!(decoder_ready(vbuf, vbuf, true, true, true), "a full lane is the cushion the pipeline holds");
+        assert!(!decoder_ready(PRIME_NS / 2, vbuf, true, true, true), "but never short of the file depth");
+        assert!(!decoder_ready(vbuf, PRIME_AUDIO_NS / 2, true, true, true), "nor with too little sound");
+        assert!(decoder_ready(vbuf, 0, false, true, true), "an audioless channel starts on the full lane too");
+        assert!(!decoder_ready(PRIME_NS, 0, true, false, true), "a file is unchanged");
     }
 }
 
@@ -2109,10 +2124,22 @@ fn prime_depth(live: bool) -> (i64, i64) {
 
 /// Whether the decoder may start: both lanes at their [`prime_depth`], or — for a stream proven
 /// audioless — video alone at the video-only escape.
-fn decoder_ready(accepted_vbuf: i64, accepted_abuf: i64, audio_expected: bool, live: bool) -> bool {
-    let (video, audio) = prime_depth(live);
+///
+/// **A live channel also starts on a FULL video lane** (`video_full`: the pipeline's last answer
+/// to a video feed was BufferFull), once the file depths are in. The Load caps the pipeline's
+/// video source buffer at 8 MB (`srcBufferLevelVideo` in [`PAYLOAD_AV`]), and a 4K channel above
+/// ~40 Mbit/s fills that in less than [`LIVE_PRIME_NS`]: the pipeline then accepts nothing more
+/// until it plays, and it does not play until the cushion is in — so the tune hung (owner report
+/// on 4K UHD channels, 2026-10-10). A full lane is as much cushion as the pipeline will hold.
+fn decoder_ready(accepted_vbuf: i64, accepted_abuf: i64, audio_expected: bool, live: bool, video_full: bool) -> bool {
+    let (mut video, mut audio) = prime_depth(live);
+    if live && video_full {
+        (video, audio) = (PRIME_NS, PRIME_AUDIO_NS);
+    }
     if audio_expected {
         accepted_vbuf >= video && accepted_abuf >= audio
+    } else if live && video_full {
+        accepted_vbuf >= video
     } else {
         accepted_vbuf >= PRIME_VIDEO_MAX_NS.max(video)
     }
@@ -2471,9 +2498,16 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine) {
     // demuxer proved audioless may use the video-only escape; `abuf <= 0` alone is starvation, not
     // evidence that no audio exists.
     let audio_expected = SHARED.hls_audio_expected.load(Ordering::Acquire) || playable_abuf > 0;
-    let decoder_ready = decoder_ready(accepted_vbuf, accepted_abuf, audio_expected, eng.live);
+    // The video lane's last feed was refused as BufferFull (`feed_stream`'s state read-out).
+    let video_full = SHARED.dg_feed_state.load(Ordering::Relaxed) == 2;
+    let decoder_ready = decoder_ready(accepted_vbuf, accepted_abuf, audio_expected, eng.live, video_full);
     if decoder_ready && eng.live {
-        log(&format!("live: primed video={}ms audio={}ms", accepted_vbuf / 1_000_000, accepted_abuf / 1_000_000));
+        log(&format!(
+            "live: primed video={}ms audio={}ms{}",
+            accepted_vbuf / 1_000_000,
+            accepted_abuf / 1_000_000,
+            if video_full { " (video lane full)" } else { "" }
+        ));
     }
     let recovery = SHARED.hls_recovery();
     // A downshift has no discretionary trial reserve, yet it can queue candidate AUs while an

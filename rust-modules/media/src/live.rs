@@ -82,12 +82,16 @@ pub struct StreamFacts {
     pub acodec: &'static str,
     /// Frames per second, 0 when the timestamps did not say.
     pub fps: f64,
+    /// The coded picture size, `(0, 0)` when the probe did not see it (read from an H.264
+    /// sequence parameter set; an HEVC channel is declared 4K whatever its size). It decides the
+    /// Load's sink envelope: a 4K H.264 channel declared as 1080p is given a 1080p decoder.
+    pub raster: (u16, u16),
 }
 
 impl StreamFacts {
     /// What Tunarr sends unless its transcode config says otherwise (`TranscodeConfig.ts`): H.264,
     /// AAC, and a rate the probe could not measure.
-    pub const TUNARR_DEFAULT: StreamFacts = StreamFacts { vcodec: "h264", acodec: "aac", fps: 0.0 };
+    pub const TUNARR_DEFAULT: StreamFacts = StreamFacts { vcodec: "h264", acodec: "aac", fps: 0.0, raster: (0, 0) };
 }
 
 /// Why a probe could not say.
@@ -112,10 +116,14 @@ impl std::fmt::Display for ProbeError {
 }
 
 const TS_PACKET: usize = 188;
-/// How much stream a probe reads at most, and how long it waits for it. A 2 Mbit/s Tunarr channel
-/// delivers this in about three seconds; a PMT repeats every few hundred milliseconds.
-const PROBE_BYTES: usize = 1_536 * 1024;
+/// How much stream a probe reads at most, and how long it waits for it. A probe stops as soon as it
+/// has the answer (the PMT, a sequence parameter set and [`PTS_SAMPLES`] frames), so this only
+/// bounds a high-bitrate channel: a 4K UHD stream at 60 Mbit/s spends 6 MB in under a second, the
+/// time [`PTS_SAMPLES`] frames take to arrive. (It was 1.5 MB, a quarter of a second of 4K.)
+const PROBE_BYTES: usize = 6 * 1024 * 1024;
 const PROBE_WINDOW: Duration = Duration::from_secs(12);
+/// How long a probe that already has the rate waits on for an H.264 sequence parameter set.
+const RASTER_WAIT: Duration = Duration::from_secs(2);
 /// Video timestamps a rate measurement wants: under a second of 30p. The median of their gaps,
 /// snapped to the broadcast/film rate within 1 %, needs a handful of steady frames, not seconds of
 /// them — and a probe reads the stream in real time, so every sample here is tune latency.
@@ -158,7 +166,11 @@ pub fn probe(url: &str) -> Result<StreamFacts, ProbeError> {
         got += n as usize;
         // Stop as soon as the answer is complete, not when the buffer is full.
         if let Ok(facts) = analyse(&buf[..got]) {
-            let done = facts.fps > 0.0;
+            // An H.264 channel's size comes with its next keyframe's SPS: worth waiting for (a 4K
+            // channel declared 1080p gets a 1080p decoder), but only so long — past
+            // [`RASTER_WAIT`] the default declaration is used and the first frame tells the rest.
+            let sized = facts.vcodec != "h264" || facts.raster != (0, 0) || started.elapsed() >= RASTER_WAIT;
+            let done = facts.fps > 0.0 && sized;
             result = Ok(facts);
             if done {
                 break;
@@ -182,6 +194,7 @@ pub fn analyse(ts: &[u8]) -> Result<StreamFacts, ProbeError> {
     let mut video: Option<(u16, &'static str)> = None;
     let mut audio: Option<&'static str> = None;
     let mut pts: Vec<i64> = Vec::new();
+    let mut raster = (0u16, 0u16);
     for pkt in packets {
         if pkt[0] != 0x47 {
             continue;
@@ -197,9 +210,14 @@ pub fn analyse(ts: &[u8]) -> Result<StreamFacts, ProbeError> {
                 video = v;
                 audio = a;
             }
-        } else if video.is_some_and(|(vpid, _)| vpid == pid) && pusi && pts.len() < PTS_SAMPLES {
-            if let Some(t) = pes_pts(payload) {
-                pts.push(t);
+        } else if video.is_some_and(|(vpid, _)| vpid == pid) && pusi {
+            if pts.len() < PTS_SAMPLES {
+                if let Some(t) = pes_pts(payload) {
+                    pts.push(t);
+                }
+            }
+            if raster == (0, 0) && video.is_some_and(|(_, c)| c == "h264") {
+                raster = pes_es(payload).and_then(h264_sps_raster).unwrap_or((0, 0));
             }
         }
     }
@@ -208,7 +226,120 @@ pub fn analyse(ts: &[u8]) -> Result<StreamFacts, ProbeError> {
     } else {
         ProbeError::NotPlayable("no programme table in the stream")
     })?;
-    Ok(StreamFacts { vcodec, acodec: audio.unwrap_or(""), fps: rate_of(&pts) })
+    Ok(StreamFacts { vcodec, acodec: audio.unwrap_or(""), fps: rate_of(&pts), raster })
+}
+
+/// The elementary-stream bytes of a PES that begins in this payload (past its header).
+fn pes_es(p: &[u8]) -> Option<&[u8]> {
+    if p.len() < 9 || p[0..3] != [0, 0, 1] {
+        return None;
+    }
+    p.get(9 + usize::from(p[8])..)
+}
+
+/// The coded size an H.264 sequence parameter set in `es` declares (macroblocks × 16, frame
+/// height doubled for field coding; cropping ignored — a 1080p stream reads 1920×1088, which the
+/// sink envelope treats as 1080p). `None` without a complete SPS in these bytes.
+fn h264_sps_raster(es: &[u8]) -> Option<(u16, u16)> {
+    let start = es.windows(4).position(|w| w[0..3] == [0, 0, 1] && w[3] & 0x1f == 7)? + 4;
+    // RBSP: drop the emulation-prevention byte of every 00 00 03.
+    let mut rbsp = Vec::with_capacity(64);
+    let mut zeros = 0;
+    for &b in es[start..].iter().take(256) {
+        if zeros >= 2 && b == 3 {
+            zeros = 0;
+            continue;
+        }
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+        rbsp.push(b);
+    }
+    let mut r = Bits { data: &rbsp, at: 0 };
+    let profile = r.bits(8)?;
+    r.bits(16)?; // constraint flags, level
+    r.ue()?; // seq_parameter_set_id
+    if matches!(profile, 100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135) {
+        let chroma = r.ue()?;
+        if chroma == 3 {
+            r.bits(1)?;
+        }
+        r.ue()?; // bit_depth_luma_minus8
+        r.ue()?; // bit_depth_chroma_minus8
+        r.bits(1)?; // qpprime_y_zero_transform_bypass
+        if r.bits(1)? == 1 {
+            for i in 0..if chroma == 3 { 12 } else { 8 } {
+                if r.bits(1)? == 1 {
+                    let size = if i < 6 { 16 } else { 64 };
+                    let (mut last, mut next) = (8i64, 8i64);
+                    for _ in 0..size {
+                        if next != 0 {
+                            next = (last + r.se()? + 256) % 256;
+                        }
+                        if next != 0 {
+                            last = next;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    r.ue()?; // log2_max_frame_num_minus4
+    match r.ue()? {
+        0 => {
+            r.ue()?;
+        }
+        1 => {
+            r.bits(1)?;
+            r.se()?;
+            r.se()?;
+            for _ in 0..r.ue()?.min(255) {
+                r.se()?;
+            }
+        }
+        _ => {}
+    }
+    r.ue()?; // max_num_ref_frames
+    r.bits(1)?; // gaps_in_frame_num_value_allowed
+    let w_mbs = r.ue()? + 1;
+    let h_units = r.ue()? + 1;
+    let frame_mbs_only = r.bits(1)?;
+    let w = w_mbs * 16;
+    let h = h_units * 16 * (2 - frame_mbs_only);
+    (w <= 8192 && h <= 8192).then(|| (w as u16, h as u16))
+}
+
+/// A big-endian bit reader over an RBSP, with the Exp-Golomb codes an SPS is written in.
+struct Bits<'a> {
+    data: &'a [u8],
+    at: usize,
+}
+
+impl Bits<'_> {
+    fn bit(&mut self) -> Option<u32> {
+        let byte = *self.data.get(self.at / 8)?;
+        let b = (byte >> (7 - self.at % 8)) & 1;
+        self.at += 1;
+        Some(u32::from(b))
+    }
+
+    fn bits(&mut self, n: u32) -> Option<u32> {
+        (0..n).try_fold(0u32, |v, _| Some(v << 1 | self.bit()?))
+    }
+
+    fn ue(&mut self) -> Option<u32> {
+        let mut zeros = 0;
+        while self.bit()? == 0 {
+            zeros += 1;
+            if zeros > 31 {
+                return None;
+            }
+        }
+        Some((1u32 << zeros) - 1 + self.bits(zeros)?)
+    }
+
+    fn se(&mut self) -> Option<i64> {
+        let k = i64::from(self.ue()?);
+        Some(if k % 2 == 1 { (k + 1) / 2 } else { -k / 2 })
+    }
 }
 
 /// The offset of the first packet boundary three consecutive sync bytes agree on.
@@ -467,6 +598,54 @@ mod tests {
         no_pmt.extend(pat(0x1000));
         no_pmt.extend(pat(0x1000));
         assert_eq!(analyse(&no_pmt), Err(ProbeError::NotPlayable("no programme table in the stream")));
+    }
+
+    /// An H.264 SPS writer for the tests: Exp-Golomb codes into bytes.
+    struct Writer(Vec<bool>);
+    impl Writer {
+        fn bits(&mut self, v: u32, n: u32) -> &mut Self {
+            for i in (0..n).rev() {
+                self.0.push(v >> i & 1 == 1);
+            }
+            self
+        }
+        fn ue(&mut self, v: u32) -> &mut Self {
+            let n = 32 - (v + 1).leading_zeros();
+            self.bits(0, n - 1).bits(v + 1, n)
+        }
+        fn bytes(&self) -> Vec<u8> {
+            self.0.chunks(8).map(|c| c.iter().enumerate().fold(0u8, |b, (i, &bit)| b | (u8::from(bit) << (7 - i)))).collect()
+        }
+    }
+
+    /// A High-profile SPS for `w_mbs` × `h_mbs` macroblocks, progressive, after a start code.
+    fn sps(w_mbs: u32, h_mbs: u32) -> Vec<u8> {
+        let mut w = Writer(Vec::new());
+        w.bits(100, 8).bits(0, 8).bits(51, 8).ue(0) // High, level 5.1, sps 0
+            .ue(1).ue(0).ue(0).bits(0, 1).bits(0, 1) // 4:2:0, 8-bit, no scaling matrices
+            .ue(0).ue(0).ue(4) // log2_max_frame_num, poc type 0, its lsb
+            .ue(4).bits(0, 1) // ref frames, gaps
+            .ue(w_mbs - 1).ue(h_mbs - 1).bits(1, 1).bits(1, 1).bits(0, 1).bits(1, 1); // frame only, 8x8, no crop, vui...
+        let mut out = vec![0, 0, 0, 1, 0x67];
+        out.extend(w.bytes());
+        out
+    }
+
+    /// **A 4K channel is declared as 4K.** The probe reads the H.264 stream's own size from its
+    /// SPS; a 1080p one reads 1920×1088 (coded), which the sink envelope keeps at 1080p.
+    #[test]
+    fn the_probe_reads_an_h264_channels_size_from_its_sps() {
+        assert_eq!(h264_sps_raster(&sps(240, 135)), Some((3840, 2160)));
+        assert_eq!(h264_sps_raster(&sps(120, 68)), Some((1920, 1088)));
+        assert_eq!(h264_sps_raster(&[0, 0, 1, 0x65, 1, 2, 3]), None, "no SPS: no size");
+        // In a PES on the video PID, the way Tunarr's MPEG-TS carries it.
+        let mut payload = vec![0, 0, 1, 0xe0, 0, 0, 0x80, 0x80, 5, 0x21, 0, 1, 0, 1];
+        payload.extend_from_slice(&[0, 0, 0, 1, 0x09, 0xf0]);
+        payload.extend(sps(240, 135));
+        let mut ts = pat(0x1000);
+        ts.extend(pmt(&[(0x1b, 0x100, &[]), (0x0f, 0x101, &[])]));
+        ts.extend(packet(0x100, true, &payload));
+        assert_eq!(analyse(&ts).unwrap().raster, (3840, 2160));
     }
 
     #[test]

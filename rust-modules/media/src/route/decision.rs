@@ -5386,9 +5386,14 @@ pub fn install_live_stream(ps: &mut PlaybackSession, session: crate::live::LiveS
     ps.cur_auto_original_watched = false;
     ps.cur_transport_kbps = 0;
     ps.auto_original = None;
-    // The channel's raster is not known before the first frame; 1080p is what Tunarr's default
-    // transcode config produces and what the H.264 envelope declares for it.
-    set_stream_source_raster(ps, 1920, 1080);
+    // The channel's raster as the probe read it from the stream's SPS (a 4K H.264 channel must be
+    // declared 4K, or it gets a 1080p decoder); 1080p — Tunarr's default transcode — when it did
+    // not see one.
+    let (w, h) = match facts.raster {
+        (0, _) | (_, 0) => (1920, 1080),
+        r => r,
+    };
+    set_stream_source_raster(ps, w, h);
     set_url(ps, url);
     ps.live = Some(session);
     true

@@ -441,7 +441,7 @@ mod known_facts_tests {
     #[test]
     fn a_measured_channel_starts_without_its_probe_until_it_fails() {
         let url = "http://192.0.2.20:8000/stream/channels/1.ts";
-        let facts = StreamFacts { vcodec: "h264", acodec: "aac", fps: 29.97 };
+        let facts = StreamFacts { vcodec: "h264", acodec: "aac", fps: 29.97, raster: (1920, 1080) };
         let mut known = std::collections::HashMap::new();
         assert_eq!(known_facts(&known, url, 0), None, "never measured: probe");
         known.insert(url.to_owned(), facts);
