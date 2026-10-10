@@ -62,5 +62,18 @@
   "livetv.studio.empty": "Los canales aparecerán aquí cuando se haya leído tu biblioteca de Plex.",
   "livetv.studio.number": "Canal {number}",
   "livetv.behind": "DIFERIDO",
-  "livetv.jump_to_live": "OK para volver al directo"
+  "livetv.jump_to_live": "OK para volver al directo",
+  "livetv.studio.edit": "Editar",
+  "livetv.studio.done": "Listo",
+  "livetv.studio.kinds_both": "Películas y series",
+  "livetv.studio.kinds_movies": "Solo películas",
+  "livetv.studio.kinds_episodes": "Solo series",
+  "livetv.studio.unwatched": "Solo sin ver",
+  "livetv.studio.rating_any": "Cualquier clasificación",
+  "livetv.studio.rating_up_to": "Hasta {rating}",
+  "livetv.studio.hours": {
+    "one": "{count} hora",
+    "many": "{count} horas",
+    "other": "{count} horas"
+  }
 }

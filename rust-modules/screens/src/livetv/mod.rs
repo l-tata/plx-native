@@ -295,8 +295,17 @@ impl LiveTvScreen {
                         Self::ask(LiveTvReq::Tune { index }, fx);
                     }
                 }
-                studio::Out::Close if self.studio.open => self.studio.open = false,
-                studio::Out::Close => Self::ask(LiveTvReq::Back, fx),
+                // Back to the guide it was opened from — unless the studio is the page itself
+                // (no Tunarr, no kept channel), when there is nothing under it to go back to.
+                studio::Out::Close if self.studio.open && Face::page(view, self.force_setup, false) != Face::Studio
+                    && Face::page(view, self.force_setup, false) != Face::Setup =>
+                {
+                    self.studio.open = false
+                }
+                studio::Out::Close => {
+                    self.studio.open = false;
+                    Self::ask(LiveTvReq::Back, fx)
+                }
             }
         }
         fx.invalidate(Provenance::Input);
@@ -695,6 +704,9 @@ impl LiveTvScreen {
         }
         let face = self.face(cx);
         if face == Face::Studio {
+            // Once on screen the studio stays until it is left: a channel kept from it must not
+            // swap the page for the guide that channel just made possible.
+            self.studio.open = true;
             let mut outs = Vec::new();
             if self.studio.tick(view, now_ms, wall, self.focused(cx), &mut outs) {
                 fx.invalidate(Provenance::Lifecycle);

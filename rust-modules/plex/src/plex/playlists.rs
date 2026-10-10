@@ -50,8 +50,17 @@ impl Client {
     /// Create a video playlist of `rating_keys` titled `title`; its ratingKey, or `None` when the
     /// server refused or never answered.
     pub fn create_playlist(&self, title: &str, rating_keys: &[&str]) -> Option<String> {
-        let page = self.post_json(&create_query(self.machine_id(), title, rating_keys))?;
+        let machine = self.playlist_machine()?;
+        let page = self.post_json(&create_query(&machine, title, rating_keys))?;
         page.metadata.into_iter().next().map(|m| m.rating_key).filter(|rk| !rk.is_empty())
+    }
+
+    /// The server's machineIdentifier for an item URI: the one already learned, else asked of
+    /// `/identity` — a URI naming no server (`server:///…`) would add nothing. `None` when the
+    /// server will not say, and then nothing is written.
+    fn playlist_machine(&self) -> Option<String> {
+        let known = self.machine_id();
+        if known.is_empty() { self.machine_identity() } else { Some(known.to_owned()) }
     }
 
     /// Set a playlist's title and description. `true` when the server accepted it.
@@ -61,6 +70,7 @@ impl Client {
 
     /// Replace a dumb playlist's items with `rating_keys`.
     pub fn replace_playlist_items(&self, rating_key: &str, rating_keys: &[&str]) -> bool {
+        let Some(machine) = self.playlist_machine() else { return false };
         let cleared = self
             .send_status(&format!("/playlists/{rating_key}/items"), Method::Delete)
             .is_some_and(|s| (200..300).contains(&s));
@@ -68,7 +78,7 @@ impl Client {
             return false;
         }
         let path = QueryBuilder::new(format!("/playlists/{rating_key}/items"))
-            .str("uri", &items_uri(self.machine_id(), rating_keys))
+            .str("uri", &items_uri(&machine, rating_keys))
             .build();
         (200..300).contains(&self.put(&path))
     }

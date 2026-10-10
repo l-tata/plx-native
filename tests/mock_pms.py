@@ -1647,6 +1647,11 @@ class MockPms:
         # recorded cases carry); a shuffle takes the next id from 101 up.
         self.play_queues = {}
         self.next_queue_id = 100
+        # Playlists the app made (`POST /playlists` — a virtual channel's Keep): ratingKey ->
+        # {"row": metadata row, "items": [item rows]}, from 61001 up. Edits and deletes land in the
+        # write log like every other write; they last until the mock stops.
+        self.made_playlists = {}
+        self.next_playlist_id = 61000
         self.requests = []  # (path, status) in arrival order, for the harness
         self.unknown = []
         self.writes = []
@@ -1730,6 +1735,72 @@ class MockPms:
         with self.lock:
             self.writes.append((method, safe, body))
         print(f"mock_pms: WRITE {method} {safe}", file=sys.stderr, flush=True)
+
+    def made_playlist_route(self, method, p, segs, q, path, body, j, lib):
+        """The writable half of `/playlists` (`plex::playlists`: create, edit, replace items,
+        delete) and the reads of what it made. `None` for a request this does not answer."""
+        def items_of(uri):
+            keys = uri.rsplit("/library/metadata/", 1)[-1] if "/library/metadata/" in uri else ""
+            return [lib.items[int(k)] for k in keys.split(",") if k.isdigit() and int(k) in lib.items]
+
+        def refresh(entry):
+            entry["row"]["leafCount"] = len(entry["items"])
+            entry["row"]["duration"] = sum(it.get("duration", 0) for it in entry["items"])
+
+        if p == "/playlists" and method == "POST":
+            self.note_write(method, path, body)
+            with self.lock:
+                self.next_playlist_id += 1
+                rk = self.next_playlist_id
+                entry = {"row": {"ratingKey": str(rk), "key": f"/playlists/{rk}/items", "type": "playlist",
+                                 "title": q.get("title", ""), "summary": "", "smart": False,
+                                 "playlistType": "video", "composite": f"/playlists/{rk}/composite/1700000000"},
+                         "items": items_of(q.get("uri", ""))}
+                refresh(entry)
+                self.made_playlists[rk] = entry
+                row = dict(entry["row"])
+            return j(self.container(Metadata=[row], size=1))
+        if len(segs) < 2 or segs[0] != "playlists" or not segs[1].isdigit():
+            return None
+        rk = int(segs[1])
+        with self.lock:
+            entry = self.made_playlists.get(rk)
+        if entry is None:
+            return None
+        if len(segs) == 2 and method == "PUT":
+            self.note_write(method, path, body)
+            with self.lock:
+                for field in ("title", "summary"):
+                    value = q.get(f"{field}.value", q.get(field))
+                    if value is not None:
+                        entry["row"][field] = value
+            return j(self.container())
+        if len(segs) == 2 and method == "DELETE":
+            self.note_write(method, path, body)
+            with self.lock:
+                self.made_playlists.pop(rk, None)
+            return j(self.container())
+        if len(segs) == 3 and segs[2] == "items":
+            if method == "DELETE":
+                self.note_write(method, path, body)
+                with self.lock:
+                    entry["items"] = []
+                    refresh(entry)
+                return j(self.container())
+            if method == "PUT":
+                self.note_write(method, path, body)
+                with self.lock:
+                    entry["items"] = entry["items"] + items_of(q.get("uri", ""))
+                    refresh(entry)
+                return j(self.container())
+            with self.lock:
+                rows = [dict(it, playlistItemID=n) for n, it in enumerate(entry["items"], 1)]
+            return j(self.container(Metadata=rows, size=len(rows)))
+        if len(segs) == 2:
+            with self.lock:
+                row = dict(entry["row"])
+            return j(self.container(Metadata=[row], size=1))
+        return None
 
     # --- subtitle search & download (`docs/pms-api.md` §8) -----------------------------------
 
@@ -2030,8 +2101,13 @@ class MockPms:
             if d == "firstCharacter":
                 return j(self.container(Directory=lib.first_characters(segs[2], q)))
             return j(self.container(Directory=[]))
+        made = self.made_playlist_route(method, p, segs, q, path, body, j, lib)
+        if made is not None:
+            return made
         if p == "/playlists":
             rows, _ = lib.playlists()
+            with self.lock:
+                rows = rows + [dict(m["row"]) for m in self.made_playlists.values()]
             if q.get("playlistType", "video") != "video":
                 rows = []
             return j(self.container(Metadata=rows, size=len(rows)))

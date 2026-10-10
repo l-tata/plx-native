@@ -278,5 +278,50 @@
   "livetv.jump_to_live": {
     "value": "OK to jump to live",
     "description": "Live TV banner: hint beside the channel name when a virtual channel is behind live; OK is the remote's button"
+  },
+  "livetv.studio.edit": {
+    "value": "Edit",
+    "description": "Live TV channel studio: button that opens the options for a suggested channel"
+  },
+  "livetv.studio.done": {
+    "value": "Done",
+    "description": "Live TV channel studio: closes the channel options"
+  },
+  "livetv.studio.kinds_both": {
+    "value": "Films & Shows",
+    "description": "Live TV channel option: the channel airs films and TV episodes"
+  },
+  "livetv.studio.kinds_movies": {
+    "value": "Films Only",
+    "description": "Live TV channel option: the channel airs films only"
+  },
+  "livetv.studio.kinds_episodes": {
+    "value": "Shows Only",
+    "description": "Live TV channel option: the channel airs TV episodes only"
+  },
+  "livetv.studio.unwatched": {
+    "value": "Unwatched Only",
+    "description": "Live TV channel option, on or off: only titles the viewer has not watched"
+  },
+  "livetv.studio.rating_any": {
+    "value": "Any Rating",
+    "description": "Live TV channel option: no content rating limit"
+  },
+  "livetv.studio.rating_up_to": {
+    "value": "Rated up to {rating}",
+    "description": "Live TV channel option: the highest content rating allowed. {rating} is a rating such as PG-13.",
+    "args": {
+      "rating": "str"
+    }
+  },
+  "livetv.studio.hours": {
+    "value": {
+      "one": "{count} hour",
+      "other": "{count} hours"
+    },
+    "args": {
+      "count": "i64"
+    },
+    "description": "Live TV channel studio: how many hours of programmes a channel holds"
   }
 }

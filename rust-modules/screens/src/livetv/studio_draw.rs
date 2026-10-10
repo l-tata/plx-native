@@ -82,24 +82,45 @@ fn act_label(st: &Studio, act: Act, card: &Card<'_>) -> String {
         Act::Delete if matches!(card, Card::Channel(c) if st.confirm_delete.as_deref() == Some(c.playlist.as_str())) =>
             msg::livetv_studio_delete_confirm().to_owned(),
         Act::Delete => msg::livetv_studio_delete().to_owned(),
+        Act::Edit => msg::livetv_studio_edit().to_owned(),
     }
 }
 
 /// The focused card's action pills, left to right.
+/// While the options are open ([`Zone::Edit`]) the row is the options instead, each with whether
+/// it is SELECTED (an option that is on).
 pub fn act_rects(st: &Studio, card: &Card<'_>, yours: bool, measure: &dyn plx_machine::machine::Measure) -> Vec<(Rect, String)> {
+    act_row(st, card, yours, measure).into_iter().map(|(r, label, _)| (r, label)).collect()
+}
+
+fn act_row(st: &Studio, card: &Card<'_>, yours: bool, measure: &dyn plx_machine::machine::Measure) -> Vec<(Rect, String, bool)> {
     let y = acts_y(yours);
     let mut x = MARGIN_X;
-    studio::acts(card)
-        .into_iter()
-        .map(|a| {
-            let label = act_label(st, a, card);
-            let w = TabPill::width_measured(&label, ACT_SZ, measure);
-            let r = Rect::new(x, y, w, ACT_H);
-            x += w + theme::space::SM;
-            (r, label)
-        })
-        .collect()
+    let mut place = |label: String, on: bool| {
+        let w = TabPill::width_measured(&label, ACT_SZ, measure);
+        let r = Rect::new(x, y, w, ACT_H);
+        x += w + theme::space::SM;
+        (r, label, on)
+    };
+    if st.zone == Zone::Edit {
+        if let Some(r) = card.suggestion().and_then(|s| st.draft_of(s)) {
+            return studio::EDIT_ITEMS
+                .iter()
+                .map(|&item| {
+                    let on = match item {
+                        studio::EditItem::Unwatched => r.rules.unwatched_only,
+                        studio::EditItem::Kinds => r.rules.kinds != plx_data::vchannel::recipe::Kinds::Both,
+                        studio::EditItem::Rating => r.rules.max_rating_rank > 0,
+                        studio::EditItem::Done => false,
+                    };
+                    place(studio::edit_label(item, r), on)
+                })
+                .collect();
+        }
+    }
+    studio::acts(card).into_iter().map(|a| place(act_label(st, a, card), false)).collect()
 }
+
 
 /// The picture a card stands for: what is on it right now, else the suggestion's backdrop, else
 /// the channel playlist's composite.
@@ -156,10 +177,12 @@ impl LiveTvScreen {
         p.grad4(Rect::new(0.0, ramp_top, SCR_W, SCR_H - ramp_top), [clear, clear, deep, deep]);
 
         self.draw_copy(p, view, &card, schedule, now, measure);
-        for (i, (r, label)) in act_rects(st, &card, yours, measure).iter().enumerate() {
+        let cursor = if st.zone == Zone::Edit { st.edit } else { st.act };
+        for (i, (r, label, on)) in act_row(st, &card, yours, measure).iter().enumerate() {
             let label = std::ffi::CString::new(label.as_str()).unwrap_or_default();
             TabPill::new(label.as_ptr(), ACT_SZ, *r)
-                .focused(focused && st.zone == Zone::Actions && i == st.act)
+                .focused(focused && st.zone != Zone::Cards && i == cursor)
+                .selected(*on)
                 .plated()
                 .draw(&plx_ui::Env::inert(), p);
         }
@@ -196,8 +219,8 @@ impl LiveTvScreen {
         let x = MARGIN_X;
         let mut y = COPY_TOP;
         let (over, name, why, facts): (String, &str, &str, String) = match card {
-            Card::Idea(s) => (msg::livetv_studio_suggested().to_owned(), &s.name, &s.why, s.tagline.clone()),
-            Card::Surprise(Some(s)) => (msg::livetv_studio_surprise().to_owned(), &s.name, &s.why, s.tagline.clone()),
+            Card::Idea(s) => (msg::livetv_studio_suggested().to_owned(), &s.name, &s.why, self.studio.estimate_of(s).map_or_else(|| s.tagline.clone(), studio::estimate_line)),
+            Card::Surprise(Some(s)) => (msg::livetv_studio_surprise().to_owned(), &s.name, &s.why, self.studio.estimate_of(s).map_or_else(|| s.tagline.clone(), studio::estimate_line)),
             Card::Surprise(None) => (String::new(), msg::livetv_studio_surprise(), msg::livetv_studio_surprise_body(), String::new()),
             Card::Channel(c) => (msg::livetv_studio_number(&c.number()), &c.recipe.name, &c.recipe.tagline, String::new()),
         };
@@ -316,6 +339,7 @@ impl LiveTvScreen {
         match st.zone {
             Zone::Cards => card_rect(st, st.row, st.col[st.row], yours),
             Zone::Actions => act_rects(st, &card, yours, measure).get(st.act).map(|(r, _)| *r).unwrap_or_else(guide_frame),
+            Zone::Edit => act_rects(st, &card, yours, measure).get(st.edit).map(|(r, _)| *r).unwrap_or_else(guide_frame),
         }
     }
 }

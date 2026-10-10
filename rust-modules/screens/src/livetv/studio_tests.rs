@@ -1,6 +1,7 @@
 use super::*;
 use plx_data::livetv::LiveTvState;
-use plx_data::vchannel::recipe::Recipe;
+use plx_data::vchannel::recipe::{Kinds, Recipe};
+use plx_data::vchannel::catalog::Estimate;
 use plx_machine::machine::Key;
 
 const NOW: i64 = 1_760_000_000_000;
@@ -121,7 +122,7 @@ fn not_interested_dismisses_and_surprise_draws() {
     let mut st = Studio::default();
     let mut out = Vec::new();
     st.zone = Zone::Actions;
-    st.act = 3;
+    st.act = acts(&rows(s.view())[ROW_SUGGESTED][0]).iter().position(|a| *a == Act::NotInterested).unwrap();
     st.activate(s.view(), NOW, &mut out);
     assert_eq!(out.pop(), Some(Out::Store(VCmd::Dismiss { id: "a".into() })));
     st.col[ROW_SUGGESTED] = 2; // Surprise me
@@ -152,4 +153,61 @@ fn programmes_read_as_a_viewer_names_them() {
     let film = Program { title: "Heat".into(), year: 1995, ..Default::default() };
     assert_eq!(programme_line(&film), "Heat (1995)");
     assert_eq!(next_style(Style::InOrder), Style::Random);
+}
+
+#[test]
+fn reshuffle_always_puts_something_else_on_now() {
+    let programmes: Vec<Program> = (0..6).map(|i| programme(&i.to_string(), &format!("Show {i}"))).collect();
+    let schedule = Schedule::new(programmes, Style::Random, 11, NOW - 5 * 3_600_000);
+    for t in 0..20 {
+        let wall = NOW + t * 977_000;
+        let before = schedule.at(wall).unwrap().program;
+        let seed = fresh_seed(Some(&schedule), 11, wall);
+        assert_ne!(schedule.reseeded(seed).at(wall).unwrap().program, before, "at {wall}");
+    }
+    assert_eq!(fresh_seed(None, 11, NOW), fresh_seed(None, 11, NOW), "deterministic without a timeline");
+}
+
+#[test]
+fn edit_opens_the_options_and_each_change_previews_the_draft_again() {
+    let s = state(&["a"], Vec::new());
+    let mut st = Studio::default();
+    let mut out = Vec::new();
+    st.zone = Zone::Actions;
+    st.act = acts(&rows(s.view())[ROW_SUGGESTED][0]).iter().position(|a| *a == Act::Edit).unwrap();
+    st.activate(s.view(), NOW, &mut out);
+    assert_eq!(st.zone, Zone::Edit);
+    assert!(out.is_empty(), "opening the options changes nothing");
+    // Kinds: films and shows -> films only.
+    assert!(st.key(Key::Ok, s.view(), NOW, &mut out));
+    let Some(Out::Store(VCmd::Preview { recipe, .. })) = out.pop() else { panic!("{out:?}") };
+    assert_eq!(recipe.rules.kinds, Kinds::Movies);
+    // Unwatched only, on.
+    st.key(Key::Right, s.view(), NOW, &mut out);
+    st.key(Key::Ok, s.view(), NOW, &mut out);
+    let Some(Out::Store(VCmd::Preview { recipe, .. })) = out.pop() else { panic!() };
+    assert!(recipe.rules.unwatched_only && recipe.rules.kinds == Kinds::Movies, "options add up");
+    // Rating: any -> G.
+    st.key(Key::Right, s.view(), NOW, &mut out);
+    st.key(Key::Ok, s.view(), NOW, &mut out);
+    let Some(Out::Store(VCmd::Preview { recipe, .. })) = out.pop() else { panic!() };
+    assert_eq!(recipe.rules.max_rating_rank, 1);
+    assert_eq!(edit_label(EditItem::Rating, &recipe), plx_platform::i18n::msg::livetv_studio_rating_up_to("G"));
+    // Done returns to the actions, on Edit; Keep then keeps the edited draft.
+    st.key(Key::Right, s.view(), NOW, &mut out);
+    st.key(Key::Ok, s.view(), NOW, &mut out);
+    assert_eq!((st.zone, acts(&rows(s.view())[ROW_SUGGESTED][0])[st.act]), (Zone::Actions, Act::Edit));
+    st.act = 0;
+    st.activate(s.view(), NOW, &mut out);
+    let Some(Out::Store(VCmd::Keep { recipe, .. })) = out.pop() else { panic!() };
+    assert!(recipe.rules.unwatched_only && recipe.rules.max_rating_rank == 1);
+}
+
+#[test]
+fn options_cycle_and_the_count_reads_naturally() {
+    assert_eq!(next_kinds(next_kinds(next_kinds(Kinds::Both))), Kinds::Both);
+    assert_eq!((next_rating(0), next_rating(2), next_rating(3)), (1, 3, 0));
+    let line = estimate_line(&Estimate { films: 1, shows: 0, programmes: 1, hours: 2.4 });
+    assert_eq!(line, format!("{} \u{b7} {}", plx_platform::i18n::msg::browse_person_films(1), plx_platform::i18n::msg::livetv_studio_hours(2)));
+    assert_eq!(estimate_line(&Estimate::default()), "");
 }

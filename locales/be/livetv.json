@@ -62,5 +62,19 @@
   "livetv.studio.empty": "Каналы з’явяцца тут, калі будзе прачытана ваша бібліятэка Plex.",
   "livetv.studio.number": "Канал {number}",
   "livetv.behind": "ЗАТРЫМКА",
-  "livetv.jump_to_live": "OK — вярнуцца ў эфір"
+  "livetv.jump_to_live": "OK — вярнуцца ў эфір",
+  "livetv.studio.edit": "Змяніць",
+  "livetv.studio.done": "Гатова",
+  "livetv.studio.kinds_both": "Фільмы і серыялы",
+  "livetv.studio.kinds_movies": "Толькі фільмы",
+  "livetv.studio.kinds_episodes": "Толькі серыялы",
+  "livetv.studio.unwatched": "Толькі непрагледжанае",
+  "livetv.studio.rating_any": "Любы ўзроставы рэйтынг",
+  "livetv.studio.rating_up_to": "Да {rating}",
+  "livetv.studio.hours": {
+    "one": "{count} гадзіна",
+    "few": "{count} гадзіны",
+    "many": "{count} гадзін",
+    "other": "{count} гадзіны"
+  }
 }

@@ -30,7 +30,8 @@ use std::collections::HashMap;
 use plx_data::livetv::suggested::SURPRISE_ID;
 use plx_data::livetv::LiveTvView;
 use plx_data::vchannel::channels::{VChannel, VCmd, WriteDone};
-use plx_data::vchannel::recipe::Recipe;
+use plx_data::vchannel::catalog::Estimate;
+use plx_data::vchannel::recipe::{Kinds, Recipe};
 use plx_data::vchannel::schedule::{mix, Program, Schedule, Style};
 use plx_data::vchannel::suggest::Suggestion;
 
@@ -84,14 +85,88 @@ pub enum Act {
     Surprise,
     Watch,
     Delete,
+    /// Open the suggestion's options ([`EditItem`]).
+    Edit,
+}
+
+/// One of a suggestion's options, as the Edit row offers them left to right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditItem {
+    /// Films and shows, films only, shows only.
+    Kinds,
+    /// Only titles the profile has not watched.
+    Unwatched,
+    /// The highest content rating allowed.
+    Rating,
+    Done,
+}
+
+pub const EDIT_ITEMS: [EditItem; 4] = [EditItem::Kinds, EditItem::Unwatched, EditItem::Rating, EditItem::Done];
+
+/// The next kinds, as the option cycles them.
+pub fn next_kinds(k: Kinds) -> Kinds {
+    match k {
+        Kinds::Both => Kinds::Movies,
+        Kinds::Movies => Kinds::Episodes,
+        Kinds::Episodes => Kinds::Both,
+    }
+}
+
+/// The next rating ceiling (a `recipe::rating_rank`; 0 = any): any, G, PG, PG-13, any.
+pub fn next_rating(rank: u8) -> u8 {
+    if rank >= 3 { 0 } else { rank + 1 }
+}
+
+/// A rating ceiling's name on the ladder `recipe::rating_rank` reads.
+pub fn rating_name(rank: u8) -> &'static str {
+    match rank {
+        1 => "G",
+        2 => "PG",
+        3 => "PG-13",
+        _ => "R",
+    }
+}
+
+/// An option's label for `recipe`.
+pub fn edit_label(item: EditItem, recipe: &Recipe) -> String {
+    use plx_platform::i18n::msg;
+    match item {
+        EditItem::Kinds => match recipe.rules.kinds {
+            Kinds::Both => msg::livetv_studio_kinds_both(),
+            Kinds::Movies => msg::livetv_studio_kinds_movies(),
+            Kinds::Episodes => msg::livetv_studio_kinds_episodes(),
+        }
+        .to_owned(),
+        EditItem::Unwatched => msg::livetv_studio_unwatched().to_owned(),
+        EditItem::Rating if recipe.rules.max_rating_rank == 0 => msg::livetv_studio_rating_any().to_owned(),
+        EditItem::Rating => msg::livetv_studio_rating_up_to(rating_name(recipe.rules.max_rating_rank)),
+        EditItem::Done => msg::livetv_studio_done().to_owned(),
+    }
+}
+
+/// What a channel holds, as the billboard reads it once its options changed: "12 films · 3 shows
+/// · 40 hours", the empty parts left out.
+pub fn estimate_line(e: &Estimate) -> String {
+    use plx_platform::i18n::msg;
+    let mut parts = Vec::new();
+    if e.films > 0 {
+        parts.push(msg::browse_person_films(e.films as i64));
+    }
+    if e.shows > 0 {
+        parts.push(msg::browse_person_shows(e.shows as i64));
+    }
+    if e.hours >= 1.0 {
+        parts.push(msg::livetv_studio_hours(e.hours.round() as i64));
+    }
+    parts.join(" \u{b7} ")
 }
 
 /// The actions of `card`, left to right.
 pub fn acts(card: &Card<'_>) -> Vec<Act> {
     match card {
-        Card::Idea(_) => vec![Act::Keep, Act::Reshuffle, Act::Order, Act::NotInterested],
+        Card::Idea(_) => vec![Act::Keep, Act::Reshuffle, Act::Order, Act::Edit, Act::NotInterested],
         Card::Surprise(None) => vec![Act::Surprise],
-        Card::Surprise(Some(_)) => vec![Act::Keep, Act::Surprise, Act::Reshuffle, Act::Order],
+        Card::Surprise(Some(_)) => vec![Act::Keep, Act::Surprise, Act::Reshuffle, Act::Order, Act::Edit],
         Card::Channel(_) => vec![Act::Watch, Act::Reshuffle, Act::Order, Act::Delete],
     }
 }
@@ -139,11 +214,24 @@ pub fn programme_line(p: &Program) -> String {
     if p.year > 0 { format!("{} ({})", p.title, p.year) } else { p.title.clone() }
 }
 
+/// A new seed for Reshuffle: one under which something other than what `shown` airs at
+/// `wall_ms` is on now, so a press always visibly changes the channel. Tries a few seeds in a
+/// fixed sequence (deterministic for the press's instant); with one programme, or no timeline yet
+/// to compare against, the first is as good as any.
+pub fn fresh_seed(shown: Option<&Schedule>, seed: u64, wall_ms: i64) -> u64 {
+    let candidate = |k: u64| mix(seed, (wall_ms as u64 | 1).wrapping_add(k));
+    let Some(s) = shown.filter(|s| s.programs().len() > 1) else { return candidate(0) };
+    let now = s.at(wall_ms).map(|slot| slot.program);
+    (0..16).map(candidate).find(|&c| s.reseeded(c).at(wall_ms).map(|slot| slot.program) != now).unwrap_or_else(|| candidate(0))
+}
+
 /// Where the cursor is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Zone {
     Cards,
     Actions,
+    /// The suggestion's options ([`EDIT_ITEMS`]), in place of its actions.
+    Edit,
 }
 
 /// What a key or a press asks the page to do beyond the studio's own state.
@@ -184,6 +272,11 @@ pub struct Studio {
     seen_done: u64,
     /// A confirmation or an error, and when it appeared.
     pub toast: Option<(String, u32)>,
+    /// The option under the cursor while [`Zone::Edit`].
+    pub edit: usize,
+    /// What each edited draft holds, by suggestion id, worked out from the catalog when an
+    /// option changed (so the billboard's count follows the options at once).
+    estimates: HashMap<String, Estimate>,
 }
 
 impl Default for Studio {
@@ -203,6 +296,8 @@ impl Default for Studio {
             confirm_delete: None,
             seen_done: 0,
             toast: None,
+            edit: 0,
+            estimates: HashMap::new(),
         }
     }
 }
@@ -256,6 +351,32 @@ impl Studio {
 
     pub fn draft_of(&self, s: &Suggestion) -> Option<&Recipe> {
         self.drafts.get(&s.id)
+    }
+
+    /// What an edited draft holds, when its options were changed.
+    pub fn estimate_of(&self, s: &Suggestion) -> Option<&Estimate> {
+        self.estimates.get(&s.id)
+    }
+
+    /// OK on an option: change the draft and preview it again, or close the options.
+    fn apply_edit(&mut self, view: LiveTvView<'_>, wall_ms: i64, out: &mut Vec<Out>) {
+        let rows = rows(view);
+        let Some(s) = self.focus(&rows).and_then(|c| c.suggestion().cloned()) else { return };
+        let item = EDIT_ITEMS[self.edit.min(EDIT_ITEMS.len() - 1)];
+        let change: fn(&mut Recipe) = match item {
+            EditItem::Kinds => |r| r.rules.kinds = next_kinds(r.rules.kinds),
+            EditItem::Unwatched => |r| r.rules.unwatched_only = !r.rules.unwatched_only,
+            EditItem::Rating => |r| r.rules.max_rating_rank = next_rating(r.rules.max_rating_rank),
+            EditItem::Done => {
+                self.zone = Zone::Actions;
+                self.act = acts(&Card::Idea(&s)).iter().position(|a| *a == Act::Edit).unwrap_or(0);
+                return;
+            }
+        };
+        self.redraft(&s, wall_ms, change, out);
+        if let (Some(cat), Some(r)) = (view.virtuals().catalog(), self.drafts.get(&s.id)) {
+            self.estimates.insert(s.id.clone(), cat.estimate(&r.rules));
+        }
     }
 
     /// The timeline the billboard previews for `card`: a kept channel's own, or the store's
@@ -380,7 +501,7 @@ impl Studio {
             }
             (Act::Reshuffle, Card::Channel(c)) => {
                 let mut recipe = c.recipe.clone();
-                recipe.seed = mix(recipe.seed, wall_ms as u64 | 1);
+                recipe.seed = fresh_seed(c.schedule.as_ref(), recipe.seed, wall_ms);
                 out.push(Out::Store(VCmd::Update { playlist: c.playlist.clone(), recipe, rebuild: false }));
             }
             (Act::Order, Card::Channel(c)) => {
@@ -390,7 +511,9 @@ impl Studio {
             }
             (Act::Reshuffle, card) => {
                 let Some(s) = card.suggestion().cloned() else { return };
-                self.redraft(&s, wall_ms, |r| r.seed = mix(r.seed, wall_ms as u64 | 1), out);
+                let shown = self.schedule(&card, view);
+                let seed = fresh_seed(shown, self.draft(&s, wall_ms).seed, wall_ms);
+                self.redraft(&s, wall_ms, |r| r.seed = seed, out);
             }
             (Act::Order, card) => {
                 let Some(s) = card.suggestion().cloned() else { return };
@@ -419,6 +542,14 @@ impl Studio {
                 }
             }
             (Act::Delete, _) => {}
+            (Act::Edit, card) => {
+                if let Some(s) = card.suggestion() {
+                    let s = s.clone();
+                    self.draft(&s, wall_ms);
+                    self.zone = Zone::Edit;
+                    self.edit = 0;
+                }
+            }
         }
     }
 
@@ -447,6 +578,12 @@ impl Studio {
                 self.confirm_delete = None;
             }
             (Zone::Actions, Key::Ok) => self.activate(view, wall_ms, out),
+            (Zone::Edit, Key::Left) => self.edit = self.edit.saturating_sub(1),
+            (Zone::Edit, Key::Right) => self.edit = (self.edit + 1).min(EDIT_ITEMS.len() - 1),
+            (Zone::Edit, Key::Up) => return false,
+            (Zone::Edit, Key::Down) => self.zone = Zone::Cards,
+            (Zone::Edit, Key::Back) => self.zone = Zone::Actions,
+            (Zone::Edit, Key::Ok) => self.apply_edit(view, wall_ms, out),
             (Zone::Cards, Key::Left) => self.col[self.row] = self.col[self.row].saturating_sub(1),
             (Zone::Cards, Key::Right) => {
                 self.col[self.row] = (self.col[self.row] + 1).min(rows[self.row].len().saturating_sub(1));
@@ -481,9 +618,9 @@ impl Studio {
 
     pub fn canon(&self) -> String {
         format!(
-            "{}:{}:{}:{}:{:?}:{}:{}:{}",
+            "{}:{}:{}:{}:{:?}:{}:{}:{}:{}",
             self.open, self.row, self.col[0], self.col[1], self.zone, self.act,
-            self.keeping.is_some(), self.confirm_delete.is_some()
+            self.keeping.is_some(), self.confirm_delete.is_some(), self.edit
         )
     }
 }
