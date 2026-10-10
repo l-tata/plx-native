@@ -265,6 +265,54 @@ pub(crate) fn press_scale<H: Host>(pop: f32, i: usize, pressed: Option<usize>, c
     pop * if pressed == Some(i) { cx.press.dip() } else { 1.0 }
 }
 
+/// **How far past the screen a section reaches for artwork.** A card section used to fetch a
+/// picture only for a card it was drawing, so a scroll always arrived at blank tiles that only
+/// then started their round trip to the server. Each section now also warms (`tex::warm_on`, through
+/// [`crate::widgets::warm_card_art`]) the cards just beyond what it shows — ahead first, then a
+/// few behind — and a page warms the shelves just above and below the screen. A warm is
+/// speculation: the image source runs it only when nothing on screen is waiting
+/// (`PREFETCH_OUTSTANDING_MAX`, one at a time, so a visible miss always finds a worker), gives it
+/// the lowest LRU age (it never evicts a picture on screen) and the frame's upload budget still
+/// applies. So a lookahead costs idle time, never a visible card's.
+pub const LOOKAHEAD_AHEAD: usize = 8;
+/// Cards warmed BEHIND the visible ones (the way the viewer came from, cheaper to be wrong about).
+pub const LOOKAHEAD_BEHIND: usize = 2;
+
+/// The order a strip of `len` cards whose `first..=last` are on screen warms the rest in: the
+/// [`LOOKAHEAD_AHEAD`] after it, then the [`LOOKAHEAD_BEHIND`] before it, nearest first. Pure.
+pub(crate) fn strip_lookahead(first: usize, last: usize, len: usize) -> impl Iterator<Item = usize> {
+    let ahead = (last + 1..len).take(LOOKAHEAD_AHEAD);
+    let behind = (0..first).rev().take(LOOKAHEAD_BEHIND);
+    ahead.chain(behind)
+}
+
+/// The order a grid of `cols` columns whose cards `window` are on screen warms the rest in: the
+/// next two rows below, then the row above, nearest first. Pure.
+pub(crate) fn grid_lookahead(window: Range<usize>, cols: usize, len: usize) -> impl Iterator<Item = usize> {
+    let cols = cols.max(1);
+    let below = (window.end..len).take(2 * cols);
+    let above = (0..window.start).rev().take(cols);
+    below.chain(above)
+}
+
+/// Warm the artwork of `order`'s cards in `src`, in order, until the image source takes one or
+/// refuses one — a frame spends at most one speculative claim per call, and a source that is busy
+/// with what is on screen refuses at once. A card already known to the source (resident, in flight
+/// or failed) costs nothing and the walk goes on. Never from a recording pass.
+pub(crate) fn warm_cards<H: Host, S: CardSource<H>>(p: Painter, src: &S, order: impl IntoIterator<Item = usize>) {
+    if p.is_recording() {
+        return;
+    }
+    for i in order {
+        if i >= src.len() || !src.loaded(i) {
+            continue;
+        }
+        if crate::widgets::warm_card_art(&src.art(i)) != crate::tex::Warm::Known {
+            return;
+        }
+    }
+}
+
 /// `r` (screen space) in painter `p`'s space: the painter's own translate undone, so a rect drawn
 /// or registered through `p` lands where `r` says on the screen.
 #[inline]

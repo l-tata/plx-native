@@ -610,6 +610,18 @@ pub fn resolve_card_art(p: Painter, rect: Rect, art: &Art<'_>) -> (u32, f32, f32
     image
 }
 
+/// **The prefetch twin of [`resolve_card_art`]**: start fetching the picture a card for `art` will
+/// draw, exactly the key the draw resolves (same server, path and size), without taking a texture
+/// or any LRU protection. What [`crate::cards`]' lookahead calls for the cards just past the edge
+/// of the screen, so they are on their way before a scroll reaches them.
+pub fn warm_card_art(art: &Art<'_>) -> crate::tex::Warm {
+    match art {
+        Art::Poster(m) => m.map_or(crate::tex::Warm::Known, |m| warm_tex_on(m.src, m.thumb, POSTER_RES.0, POSTER_RES.1, 0)),
+        Art::Still(m) => m.map_or(crate::tex::Warm::Known, |m| warm_tex_on(m.src, still_key(&m), STILL_RES.0, STILL_RES.1, 0)),
+        Art::Thumb { sid, key, res } | Art::Person { sid, key, res } => warm_tex_on(*sid, key, res.0, res.1, 0),
+    }
+}
+
 /// The name a poster card draws on the neutral collection tile, when it draws one: a collection
 /// row whose server sent no `thumb`. A composite or custom thumb is artwork and draws as a poster.
 fn neutral_collection_name<'a>(m: Option<&TileFacts<'a>>) -> Option<&'a str> {

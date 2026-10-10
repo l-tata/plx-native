@@ -1684,6 +1684,13 @@ impl HomeScreen {
                 shelf.paint_resting(f, p, &self.cards(view, row), self.section(row));
             }
         }
+        // The shelves just off the screen, below first, so a scroll down (or back up) arrives at
+        // artwork already on its way (`plx_ui::cards::LOOKAHEAD_AHEAD`).
+        for row in shelves_beyond_screen((0..self.rows.len()).map(|r| self.shelf_on_screen(r))) {
+            if let (Some(shelf), Some(_)) = (self.grid.shelves.get(row), self.hub(view, row)) {
+                shelf.prefetch::<H, _>(p, &self.cards(view, row), self.section(row), true);
+            }
+        }
         // The focused tile after every row, so its glow overlaps the neighbouring rows.
         if let Some((row, _)) = self.focused_grid(self.visible_focus(f.focus.current)) {
             if let (Some(shelf), Some(_)) = (self.grid.shelves.get(row), self.hub(view, row)) {
@@ -2788,6 +2795,18 @@ fn hero_logo_rk(item: &PmsMovie) -> &str {
         &item.rk
     }
 }
+/// The shelves a page warms beyond the screen, given which rows are on it: the two below the last
+/// one shown, then the one above the first. Pure.
+fn shelves_beyond_screen(on_screen: impl Iterator<Item = bool>) -> Vec<usize> {
+    let shown: Vec<bool> = on_screen.collect();
+    let (Some(first), Some(last)) = (shown.iter().position(|&v| v), shown.iter().rposition(|&v| v)) else {
+        return Vec::new();
+    };
+    let below = (last + 1..shown.len()).take(2);
+    let above = (0..first).rev().take(1);
+    below.chain(above).collect()
+}
+
 fn prefetch_order(cur: i32, n: i32, out: &mut [i32; 2 * HERO_PREFETCH]) -> usize {
     if n <= 1 {
         return 0;

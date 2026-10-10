@@ -2460,3 +2460,95 @@ fn shelf_header_press_dips_no_unindexed_member() {
 fn grid_header_press_dips_no_unindexed_member() {
     a_header_press_dips_no_unindexed_member::<Grid>();
 }
+
+// ---- lookahead: the artwork a section fetches before it is on screen ---------------------------
+
+/// The order a strip warms in: ahead first, nearest first, then a couple behind; never past
+/// either end.
+#[test]
+fn a_strip_warms_ahead_then_behind_nearest_first() {
+    let order: Vec<usize> = super::strip_lookahead(4, 9, 30).collect();
+    assert_eq!(order, vec![10, 11, 12, 13, 14, 15, 16, 17, 3, 2]);
+    assert_eq!(super::strip_lookahead(0, 5, 8).collect::<Vec<_>>(), vec![6, 7], "nothing behind the first card");
+    assert!(super::strip_lookahead(0, 7, 8).next().is_none(), "a strip shown whole has nothing to warm");
+}
+
+/// The order a grid warms in: two rows below, then the row above.
+#[test]
+fn a_grid_warms_the_next_two_rows_then_the_one_above() {
+    let order: Vec<usize> = super::grid_lookahead(6..18, 6, 100).collect();
+    assert_eq!(order, (18..30).chain((0..6).rev()).collect::<Vec<_>>());
+    assert_eq!(super::grid_lookahead(0..12, 6, 15).collect::<Vec<_>>(), vec![12, 13, 14]);
+}
+
+/// A source whose every card has its own thumbnail path, as a real shelf's posters do.
+struct Paths(Cards, Vec<String>);
+impl Paths {
+    fn new(n: usize) -> Self {
+        Paths(Cards::new((100..100 + n as u32).collect(), false), (0..n).map(|i| format!("/thumb/{i}")).collect())
+    }
+}
+impl CardSource<FixtureHost> for Paths {
+    fn len(&self) -> usize { self.0.len() }
+    fn elem(&self, i: usize) -> u32 { self.0.elem(i) }
+    fn index_of(&self, e: &u32) -> Option<usize> { self.0.index_of(e) }
+    fn art(&self, i: usize) -> Art<'_> { Art::Thumb { sid: 1, key: &self.1[i], res: (250, 375) } }
+    fn label(&self, i: usize) -> TileLabel { self.0.label(i) }
+}
+
+/// An image source that records every warm and claims the ones it is told to, answering `Known`
+/// (already resident or in flight) for the rest.
+struct Warms {
+    asked: std::cell::RefCell<Vec<String>>,
+    claims: &'static [&'static str],
+}
+impl crate::tex::Source for Warms {
+    fn probe(&self, _: u16, _: &str, _: i32, _: i32, _: bool) -> Option<plx_machine::machine::PosterKey> { None }
+    fn warm(&self, _: u16, path: &str, w: i32, h: i32, _: bool) -> crate::tex::Warm {
+        assert_eq!((w, h), (250, 375), "a warm asks for exactly the size the draw will");
+        self.asked.borrow_mut().push(path.to_owned());
+        if self.claims.contains(&path) { crate::tex::Warm::Claimed } else { crate::tex::Warm::Known }
+    }
+    fn logo(&self, _: u16, _: &str) -> Option<plx_machine::machine::PosterKey> { None }
+    fn logo_warm(&self, _: u16, _: &str) -> crate::tex::Warm { crate::tex::Warm::Known }
+    fn unresident(&self, _: plx_machine::machine::PosterKey, _: bool) {}
+    fn idle(&self) -> bool { true }
+}
+
+fn install_warms(claims: &'static [&'static str]) -> &'static Warms {
+    let w: &'static Warms = Box::leak(Box::new(Warms { asked: Default::default(), claims }));
+    crate::tex::install(w);
+    w
+}
+
+/// **A shelf fetches what a scroll reaches next.** Its lookahead walks the cards past its right
+/// edge in order, passes the ones the source already knows, and stops at the first one it claims:
+/// one speculative fetch per call, the next card queued on a later frame.
+#[test]
+fn a_shelf_warms_the_cards_past_its_edge_and_stops_at_the_first_claim() {
+    let r = settled::<Shelf>(30);
+    let src = Paths::new(30);
+    // The cards on screen are the ones whose stops the draw registers (`record_stops`).
+    let shown = r.stops(1.0).len();
+    assert!(shown > 0 && shown < 30, "PRECONDITION: the shelf shows part of its cards ({shown})");
+    let claim: &'static str = Box::leak(format!("/thumb/{}", shown + 2).into_boxed_str());
+    let warms = install_warms(Box::leak(Box::new([claim])));
+    r.sect.prefetch::<FixtureHost, _>(Painter::root(), &src, SHELF_AT, false);
+    let asked = warms.asked.borrow().clone();
+    assert_eq!(asked, (shown..=shown + 2).map(|i| format!("/thumb/{i}")).collect::<Vec<_>>());
+}
+
+/// A shelf the page has not scrolled to yet warms the cards it would show first, then its
+/// lookahead; a recording pass warms nothing.
+#[test]
+fn an_off_screen_shelf_warms_what_it_would_show_first() {
+    let r = settled::<Shelf>(30);
+    let src = Paths::new(30);
+    let warms = install_warms(&[]);
+    r.sect.prefetch::<FixtureHost, _>(Painter::recording(), &src, SHELF_AT, true);
+    assert!(warms.asked.borrow().is_empty(), "a recording pass starts no fetch");
+    r.sect.prefetch::<FixtureHost, _>(Painter::root(), &src, SHELF_AT, true);
+    let asked = warms.asked.borrow().clone();
+    assert_eq!(asked.first().map(String::as_str), Some("/thumb/0"), "the first card it would show leads: {asked:?}");
+    assert!(asked.len() > super::LOOKAHEAD_AHEAD, "then the lookahead past its edge: {asked:?}");
+}

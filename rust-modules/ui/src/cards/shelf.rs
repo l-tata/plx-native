@@ -348,6 +348,21 @@ impl Shelf {
             let s = super::press_scale(self.pop(src, i, focus), i, pressed, f.cx);
             self.draw_card(f, pr, src, i, at, s, false);
         }
+        self.prefetch(p, src, at, false);
+    }
+
+    /// **Start fetching the artwork this shelf will want next** ([`super::LOOKAHEAD_AHEAD`]): the
+    /// cards just past either edge of what its scroll shows, and — `on_screen_too`, for a shelf
+    /// the page has not scrolled to yet — the cards its scroll would show first. Horizontal only:
+    /// a page warms the shelves above and below the screen by calling this on them.
+    pub fn prefetch<H: Host, S: CardSource<H>>(&self, p: Painter, src: &S, at: SectionFrame, on_screen_too: bool) {
+        let n = src.len();
+        let sx = self.drawn_scroll(src);
+        let visible = |i: usize| crate::on_axis(self.slot(i, at, sx).x, self.style.w, SCR_W, self.margin);
+        let Some(first) = (0..n).find(|&i| visible(i)) else { return };
+        let last = (first..n).take_while(|&i| visible(i)).last().unwrap_or(first);
+        let shown = (first..=last).filter(|_| on_screen_too);
+        super::warm_cards(p, src, shown.chain(super::strip_lookahead(first, last, n)));
     }
 
     /// The focused card, painted whether or not it is on-axis.
