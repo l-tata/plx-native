@@ -1,0 +1,44 @@
+name: Test build
+
+# An installable package for trying a change on a television WITHOUT cutting a release. Every push
+# to a working branch (`claude/**`, `test/**`) builds the DEVELOPER install,
+# `com.beb.plxnative.debug`, through the same build-package.yml release.yml and nightly.yml use, and
+# leaves the .ipk on the run page as a workflow artifact. Nothing is tagged, released or published:
+# the artifact is visible only to people with access to the repository's Actions, and it expires
+# with the repository's artifact retention. The debug id installs BESIDE the app users install, so
+# a test build never replaces it; it signs in on its own.
+#
+# `workflow_dispatch` builds any ref by hand (it can be dispatched once this file is on the default
+# branch; until then a push is how it runs).
+
+on:
+  push:
+    branches: ['claude/**', 'test/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ARM build (debug install)
+    uses: ./.github/workflows/build-package.yml
+    with:
+      ref: ${{ github.sha }}
+      flavor: debug
+      telemetry: none
+      artifact: test-build-ipk
+      # Never published, so no FFmpeg is redistributed by this run and nobody is owed its source.
+      source-asset: false
+      fwcompat: false
+      # Symbols for a package no stranger installs only fill Sentry.
+      upload-debug-files: false
+      # Turnaround matters here and reproducibility does not: nothing this run builds ships.
+      caches: true
+      homebrew-manifest: false
+    secrets:
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
