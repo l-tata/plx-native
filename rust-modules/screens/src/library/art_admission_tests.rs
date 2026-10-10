@@ -25,7 +25,10 @@ impl Source for ArtSpy {
 
 /// A scrolled Library keeps buffered rows for data/focus geometry, but those rows must not
 /// continuously enqueue artwork. In a full source cache, two such warms alternated eviction
-/// of the same cold slot and kept an otherwise settled screen decoding/uploading forever.
+/// of the same cold slot and kept an otherwise settled screen decoding/uploading forever. (The
+/// grid's deliberate lookahead — the next row past its buffer, `plx_ui::cards::grid_lookahead` —
+/// warms only from the visible pass of a grid that is on the canvas, and the poster store never
+/// lets one warm take another's slot, so it cannot reopen that loop.)
 #[test]
 fn scrolled_grid_admits_only_visible_art_and_never_rewarms_hidden_rows() {
     let _guard = plx_base::testlock::serial();

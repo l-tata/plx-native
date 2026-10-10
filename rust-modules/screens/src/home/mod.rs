@@ -1684,9 +1684,14 @@ impl HomeScreen {
                 shelf.paint_resting(f, p, &self.cards(view, row), self.section(row));
             }
         }
-        // The shelves just off the screen, below first, so a scroll down (or back up) arrives at
-        // artwork already on its way (`plx_ui::cards::LOOKAHEAD_AHEAD`).
-        for row in shelves_beyond_screen((0..self.rows.len()).map(|r| self.shelf_on_screen(r))) {
+        // The shelf just below the screen, so a scroll down arrives at artwork already on its way
+        // (`plx_ui::cards::LOOKAHEAD_AHEAD`).
+        let beyond = if plx_ui::cards::page_on_canvas(p) {
+            shelves_beyond_screen((0..self.rows.len()).map(|r| self.shelf_on_screen(r)))
+        } else {
+            None
+        };
+        if let Some(row) = beyond {
             if let (Some(shelf), Some(_)) = (self.grid.shelves.get(row), self.hub(view, row)) {
                 shelf.prefetch::<H, _>(p, &self.cards(view, row), self.section(row), true);
             }
@@ -2795,16 +2800,12 @@ fn hero_logo_rk(item: &PmsMovie) -> &str {
         &item.rk
     }
 }
-/// The shelves a page warms beyond the screen, given which rows are on it: the two below the last
-/// one shown, then the one above the first. Pure.
-fn shelves_beyond_screen(on_screen: impl Iterator<Item = bool>) -> Vec<usize> {
+/// The shelf a page warms beyond the screen, given which rows are on it: the one below the last
+/// one shown. Pure.
+fn shelves_beyond_screen(on_screen: impl Iterator<Item = bool>) -> Option<usize> {
     let shown: Vec<bool> = on_screen.collect();
-    let (Some(first), Some(last)) = (shown.iter().position(|&v| v), shown.iter().rposition(|&v| v)) else {
-        return Vec::new();
-    };
-    let below = (last + 1..shown.len()).take(2);
-    let above = (0..first).rev().take(1);
-    below.chain(above).collect()
+    let last = shown.iter().rposition(|&v| v)?;
+    (last + 1 < shown.len()).then_some(last + 1)
 }
 
 fn prefetch_order(cur: i32, n: i32, out: &mut [i32; 2 * HERO_PREFETCH]) -> usize {

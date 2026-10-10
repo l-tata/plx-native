@@ -358,8 +358,12 @@ impl Grid {
             self.draw_card(f, p, src, i, super::press_scale(self.pop(src, i, focus), i, pressed, f.cx), true, &bands);
         }
         self.record_stops(f, p, src);
-        // The rows a scroll reaches next, so they are on their way before it arrives.
-        super::warm_cards(p, src, super::grid_lookahead(self.window(src.len()), self.spec.geom().cols, src.len()));
+        // The row a scroll reaches next, so it is on its way before it arrives — unless no card of
+        // this grid is on the canvas (a retained page moved away), when nothing it warms is seen.
+        let window = self.window(src.len());
+        if window.clone().any(|i| card_row::paint_visible(p, super::to_local(p, self.cell(i, &bands)), 1.0, false)) {
+            super::warm_cards(p, src, super::grid_lookahead(window, self.spec.geom().cols, src.len()));
+        }
     }
 
     /// Register the stops of the cards the scroll can show: each is the rect [`draw`](Self::draw) paints.

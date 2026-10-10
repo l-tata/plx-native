@@ -361,6 +361,11 @@ impl Shelf {
         let visible = |i: usize| crate::on_axis(self.slot(i, at, sx).x, self.style.w, SCR_W, self.margin);
         let Some(first) = (0..n).find(|&i| visible(i)) else { return };
         let last = (first..n).take_while(|&i| visible(i)).last().unwrap_or(first);
+        // A shelf whose cards are culled (its page moved off the canvas) warms nothing; a page
+        // warming the shelf below the screen has asked `page_on_canvas` itself.
+        if !on_screen_too && !card_row::paint_visible(p, super::to_local(p, self.slot(first, at, sx)), 1.0, false) {
+            return;
+        }
         let shown = (first..=last).filter(|_| on_screen_too);
         super::warm_cards(p, src, shown.chain(super::strip_lookahead(first, last, n)));
     }

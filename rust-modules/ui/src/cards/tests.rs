@@ -2463,21 +2463,19 @@ fn grid_header_press_dips_no_unindexed_member() {
 
 // ---- lookahead: the artwork a section fetches before it is on screen ---------------------------
 
-/// The order a strip warms in: ahead first, nearest first, then a couple behind; never past
-/// either end.
+/// The order a strip warms in: ahead first, nearest first, then one behind; never past either end.
 #[test]
 fn a_strip_warms_ahead_then_behind_nearest_first() {
     let order: Vec<usize> = super::strip_lookahead(4, 9, 30).collect();
-    assert_eq!(order, vec![10, 11, 12, 13, 14, 15, 16, 17, 3, 2]);
+    assert_eq!(order, vec![10, 11, 12, 13, 3]);
     assert_eq!(super::strip_lookahead(0, 5, 8).collect::<Vec<_>>(), vec![6, 7], "nothing behind the first card");
     assert!(super::strip_lookahead(0, 7, 8).next().is_none(), "a strip shown whole has nothing to warm");
 }
 
-/// The order a grid warms in: two rows below, then the row above.
+/// The order a grid warms in: the next row below what it buffers.
 #[test]
-fn a_grid_warms_the_next_two_rows_then_the_one_above() {
-    let order: Vec<usize> = super::grid_lookahead(6..18, 6, 100).collect();
-    assert_eq!(order, (18..30).chain((0..6).rev()).collect::<Vec<_>>());
+fn a_grid_warms_the_next_row() {
+    assert_eq!(super::grid_lookahead(6..18, 6, 100).collect::<Vec<_>>(), (18..24).collect::<Vec<_>>());
     assert_eq!(super::grid_lookahead(0..12, 6, 15).collect::<Vec<_>>(), vec![12, 13, 14]);
 }
 

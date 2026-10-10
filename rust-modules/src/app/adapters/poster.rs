@@ -903,7 +903,16 @@ fn logo_failed(srv: ServerId, rk: &str) -> bool {
 /// `P_WANT`/`P_LOADING`/`P_DECODED` are never victims, so a batch of in-flight warms does not merely
 /// age the store out, it can make this return `None` for a poster the user is looking at — which is
 /// a tile that is never even REQUESTED, not one that arrives late.
-fn victim(slots: &[Pslot; PT_CAP], frame: c_uint) -> Option<usize> {
+///
+/// **A warm never takes a slot another warm claimed** (`for_warm`: a slot whose `use_` is still 0,
+/// a key no draw has touched since a warm fetched it). Card sections warm the cards past the edge
+/// of the screen every frame (`plx_ui::cards::LOOKAHEAD_AHEAD`), and a warmed slot is age 0 — the
+/// first victim — so in a full store two warmed keys would take each other's slot in turn, for
+/// ever, and a settled screen would never stop fetching and decoding (the Library's measured
+/// churn, `art_admission_tests`). With this rule each warm consumes one slot a draw last used,
+/// so a chain of warms ends when those run out; a DRAW still takes any settled slot, a warmed
+/// one first.
+fn victim(slots: &[Pslot; PT_CAP], frame: c_uint, for_warm: bool) -> Option<usize> {
     if let Some(i) = (0..PT_CAP).find(|&i| slots[i].state == P_EMPTY) {
         return Some(i);
     }
@@ -913,6 +922,7 @@ fn victim(slots: &[Pslot; PT_CAP], frame: c_uint) -> Option<usize> {
         let s = &slots[i];
         if (s.state == P_READY || s.state == P_FAILED || s.state == P_RETRY || s.state == P_EVICTED)
             && s.frame != frame
+            && !(for_warm && s.use_ == 0)
             && s.use_ < oldest
         {
             oldest = s.use_;
@@ -1125,7 +1135,7 @@ fn lookup(srv: ServerId, key_s: &str, touch: Touch) -> (Hit, Warm) {
         return (None, Warm::Full);
     }
     // miss: prefer EMPTY, else LRU-evict a settled slot not used this frame
-    let idx = match victim(&g.slots, g.frame) {
+    let idx = match victim(&g.slots, g.frame, touch == Touch::Warm) {
         Some(i) => i,
         None => { trace::outcome("store_full"); return (None, Warm::Full) } // all visible: skip
     };
@@ -3442,13 +3452,36 @@ mod tests {
         assert_eq!(residency_last_emitted_for_test(), (lost, rearmed));
     }
 
+    /// **No warm-against-warm churn.** A warm never takes a slot another warm claimed (`use_` 0,
+    /// undrawn since): with only warmed slots left it is refused, so card sections warming past
+    /// the screen in a full store cannot take each other's slots in turn for ever. A draw still
+    /// takes the warmed slot first.
+    #[test]
+    fn a_warm_never_evicts_another_warm() {
+        let mut full = [Pslot::ZERO; PT_CAP];
+        for (i, s) in full.iter_mut().enumerate() {
+            s.state = P_READY;
+            s.use_ = 10 + i as c_uint;
+            s.frame = 3;
+        }
+        full[5].use_ = 0; // warmed, never drawn
+        full[9].use_ = 2; // drawn long ago
+        assert_eq!(victim(&full, 7, false), Some(5), "a draw takes the warmed slot first");
+        assert_eq!(victim(&full, 7, true), Some(9), "a warm takes the oldest DRAWN slot, never the warmed one");
+        for s in full.iter_mut() {
+            s.use_ = 0;
+        }
+        assert_eq!(victim(&full, 7, true), None, "only warmed slots left: the warm is refused");
+        assert!(victim(&full, 7, false).is_some(), "while a draw is still served");
+    }
+
     /// The LRU's two clauses, in order: an EMPTY slot is always preferred (a fresh store must fill
     /// before it evicts anything), and only once there is none does the oldest SETTLED slot go.
     #[test]
     fn victim_prefers_empty_then_oldest_settled() {
         let empty = [Pslot::ZERO; PT_CAP];
         assert_eq!(
-            victim(&empty, 7),
+            victim(&empty, 7, false),
             Some(0),
             "an untouched store fills from the front"
         );
@@ -3456,7 +3489,7 @@ mod tests {
         let mut one_hole = [ready(100, 1); PT_CAP];
         one_hole[40] = Pslot::ZERO;
         assert_eq!(
-            victim(&one_hole, 7),
+            victim(&one_hole, 7, false),
             Some(40),
             "an empty slot beats every settled one"
         );
@@ -3465,7 +3498,7 @@ mod tests {
         full[17].use_ = 3; // the oldest
         full[52].use_ = 9;
         assert_eq!(
-            victim(&full, 7),
+            victim(&full, 7, false),
             Some(17),
             "with nothing empty, the least recently used goes"
         );
@@ -3478,10 +3511,10 @@ mod tests {
             frame: 1,
             ..Pslot::ZERO
         };
-        assert_eq!(victim(&failed, 7), Some(8));
+        assert_eq!(victim(&failed, 7, false), Some(8));
         // …and so is a parked RETRY: a tile that scrolled away must not hold its slot
         failed[8].state = P_RETRY;
-        assert_eq!(victim(&failed, 7), Some(8));
+        assert_eq!(victim(&failed, 7, false), Some(8));
     }
 
     /// **A transient failure is parked, not burnt** (#107): the boot's plaintext window, a refused
@@ -3602,14 +3635,14 @@ mod tests {
         let mut slots = [ready(c_uint::MAX - 1, f); PT_CAP]; // 64 tiles this frame drew
         slots[31] = ready(0, f.wrapping_sub(1)); // …and one warmed a moment ago
         assert_eq!(
-            victim(&slots, f),
+            victim(&slots, f, false),
             Some(31),
             "the prefetched slot is the cheapest to throw away"
         );
 
         let drawn = [ready(5, f); PT_CAP];
         assert_eq!(
-            victim(&drawn, f),
+            victim(&drawn, f, false),
             None,
             "a frame that drew every slot claims nothing"
         );
@@ -3618,7 +3651,7 @@ mod tests {
         // c_uint::MAX — which must still read as "not this frame" rather than as protection.
         let mut wrapped = [ready(c_uint::MAX - 1, 0); PT_CAP];
         wrapped[2] = ready(0, 0u32.wrapping_sub(1));
-        assert_eq!(victim(&wrapped, 0), Some(2));
+        assert_eq!(victim(&wrapped, 0, false), Some(2));
     }
 
     /// The sharp edge behind the depth budget: a slot that is fetching is never a victim, so enough
@@ -3633,7 +3666,7 @@ mod tests {
                 frame: 0,
                 ..Pslot::ZERO
             }; PT_CAP];
-            assert_eq!(victim(&slots, 7), None, "state {st} must not be evictable");
+            assert_eq!(victim(&slots, 7, false), None, "state {st} must not be evictable");
         }
     }
 
