@@ -1094,3 +1094,28 @@ fn owned_search_ok_on_a_collection_requests_its_collection_page() {
     assert!(matches!(selected, plx_data::search::Item::Collection(c) if c.item.rk == "50007"));
     plx_plex::plex::reset_servers_for_test();
 }
+
+/// **The Live TV page wears the shared top bar too, so `app::run::update` must step the strip
+/// while it is on screen** — the same gap the Search arm above closed, on the page that was added
+/// after it. Without it the strip's springs freeze wherever the page it came from left them: the
+/// selected-tab capsule, mid-slide from Home to Live TV, stood frozen over *Movies* on the Live
+/// TV page (seen in the simulator, 2026-10-10, opening Live TV from the strip and from a Home
+/// Suggested Channels card alike). Read from source for the reason the Search test gives.
+///
+/// Observed RED: before the `AppArg::LiveTv` arm existed this test failed with "update must
+/// branch on AppArg::LiveTv to step the shared strip".
+#[test]
+fn update_steps_the_shared_strip_on_the_live_tv_page() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/run.rs"),
+    ).expect("read run.rs");
+    let fn_start = src.find("unsafe fn update(app: &mut App, fr: &mut Frame)")
+        .expect("app::run::update must exist with its documented signature");
+    let needle = "matches!(app.route(), AppArg::LiveTv)";
+    let arm_at = src[fn_start..].find(needle).map(|i| fn_start + i)
+        .expect("update must branch on AppArg::LiveTv to step the shared strip");
+    let body_start = src[arm_at..].find('{').map(|i| arm_at + i).expect("the arm opens a block");
+    let body_end = src[body_start..].find("fr.underlay_moving |= moving;").map(|i| body_start + i)
+        .expect("the AppArg::LiveTv arm reports underlay motion the way Home/Library/Search do");
+    assert!(src[body_start..body_end].contains("update_home_chrome"), "the arm must step the strip");
+}

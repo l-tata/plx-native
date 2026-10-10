@@ -89,13 +89,19 @@ pub fn rows(cards: &[OnNowCard], art_sid: plx_plex::plex::ServerId, now_ms: i64)
         .map(|card| {
             let length = card.stop_ms - card.start_ms;
             let airing = !card.title.is_empty() && length > 0;
+            // A virtual channel's art is a path on one of the viewer's own servers
+            // (`plex:<server>:<path>`); a Tunarr picture is an absolute URL the art server fetches.
+            let (sid, thumb) = match card.art.strip_prefix("plex:").and_then(|r| r.split_once(':')) {
+                Some((srv, path)) => (srv.parse::<u16>().map(plx_plex::plex::ServerId::from_raw).unwrap_or(art_sid), path.to_owned()),
+                None => (art_sid, if art_sid.is_set() { card.art.clone() } else { String::new() }),
+            };
             crate::pms::PmsMovie {
-                sid: art_sid,
+                sid,
                 kind: crate::pms::KIND_CHANNEL,
                 rk: card.number.clone(),
                 title: if card.title.is_empty() { card.channel_label() } else { card.title.clone() },
                 show_title: card.channel_label(),
-                thumb: if art_sid.is_set() { card.art.clone() } else { String::new() },
+                thumb,
                 resume_ms: if airing { (now_ms - card.start_ms).clamp(1, length - 1) } else { 0 },
                 dur_ns: if airing { length * 1_000_000 } else { 0 },
                 ..Default::default()

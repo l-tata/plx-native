@@ -153,5 +153,206 @@
     "args": {
       "key": "str"
     }
+  },
+  "livetv.studio.title": {
+    "value": "Channels",
+    "description": "Live TV channel studio: page title, and the guide's pill that opens it. Channels are built from the viewer's own Plex library."
+  },
+  "livetv.studio.suggested": {
+    "value": "Suggested for You",
+    "description": "Live TV channel studio: heading of the row of suggested channels"
+  },
+  "livetv.studio.yours": {
+    "value": "Your Channels",
+    "description": "Live TV channel studio: heading of the row of channels the viewer kept"
+  },
+  "livetv.studio.keep": {
+    "value": "Keep Channel",
+    "description": "Live TV channel studio: button that adds the previewed channel to the guide"
+  },
+  "livetv.studio.keeping": {
+    "value": "Keeping…",
+    "description": "Live TV channel studio: the Keep button while the channel is being saved"
+  },
+  "livetv.studio.reshuffle": {
+    "value": "Reshuffle",
+    "description": "Live TV channel studio: button that shuffles the channel's schedule again"
+  },
+  "livetv.studio.order": {
+    "value": "Order: {style}",
+    "description": "Live TV channel studio: button that cycles how programmes are ordered. {style} is one of the order style names.",
+    "args": {
+      "style": "str"
+    }
+  },
+  "livetv.studio.style.random": {
+    "value": "Shuffle",
+    "description": "Live TV channel order style: programmes in random order"
+  },
+  "livetv.studio.style.rotation": {
+    "value": "Rotation",
+    "description": "Live TV channel order style: one show after another in turn"
+  },
+  "livetv.studio.style.blocks": {
+    "value": "Blocks",
+    "description": "Live TV channel order style: a few episodes of one show back to back"
+  },
+  "livetv.studio.style.order": {
+    "value": "In Order",
+    "description": "Live TV channel order style: episodes in their broadcast order"
+  },
+  "livetv.studio.not_interested": {
+    "value": "Not Interested",
+    "description": "Live TV channel studio: button that hides this suggestion for good"
+  },
+  "livetv.studio.watch": {
+    "value": "Watch",
+    "description": "Live TV channel studio: button that tunes a kept channel"
+  },
+  "livetv.studio.delete": {
+    "value": "Delete",
+    "description": "Live TV channel studio: button that deletes a kept channel"
+  },
+  "livetv.studio.delete_confirm": {
+    "value": "Press again to delete",
+    "description": "Live TV channel studio: the Delete button after one press, asking for a second"
+  },
+  "livetv.studio.surprise": {
+    "value": "Surprise Me",
+    "description": "Live TV channel studio: card and button that draw a surprise channel from the library"
+  },
+  "livetv.studio.surprise_again": {
+    "value": "Another Surprise",
+    "description": "Live TV channel studio: button that draws a different surprise channel"
+  },
+  "livetv.studio.surprise_body": {
+    "value": "A channel from a corner of your library you might not think of. Press OK to draw one.",
+    "description": "Live TV channel studio: explanation shown on the Surprise Me card before a channel is drawn"
+  },
+  "livetv.studio.on_now": {
+    "value": "On now",
+    "description": "Live TV channel studio preview: label before the programme airing now"
+  },
+  "livetv.studio.up_next": {
+    "value": "Up next",
+    "description": "Live TV channel studio preview: label before the programmes airing next"
+  },
+  "livetv.studio.building": {
+    "value": "Building the schedule…",
+    "description": "Live TV channel studio: shown while the channel's schedule is worked out"
+  },
+  "livetv.studio.unbuildable": {
+    "value": "Nothing in your library fits this channel right now.",
+    "description": "Live TV channel studio: the channel's rules match no titles"
+  },
+  "livetv.studio.kept": {
+    "value": "Channel {number} is in your guide",
+    "description": "Live TV channel studio: confirmation after a channel was kept. {number} is its channel number.",
+    "args": {
+      "number": "str"
+    }
+  },
+  "livetv.studio.failed": {
+    "value": "Couldn’t save the channel to Plex.",
+    "description": "Live TV channel studio: the channel could not be written to the Plex server. Plex is a product name."
+  },
+  "livetv.studio.loading": {
+    "value": "Reading your library…",
+    "description": "Live TV channel studio: shown while the Plex library is read to suggest channels"
+  },
+  "livetv.studio.empty": {
+    "value": "Channels appear here once your Plex library has been read.",
+    "description": "Live TV channel studio: nothing to suggest yet. Plex is a product name."
+  },
+  "livetv.studio.number": {
+    "value": "Channel {number}",
+    "description": "Live TV channel studio: a kept channel's number. {number} is the number.",
+    "args": {
+      "number": "str"
+    }
+  },
+  "livetv.behind": {
+    "value": "BEHIND",
+    "description": "Live TV banner: badge shown in place of LIVE when a virtual channel is paused behind live. Short, capitals like LIVE."
+  },
+  "livetv.jump_to_live": {
+    "value": "OK to jump to live",
+    "description": "Live TV banner: hint beside the channel name when a virtual channel is behind live; OK is the remote's button"
+  },
+  "livetv.studio.edit": {
+    "value": "Edit",
+    "description": "Live TV channel studio: button that opens the options for a suggested channel"
+  },
+  "livetv.studio.done": {
+    "value": "Done",
+    "description": "Live TV channel studio: closes the channel options"
+  },
+  "livetv.studio.kinds_both": {
+    "value": "Films & Shows",
+    "description": "Live TV channel option: the channel airs films and TV episodes"
+  },
+  "livetv.studio.kinds_movies": {
+    "value": "Films Only",
+    "description": "Live TV channel option: the channel airs films only"
+  },
+  "livetv.studio.kinds_episodes": {
+    "value": "Shows Only",
+    "description": "Live TV channel option: the channel airs TV episodes only"
+  },
+  "livetv.studio.unwatched": {
+    "value": "Unwatched Only",
+    "description": "Live TV channel option, on or off: only titles the viewer has not watched"
+  },
+  "livetv.studio.rating_any": {
+    "value": "Any Rating",
+    "description": "Live TV channel option: no content rating limit"
+  },
+  "livetv.studio.rating_up_to": {
+    "value": "Rated up to {rating}",
+    "description": "Live TV channel option: the highest content rating allowed. {rating} is a rating such as PG-13.",
+    "args": {
+      "rating": "str"
+    }
+  },
+  "livetv.studio.hours": {
+    "value": {
+      "one": "{count} hour",
+      "other": "{count} hours"
+    },
+    "args": {
+      "count": "i64"
+    },
+    "description": "Live TV channel studio: how many hours of programmes a channel holds"
+  },
+  "livetv.studio.new_channel": {
+    "value": "New Channel",
+    "description": "Live TV channel studio: the card that starts a channel built from the library by the viewer's own options; also the overline over a channel being made"
+  },
+  "livetv.studio.new_body": {
+    "value": "Build a channel from your library: choose a genre, a decade, films or shows, and more.",
+    "description": "Live TV channel studio: explanation on the New Channel card"
+  },
+  "livetv.studio.discard": {
+    "value": "Discard",
+    "description": "Live TV channel studio: button that drops a channel being made, without keeping it"
+  },
+  "livetv.studio.made_from": {
+    "value": "From {title}",
+    "description": "Live TV channel studio: why line for a channel the viewer made from a show, collection or playlist. {title} is its name.",
+    "args": {
+      "title": "str"
+    }
+  },
+  "livetv.studio.made_library": {
+    "value": "From your library",
+    "description": "Live TV channel studio: why line for a channel built from the viewer's own options"
+  },
+  "livetv.studio.genre_any": {
+    "value": "Any Genre",
+    "description": "Live TV channel option: no genre limit"
+  },
+  "livetv.studio.decade_any": {
+    "value": "Any Decade",
+    "description": "Live TV channel option: no decade limit"
   }
 }

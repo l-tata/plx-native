@@ -1143,6 +1143,9 @@ pub struct ResolveEnv {
     pub src_kbps: i64,
     /// Trailer sessions omit `continuous=1` so EOS cannot Up-Next into a sibling extra.
     pub omit_queue_continuous: bool,
+    /// A virtual channel's programme: no PlayQueue (it would be a server-side record of the
+    /// viewing, and its Up Next would fight the channel's own schedule).
+    pub channel: bool,
     /// Continue in this existing PlayQueue instead of creating one ([`QueueSeed`]); `None` is the
     /// ordinary per-playback `continuous=1` POST.
     pub queue_seed: Option<QueueSeed>,
@@ -1405,7 +1408,7 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
     // a PlayQueue so the server tracks this as a real player with a playQueueItemID.
     let session = new_sess(rk);
     plan.sess = session.clone();
-    if !rk.is_empty() && !env.preview {
+    if !rk.is_empty() && !env.preview && !env.channel {
         let q = match &env.queue_seed {
             Some(seed) => continue_playqueue(client, rk, seed),
             None => resolve_playqueue(

@@ -60,3 +60,28 @@ fn in_flight_is_the_single_flight_latch_of_any_source() {
     state.srcs[0].fetching = true;
     assert!(in_flight(&state), "its fetch is out");
 }
+
+/// **Continue Watching's order after finishing an episode.** The server lists the show's next
+/// episode first, but an unstarted next episode carries no `lastViewedAt`; merging by each row's
+/// raw timestamp put it last. One server's deck must keep the server's order.
+#[test]
+fn a_next_up_episode_keeps_the_place_the_server_gave_it() {
+    let body = format!(
+        r#"{{"ratingKey":"30","type":"episode","title":"next up, just finished the one before",{POSTER}}},
+           {{"ratingKey":"31","type":"movie","title":"half a film","viewOffset":3000,"duration":6000,"lastViewedAt":1700000500,{POSTER}}},
+           {{"ratingKey":"32","type":"episode","title":"another show's next","lastViewedAt":0,{POSTER}}},
+           {{"ratingKey":"33","type":"episode","title":"older","viewOffset":10,"duration":6000,"lastViewedAt":1700000100,{POSTER}}}"#
+    );
+    let build = project(&plx_plex::plex::MediaContainer::default(), &deck(&body), sid(0));
+    let mut rows: Vec<&CwItem> = build.cw.iter().collect();
+    // The merge's own ordering rule.
+    rows.sort_by(|a, b| b.last_viewed_at.cmp(&a.last_viewed_at));
+    let order: Vec<&str> = rows.iter().map(|c| c.m.rk.as_str()).collect();
+    assert_eq!(order, ["30", "31", "32", "33"]);
+}
+
+#[test]
+fn deck_recency_carries_the_row_above_down() {
+    assert_eq!(deck_recency(&[0, 500, 0, 100, 900]), [i64::MAX, 500, 500, 100, 100]);
+    assert!(deck_recency(&[]).is_empty());
+}

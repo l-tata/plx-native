@@ -23,4 +23,5 @@ pub mod search; // Search data layer: /hubs/search fanned out across every sourc
 pub mod stores; // stores as machines (restructure phase 4): one command vocabulary + one step per data store
 pub mod taste; // recently added in the genres the profile watches most: one source's Home shelf
 pub mod watchlist; // the account's Plex watchlist: Home's shelf of library copies, and its membership
+pub mod vchannel; // virtual channels: Live TV channels the app airs from the viewer's own library
 pub mod viewstate; // watched / unwatched / remove-from-deck: the PMS view-state WRITES, off the SDL thread

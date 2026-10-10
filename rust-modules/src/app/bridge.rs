@@ -356,6 +356,10 @@ pub(crate) struct Bridge {
     /// Settings > Live TV asked for the Live TV page's setup face; delivered to that page once it
     /// is on top and owns input (`deliver_livetv_setup`).
     livetv_setup: bool,
+    /// The Live TV page's channel studio is owed, on this card (`deliver_livetv_setup`, likewise).
+    livetv_studio: Option<String>,
+    /// The channel studio is owed, making a channel from this recipe ("Make a Channel").
+    livetv_make: Option<(plx_data::vchannel::recipe::Recipe, String)>,
     library_commands: std::collections::VecDeque<plx_screens::registry::LibraryCmd>,
     consent: ConsentMachine,
     /// Requests the owned screens made of the loop this frame (§14), drained by [`frame`]'s caller.
@@ -568,6 +572,8 @@ impl Bridge {
             strip: plx_ui::widgets::StripRender::new(),
             home_commands: std::collections::VecDeque::new(),
             livetv_setup: false,
+            livetv_studio: None,
+            livetv_make: None,
             library_commands: std::collections::VecDeque::new(),
             consent: ConsentMachine::from_initial(consent),
             reqs: Vec::new(),
@@ -947,14 +953,33 @@ impl Bridge {
         self.livetv_setup = true;
     }
 
+    /// Ask the Live TV page for its channel studio, on the card `want` (a Home Suggested Channels
+    /// card).
+    pub(crate) fn request_livetv_studio(&mut self, want: String) {
+        self.livetv_studio = Some(want);
+    }
+
+    /// Ask the Live TV page's channel studio to make a channel from `recipe` (a card's "Make a
+    /// Channel").
+    pub(crate) fn request_livetv_make(&mut self, recipe: plx_data::vchannel::recipe::Recipe, why: String) {
+        self.livetv_make = Some((recipe, why));
+    }
+
     fn deliver_livetv_setup(&mut self, d: &mut Dispatcher<AppHost>) {
-        if !self.livetv_setup { return; }
+        if !self.livetv_setup && self.livetv_studio.is_none() && self.livetv_make.is_none() { return; }
         let Some(entry) = d.nav.top_page() else { return };
         if !matches!(entry.arg, AppArg::LiveTv)
             || d.nav.input_owner() != Some(InputOwner::Entry(entry.id)) { return; }
         let Some(instance) = entry.inst.as_ref().map(|instance| instance.id) else { return };
+        let msg = if let Some((recipe, why)) = self.livetv_make.take() {
+            AppMsg::LiveTvMake { recipe: Box::new(recipe), why }
+        } else if let Some(want) = self.livetv_studio.take() {
+            AppMsg::LiveTvStudio(want)
+        } else {
+            AppMsg::LiveTvSetup
+        };
         self.livetv_setup = false;
-        d.emit(MachineId::Nav, Fx::Deliver(MachineId::Instance(instance), Delivery::Screen(ScreenEvent::App(AppMsg::LiveTvSetup))));
+        d.emit(MachineId::Nav, Fx::Deliver(MachineId::Instance(instance), Delivery::Screen(ScreenEvent::App(msg))));
     }
 
     fn deliver_home_commands(&mut self, d: &mut Dispatcher<AppHost>) {

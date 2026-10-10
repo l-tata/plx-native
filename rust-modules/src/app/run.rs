@@ -2213,6 +2213,15 @@ pub(crate) unsafe fn update(app: &mut App, fr: &mut Frame) {
                 app.bridge.update_home_chrome(&mut app.pages, &mut app.glass, fr.dt);
             });
             fr.underlay_moving |= moving;
+        } else if !super::bridge::host_frozen(&app.pages)
+            && matches!(app.route(), AppArg::LiveTv)
+        {
+            // The Live TV page wears the same bar, and `LiveTvScreen::tick` does not step it
+            // either: without this arm the selected-tab capsule froze mid-slide on the way in.
+            let (_, moving) = plx_machine::idle::scoped_motion(|| {
+                app.bridge.update_home_chrome(&mut app.pages, &mut app.glass, fr.dt);
+            });
+            fr.underlay_moving |= moving;
         }
         // dev: /tmp/plxnative-searchosc — `crate::dev::scenarios::search_osc_tick`.
         crate::dev::scenarios::search_osc_tick(app, fr.now);

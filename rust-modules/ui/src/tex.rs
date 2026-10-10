@@ -71,6 +71,26 @@ pub enum Warm {
 /// pipeline. Never a registry slot (those stop at `MAX_SERVERS`, and `u16::MAX` is `UNSET`).
 pub const PLAIN_URL: u16 = u16::MAX - 1;
 
+/// **Where a Live TV picture comes from**: a Tunarr logo or programme icon is an absolute URL
+/// ([`PLAIN_URL`]); a virtual channel's art is a path on one of the viewer's Plex servers,
+/// spelled `plex:<server raw id>:<path>` ([`plex_art`]). Every Live TV surface resolves its art
+/// through this, so one field carries either.
+pub fn art_source(art: &str) -> (u16, &str) {
+    if let Some(rest) = art.strip_prefix("plex:") {
+        if let Some((srv, path)) = rest.split_once(':') {
+            if let Ok(srv) = srv.parse::<u16>() {
+                return (srv, path);
+            }
+        }
+    }
+    (PLAIN_URL, art)
+}
+
+/// The [`art_source`] spelling of a path on server `srv`.
+pub fn plex_art(srv: u16, path: &str) -> String {
+    if path.is_empty() { String::new() } else { format!("plex:{srv}:{path}") }
+}
+
 /// The application's SOURCE half of image caching (spec §10), as the library sees it: an
 /// interning of `(server, path, w, h, png)` into an opaque [`PosterKey`], a fetch it starts on a
 /// miss, and a decoded image it hands back through [`accept`]. `srv` is the server's raw id —

@@ -78,7 +78,7 @@ pub const STRIP_MOVIES_ELEM: u32 = plx_ui::dispatch::STRIP_BASE + 1;
 pub const STRIP_SHOWS_ELEM: u32 = plx_ui::dispatch::STRIP_BASE + 2;
 pub const STRIP_SEARCH_ELEM: u32 = plx_ui::dispatch::STRIP_BASE + 3;
 pub const STRIP_ACCOUNT_ELEM: u32 = plx_ui::dispatch::STRIP_BASE + 4;
-/// The Live TV pill, drawn only while a Tunarr server is configured (`app::chrome`).
+/// The Live TV pill, drawn while Live TV has anything to show (`LiveTvView::configured`, `app::chrome`).
 pub const STRIP_LIVETV_ELEM: u32 = plx_ui::dispatch::STRIP_BASE + 5;
 
 const MAX_ITEMS: usize = plx_data::pms::MAX_SHELF_ITEMS;
@@ -1450,6 +1450,10 @@ impl HomeScreen {
                     // An On Now card tunes its channel, as OK on the guide does; its key is the
                     // channel's guide number (`livetv::on_now::rows`).
                     (item, HomeReq::Tune { number: item.rk.clone() })
+                } else if item.kind == plx_data::pms::KIND_CHANNEL_IDEA {
+                    // A Suggested Channels card opens the channel studio on that suggestion
+                    // (`livetv::suggested::rows`), where it is previewed and kept.
+                    (item, HomeReq::Studio { id: item.rk.clone() })
                 } else if self
                     .rows
                     .get(row)

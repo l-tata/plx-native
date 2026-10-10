@@ -11,7 +11,7 @@ use plx_data::stores::browse::{DirectoryView, SecKind};
 pub(crate) enum Pill {
     Home,
     Section(SecKind),
-    /// Drawn just before Search, and only while a Tunarr server is configured.
+    /// Drawn just before Search, while Live TV has anything to show (`LiveTvView::configured`).
     LiveTv,
     Search,
 }
@@ -293,7 +293,7 @@ mod tests {
         for i in 0..=search {
             assert_eq!(pill_index(pill_in(i, search, true, at), search, true, pos), Some(i));
         }
-        assert_eq!(pill_index(Pill::LiveTv, kinds.len() + 1, false, pos), None, "no pill without a server");
+        assert_eq!(pill_index(Pill::LiveTv, kinds.len() + 1, false, pos), None, "no pill while Live TV has nothing to show");
     }
 
     #[test]

@@ -666,6 +666,7 @@ pub(super) unsafe fn apply_item_action<R: super::playback::PlaybackResources>(
         // A show or season, shuffled: the queue is built on a worker and started by the loop once
         // it lands (`playback::drain_shuffle`), from the item's own server.
         Action::Shuffle(rk) => super::playback::request_shuffle(ps, sid, &rk),
+        Action::MakeChannel { rk, kind, title } => super::livetv::open_make(pages, bridge, &rk, kind, &title),
         // The version chooser: the pick is the item's for the rest of the session — the next Play
         // (and every transcode of it) asks for that `Media[]` version.
         Action::SetVersion(rk, index) => {
@@ -1211,6 +1212,7 @@ pub(crate) fn delete_all_local_data(meta: &mut plx_data::stores::metadata::Metad
         plx_base::paths::obsolete_last_place_candidates()
             .into_iter()
             .chain(plx_base::paths::resume_place_candidates())
+            .chain(plx_base::paths::vchannel_dismissed_candidates())
             .chain(plx_base::paths::telemetry_candidates())
             .chain(plx_base::paths::telemetry_spool_candidates())
             .chain(plx_base::paths::telemetry_crashmark_candidates()),

@@ -16,6 +16,8 @@ pub enum HubsCmd {
     EditItem { sid: plx_plex::plex::ServerId, rk: String, edit: crate::pms::LocalEdit },
     /// Replace Home's On Now shelf (`livetv::on_now::rows`); an empty list removes it.
     SetOnNow(crate::pms::ShelfRows),
+    /// Replace Home's Suggested Channels shelf (`livetv::suggested::rows`); empty removes it.
+    SetChannels(crate::pms::ShelfRows),
     /// Add the title with this guid to the profile's watchlist, or remove it: optimistic on the
     /// shelf and the membership at once, then performed and read back by the watchlist worker.
     /// `row` is the library copy the press was made on (empty from a detail page), which an add
@@ -249,7 +251,7 @@ impl HubsStore {
     ) -> super::StoreOutcome {
         self.prepare_command(Some(&cmd));
         // The minute tick re-sends an On Now shelf that has usually not moved; only a change is news.
-        let quiet = matches!(cmd, HubsCmd::SetOnNow(_));
+        let quiet = matches!(cmd, HubsCmd::SetOnNow(_) | HubsCmd::SetChannels(_));
         let answer = crate::pms::run_with_directory(&mut self.state, &self.adapter, cmd, directory);
         if answer.changed || !quiet { self.bump(); }
         answer

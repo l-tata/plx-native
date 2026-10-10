@@ -618,9 +618,13 @@ fn neutral_collection_name<'a>(m: Option<&TileFacts<'a>>) -> Option<&'a str> {
 
 /// The channel a live card names on the neutral tile, when it draws one: a channel the guide has
 /// no artwork for (no programme icon, no logo). Its `show_title` is the channel as a viewer names
-/// it, "12 Films".
+/// it, "12 Films". A suggested channel ([`TileKind::Suggestion`]) is named by its `title`.
 fn neutral_channel_name<'a>(m: Option<&TileFacts<'a>>) -> Option<&'a str> {
-    m.filter(|m| m.kind == TileKind::Channel && m.thumb.is_empty()).map(|m| m.show_title)
+    m.filter(|m| m.thumb.is_empty()).and_then(|m| match m.kind {
+        TileKind::Channel => Some(m.show_title),
+        TileKind::Suggestion => Some(m.title),
+        _ => None,
+    })
 }
 
 pub fn card(p: Painter, frame: Rect, art: Art, rad: f32, focused: bool, scale: f32, f: f32) {

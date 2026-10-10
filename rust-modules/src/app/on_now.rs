@@ -13,6 +13,12 @@
 //! a timer behind a page nobody is looking at.
 //!
 //! OK on a card is `HomeReq::Tune`, performed by `livetv::tune_number`.
+//!
+//! Home's **Suggested Channels** shelf rides the same feed: the channels the library could air
+//! for this profile (`plx_data::livetv::suggested`), handed over (`HubsCmd::SetChannels`) whenever
+//! the virtual channels' state moved. Home arriving also asks for them to be read and worked out
+//! again when stale (`VCmd::RefreshIfStale`) — with or without a Tunarr server, since they come
+//! from the Plex library. OK on one is `HomeReq::Studio`.
 
 use super::App;
 use plx_data::livetv::on_now;
@@ -38,6 +44,8 @@ pub(crate) struct OnNowFeed {
     built: Option<Inputs>,
     /// Was Home the page on screen last frame? Its rising edge reloads a stale guide.
     home_visible: bool,
+    /// The virtual channels' revision the Suggested Channels shelf was last built from.
+    channels_built: Option<u64>,
 }
 
 impl OnNowFeed {
@@ -66,10 +74,22 @@ pub(crate) fn step(app: &mut App) {
         art_sid: art_sid.raw(),
     };
     let home_visible = matches!(app.route(), AppArg::Home);
+    let tunarr = view.tunarr_configured();
+    let arrived = home_visible && !app.on_now.home_visible;
     let (reload, rebuild) = app.on_now.step(inputs, configured, home_visible);
-    if reload {
+    if reload && tunarr {
         app.bridge.livetv_run(plx_data::livetv::LiveTvCmd::RefreshIfStale);
     }
+    // On each arrival of Home, and while Home shows and the channels were never read (the Plex
+    // server was not ready yet when Home first appeared): a read with no server does nothing.
+    let unread = {
+        let v = app.bridge.livetv_view();
+        v.virtuals().list_state() == plx_data::vchannel::channels::ListState::Unread && !v.virtuals().busy()
+    };
+    if arrived || (home_visible && unread) {
+        app.bridge.livetv_run(plx_data::livetv::LiveTvCmd::Virtual(plx_data::vchannel::channels::VCmd::RefreshIfStale));
+    }
+    feed_channels(app);
     if !rebuild {
         return;
     }
@@ -83,6 +103,25 @@ pub(crate) fn step(app: &mut App) {
     super::bridge::execute_endpoint_outcomes(
         &mut app.pages,
         app.bridge.hubs_run(plx_data::stores::hubs::HubsCmd::SetOnNow(plx_data::pms::ShelfRows(rows))).endpoints,
+    );
+}
+
+/// Hand Home the Suggested Channels shelf when the virtual channels moved since it was built.
+fn feed_channels(app: &mut App) {
+    let view = app.bridge.livetv_view();
+    let revision = view.virtuals().revision();
+    if app.on_now.channels_built == Some(revision) {
+        return;
+    }
+    app.on_now.channels_built = Some(revision);
+    let rows = plx_data::livetv::suggested::rows(
+        view.virtuals().suggestions(),
+        plx_platform::i18n::msg::browse_home_surprise_title(),
+        plx_platform::i18n::msg::browse_home_surprise_why(),
+    );
+    super::bridge::execute_endpoint_outcomes(
+        &mut app.pages,
+        app.bridge.hubs_run(plx_data::stores::hubs::HubsCmd::SetChannels(plx_data::pms::ShelfRows(rows))).endpoints,
     );
 }
 

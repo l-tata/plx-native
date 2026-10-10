@@ -68,6 +68,10 @@ pub const KIND_CHANNEL: c_int = 5;
 /// A video playlist (`/playlists?playlistType=video`): `thumb` its composite, `child_count` its
 /// items. OK opens its page (the collection page, `CollectionRef::by_playlist`), where it plays.
 pub const KIND_PLAYLIST: c_int = 6;
+/// A channel suggested from the library (`crate::livetv::suggested`): `rk` is the suggestion's id,
+/// `title` its name, `show_title` why it is suggested, `thumb` the poster of a title on it. Not a
+/// PMS item and not yet a channel — OK opens it in the channel studio, where it can be kept.
+pub const KIND_CHANNEL_IDEA: c_int = 7;
 
 /// The hub identifiers of the shelves the APP assembles rather than a server's `/hubs` lists —
 /// see [`HomeExtras`]. One prefix, so every rule that must tell a server shelf from one of ours
@@ -75,6 +79,8 @@ pub const KIND_PLAYLIST: c_int = 6;
 pub const APP_SHELF_PREFIX: &str = "home.plx.";
 /// Home's live shelf (`crate::livetv::on_now`).
 pub const ON_NOW_HUB: &str = "home.plx.onnow";
+/// Channels suggested from the library (`crate::livetv::suggested`).
+pub const CHANNELS_HUB: &str = "home.plx.channels";
 /// The account's Plex watchlist, as the household's own library copies (`crate::watchlist`).
 pub const WATCHLIST_HUB: &str = "home.plx.watchlist";
 /// Recently added in the genres the profile watches most.
@@ -94,10 +100,11 @@ impl std::fmt::Debug for ShelfRows {
     }
 }
 
-/// Does a card of this kind open the item menu on a hold? Not a channel (it only tunes), a
-/// collection or a playlist (no watch state to mark, nothing to play from the start).
+/// Does a card of this kind open the item menu on a hold? Not a channel (it only tunes) or a
+/// suggested one (OK opens the studio). A collection or a playlist does: its one row is *Make a
+/// Channel* (`item_menu::offers_channel`).
 pub fn item_has_menu_kind(kind: c_int) -> bool {
-    !matches!(kind, KIND_CHANNEL | KIND_COLLECTION | KIND_PLAYLIST)
+    !matches!(kind, KIND_CHANNEL | KIND_CHANNEL_IDEA)
 }
 
 /// Is `hub_id` one of the shelves the app assembles ([`APP_SHELF_PREFIX`])?
@@ -243,12 +250,14 @@ pub struct PmsState {
 
 /// **Home's own shelves**: rows assembled from somewhere other than a server's `/hubs` answer, held
 /// beside the sources so every merge places them and a server landing never drops them. Each is
-/// set whole by its own command (`HubsCmd::SetOnNow`, `HubsCmd::SetWatchlist`); an empty one draws
+/// set whole by its own command (`HubsCmd::SetOnNow`, `HubsCmd::SetChannels`, `HubsCmd::SetWatchlist`); an empty one draws
 /// no heading at all, like a source that never answered.
 #[derive(Default, Clone)]
 pub struct HomeExtras {
     /// The live channels (`crate::livetv::on_now`), [`KIND_CHANNEL`] rows.
     pub on_now: Vec<Arc<PmsMovie>>,
+    /// The suggested channels (`crate::livetv::suggested`), [`KIND_CHANNEL_IDEA`] rows.
+    pub channels: Vec<Arc<PmsMovie>>,
     /// The watchlist's titles the household's libraries hold, as those library rows.
     pub watchlist: Vec<Arc<PmsMovie>>,
 }
@@ -850,8 +859,30 @@ type HubBuild = (Vec<Arc<PmsMovie>>, Vec<HubRow>, Vec<HeroSlot>);
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CwItem {
+    /// The deck's recency, for merging several servers' decks ([`deck_recency`]) — not
+    /// necessarily the item's own `lastViewedAt`.
     last_viewed_at: i64,
     m: Arc<PmsMovie>,
+}
+
+/// **The recency a server's deck row merges by**: its own `lastViewedAt`, never more recent than
+/// the row above it, and the row above's when it has none.
+///
+/// The server's deck is already in its own order — most recently active first — and that order is
+/// the truth for one server. But a next-up episode the profile has not started carries no
+/// `lastViewedAt` at all (it was never viewed: the SHOW was), so merging decks by each row's raw
+/// timestamp sank every next-up episode to the bottom of Continue Watching. Finishing an episode
+/// and starting the next was exactly that case: the server put the show first, and the row put it
+/// last. Carrying the row above's recency down keeps one server's order intact while still
+/// interleaving several servers' decks by time.
+fn deck_recency(raw: &[i64]) -> Vec<i64> {
+    let mut floor = i64::MAX;
+    raw.iter()
+        .map(|&lv| {
+            floor = if lv > 0 { lv.min(floor) } else { floor };
+            floor
+        })
+        .collect()
 }
 
 /// One shelf as a source projected it: rows already parsed, filtered and stamped with the server
@@ -962,16 +993,17 @@ fn project(
     // pair, this shelf would keep drawing a card the server had been told to hide, and the context
     // menu's Remove row would look broken while the server had done exactly as asked.
     for hub in cw.hub.iter() {
-        out.cw = hub
+        let rows: Vec<(&plx_plex::plex::Metadata, PmsMovie)> = hub
             .metadata
             .iter()
             .filter(|it| !spent_deck_entry(it))
-            .filter_map(|it| {
-                keep(it).map(|m| CwItem {
-                    last_viewed_at: it.last_viewed_at,
-                    m: Arc::new(m),
-                })
-            })
+            .filter_map(|it| keep(it).map(|m| (it, m)))
+            .collect();
+        let recency = deck_recency(&rows.iter().map(|(it, _)| it.last_viewed_at).collect::<Vec<_>>());
+        out.cw = rows
+            .into_iter()
+            .zip(recency)
+            .map(|((_, m), last_viewed_at)| CwItem { last_viewed_at, m: Arc::new(m) })
             .collect();
         if !out.cw.is_empty() {
             break; // the first hub that has anything in it IS the deck
@@ -1094,8 +1126,10 @@ pub fn allot(budget: usize, want: &[usize]) -> Vec<usize> {
 /// gradeable on the host.
 ///
 /// The shape of Home, in order:
-/// 1. **Continue Watching**, merged across every source and sorted by `lastViewedAt` descending, so
-///    a borrowed item holds first position exactly when the owner watched it last. It carries NO
+/// 1. **Continue Watching**, merged across every source by `deck_recency`: each server's own order
+///    is kept (a next-up episode with no `lastViewedAt` of its own does not sink) and sources are
+///    interleaved by time, so a borrowed item holds first position exactly when the owner watched
+///    it last. It carries NO
 ///    annotation (see [`HubRow::source`]). This is the official client's own shape: the owner's
 ///    screenshots show a friend's two films sitting BETWEEN their own three, in one row.
 /// 2. **The app's own shelves** — the watchlist, On Now, recently added in your genres and the
@@ -1242,10 +1276,11 @@ fn merge_with_scope(srcs: &[Src], scope: &BrowseScope, extras: &HomeExtras) -> H
     // EVERYTHING else Home shows — the deck, the watchlist and every server shelf — because its
     // whole worth is titles you have not been shown already.
     let shelf_rows = |rows: &mut dyn Iterator<Item = &Arc<PmsMovie>>| -> Vec<Arc<PmsMovie>> {
-        rows.filter(|m| m.kind == KIND_CHANNEL || item_pinned(pins, m)).take(MAX_SHELF_ITEMS).cloned().collect()
+        rows.filter(|m| matches!(m.kind, KIND_CHANNEL | KIND_CHANNEL_IDEA) || item_pinned(pins, m)).take(MAX_SHELF_ITEMS).cloned().collect()
     };
     let watchlist = shelf_rows(&mut extras.watchlist.iter());
     let on_now = shelf_rows(&mut extras.on_now.iter());
+    let channels = shelf_rows(&mut extras.channels.iter());
     let genres = {
         let shown: std::collections::HashSet<(ServerId, &str)> = new_cat.iter().map(|m| (m.sid, m.rk.as_str()))
             .chain(watchlist.iter().map(|m| (m.sid, m.rk.as_str())))
@@ -1262,6 +1297,7 @@ fn merge_with_scope(srcs: &[Src], scope: &BrowseScope, extras: &HomeExtras) -> H
     for (hub_id, title, rows) in [
         (WATCHLIST_HUB, plx_platform::i18n::msg::browse_home_watchlist(), &watchlist),
         (ON_NOW_HUB, plx_platform::i18n::msg::browse_home_on_now(), &on_now),
+        (CHANNELS_HUB, plx_platform::i18n::msg::browse_home_channels(), &channels),
         (GENRES_HUB, plx_platform::i18n::msg::browse_home_your_genres(), &genres),
         (PLAYLISTS_HUB, plx_platform::i18n::msg::browse_home_playlists(), &playlists),
     ] {
@@ -2164,7 +2200,7 @@ pub fn land_with_directory(
 pub fn run(state: &mut PmsState, adapter: &Arc<PmsAdapter>, cmd: crate::stores::hubs::HubsCmd) -> crate::stores::StoreOutcome {
     use crate::stores::hubs::HubsCmd;
     match cmd {
-        HubsCmd::RefetchHubs | HubsCmd::Reset | HubsCmd::SetOnNow(_) | HubsCmd::EditWatchlist { .. } =>
+        HubsCmd::RefetchHubs | HubsCmd::Reset | HubsCmd::SetOnNow(_) | HubsCmd::SetChannels(_) | HubsCmd::EditWatchlist { .. } =>
             run_with_scope(state, adapter, cmd, &BrowseScope::standalone()),
         other => run_without_browse(state, adapter, other),
     }
@@ -2202,6 +2238,7 @@ fn run_with_scope(
             crate::stores::StoreOutcome::changed(true)
         }
         HubsCmd::SetOnNow(ShelfRows(rows)) => crate::stores::StoreOutcome::changed(set_on_now(state, rows, scope)),
+        HubsCmd::SetChannels(ShelfRows(rows)) => crate::stores::StoreOutcome::changed(set_channels(state, rows, scope)),
         HubsCmd::EditWatchlist { guid, add, row: ShelfRows(row) } => {
             crate::stores::StoreOutcome::changed(edit_watchlist(state, adapter, &guid, add, row, scope))
         }
@@ -2312,6 +2349,22 @@ fn set_on_now(state: &mut PmsState, rows: Vec<PmsMovie>, scope: &BrowseScope) ->
     true
 }
 
+/// Replace the Suggested Channels shelf and re-commit Home, unless the rows draw the same.
+fn set_channels(state: &mut PmsState, rows: Vec<PmsMovie>, scope: &BrowseScope) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    plx_base::testlock::assert_held("the pms hub catalog (set_channels)");
+    let same = rows.len() == state.extras.channels.len()
+        && rows.iter().zip(&state.extras.channels).all(|(a, b)| same_channel_card(a, b));
+    if same {
+        return false;
+    }
+    state.extras.channels = rows.into_iter().map(Arc::new).collect();
+    let build = merge_with_scope(&state.srcs, scope, &state.extras);
+    adopt_browse_scope(state, scope);
+    commit(state, build);
+    true
+}
+
 /// Two On Now cards that draw the same: one channel, one programme, one art, one progress.
 fn same_channel_card(a: &PmsMovie, b: &PmsMovie) -> bool {
     (&a.rk, &a.title, &a.show_title, &a.thumb, a.resume_ms, a.dur_ns, a.sid)
@@ -2329,7 +2382,7 @@ fn run_without_browse(state: &mut PmsState, adapter: &Arc<PmsAdapter>, cmd: crat
         #[cfg(not(any(test, feature = "test-support")))]
         HubsCmd::EditItem { .. } =>
             unreachable!("Hubs EditItem requires a retained Browse directory"),
-        HubsCmd::RefetchHubs | HubsCmd::Reset | HubsCmd::SetOnNow(_) | HubsCmd::EditWatchlist { .. } =>
+        HubsCmd::RefetchHubs | HubsCmd::Reset | HubsCmd::SetOnNow(_) | HubsCmd::SetChannels(_) | HubsCmd::EditWatchlist { .. } =>
             unreachable!("Browse-scoped Hubs command reached the independent runner"),
     }
 }

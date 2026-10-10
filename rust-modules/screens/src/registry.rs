@@ -260,6 +260,9 @@ pub enum HomeReq {
     /// OK on an On Now card: tune the live channel with this guide number (`LiveTvReq::Tune`'s
     /// work, keyed by number because Home's rows are not the lineup).
     Tune { number: String },
+    /// OK on a Suggested Channels card: open the channel studio on that suggestion (its id, or
+    /// `surprise`).
+    Studio { id: String },
     /// BACK from the shelves: fold to the hero and seat the engine in its remembered hero group.
     FoldToHero,
     Account,
@@ -273,7 +276,8 @@ pub enum HomeTab {
     Movies,
     Shows,
     Search,
-    /// Drawn only while a Tunarr server is configured (`LiveTvView::configured`).
+    /// Drawn while Live TV has anything to show (`LiveTvView::configured`): a Tunarr server, a
+    /// kept virtual channel, or a suggested one.
     LiveTv,
 }
 
@@ -1145,6 +1149,12 @@ pub enum AppMsg {
     /// Open the Live TV page on its setup face (Settings > Live TV) — delivered to a mounted Live
     /// TV page so a page already on the stack shows setup rather than its guide.
     LiveTvSetup,
+    /// Open the Live TV page's channel studio on this card (a suggestion's id, `surprise`; empty
+    /// for none) — a Home Suggested Channels card was pressed.
+    LiveTvStudio(String),
+    /// Open the channel studio making a channel from this recipe ("Make a Channel" on a show,
+    /// season, collection or playlist), with the line that says where it comes from.
+    LiveTvMake { recipe: Box<plx_data::vchannel::recipe::Recipe>, why: String },
     /// The *Also available* surface committed a row: open that copy's own page. The SURFACE names
     /// the destination and the PAGE navigates, which is `LibraryMenu`'s shape (`LibrarySelect`) and
     /// what keeps "what a press means on the Detail page" in one place instead of two.
@@ -1568,9 +1578,10 @@ pub enum AppArg {
     /// Playback. Its panels are NOT here — they are entries on the player page's own
     /// `ModalStack` ([`Self::PlayerOverlay`]), and the container owns which one is up.
     Player,
-    /// **Live TV**: the configured Tunarr server's guide, or its setup when there is none. A PEER
-    /// of Home, the Library and Search, reached from the strip's Live TV pill (drawn only while a
-    /// server is configured) and from Settings > Live TV.
+    /// **Live TV**: the guide (Tunarr's channels and the profile's virtual ones), the channel
+    /// studio, or the Tunarr setup when there is nothing to show. A PEER of Home, the Library and
+    /// Search, reached from the strip's Live TV pill (drawn while `LiveTvView::configured`), from
+    /// a Home Suggested Channels card, and from Settings > Live TV.
     LiveTv,
     /// A page with an ITEM IDENTITY — a detail page, a person page, a filmography. Two of these
     /// are two entries (`person → detail → person` is three), which is the whole reason the
@@ -2183,7 +2194,8 @@ pub const SCREEN_SHAPES: &[&str] = &[
 // Library filters: the Library menu's value picker names its field (`LibraryMenu{…field:str…}`).
 // Playlists: a collection page can show a video playlist (`ARG_SHAPE`'s `Collection` gains
 // `playlist?:u32`, written only for a playlist); the previous pin was 0x4d7a_7df3_533c_f2bc.
-const SCREEN_SHAPES_PIN: u64 = 0x9df7_ee6a_d20c_7792;
+// The channel studio: `LiveTvScreen` gains `studio:str`; the previous pin was 0x9df7_ee6a_d20c_7792.
+const SCREEN_SHAPES_PIN: u64 = 0x270b_cd42_47e6_910c;
 
 #[cfg(test)]
 mod arg_tests {

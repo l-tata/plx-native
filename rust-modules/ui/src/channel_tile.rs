@@ -117,7 +117,7 @@ impl<'a> ChannelTile<'a> {
         if self.logo.is_empty() {
             return (0, 0.0, 0.0);
         }
-        tex::resolve_wh_on(tex::PLAIN_URL, self.logo, r.w.round() as i32, r.h.round() as i32, false)
+        { let (srv, path) = tex::art_source(self.logo); tex::resolve_wh_on(srv, path, r.w.round() as i32, r.h.round() as i32, false) }
     }
 
     /// The number badge's rect in a tile at `r`, and the badge's label as drawn — `None` when the

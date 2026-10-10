@@ -6,13 +6,16 @@ store (`plx_net::ssdp`, `plx_data::livetv`, `plx_data::stores::livetv`); the cha
 and the live playback session (`plx_media::live`, `route::install_live_stream`); the Live TV page —
 setup face, guide grid, CH▲/▼ paging and digit entry (`plx_screens::livetv`); the player's live
 banner, CH▲/▼, digits, last channel, a channel list to surf over the playing channel (UP/DOWN) and bounded automatic re-tune (`plx_appkit::live_banner`,
-`screens::player`, `app::livetv`); Settings > Live TV; and the Live TV pill on the tab strip once a
-server is configured. Not built yet: the On Now shelf and a "now playing" item on Home, the airing
+`screens::player`, `app::livetv`); Settings > Live TV; and the Live TV pill on the tab strip once there is
+anything to show (a Tunarr server, or since 0.12.0 a virtual channel or a suggestion). Home's On Now shelf has since landed (`plx_data::livetv::on_now`). Not built yet: a "now playing" item on Home, the airing
 popover, favourites/ordering, and a re-Load on a
 mid-stream frame-rate change (risk 2 — run Tunarr with frame-rate normalisation on). Wall times
 print in the C library's zone; when the library says UTC, in the set's own zone from its system
 clock service, else in the zone Tunarr writes XMLTV in (`plx_base::wallclock`). The guide opens on
 the channel last tuned (`Session::livetv_channel`).
+
+Since 0.12.0 Live TV also airs **virtual channels** the app makes from the viewer's own library,
+with or without Tunarr — see [Virtual channels](#virtual-channels) at the end.
 
 ## The decision
 
@@ -169,7 +172,8 @@ A **live route** beside the Plex route, not a branch inside it:
 
 ### Interface
 
-- A **Live TV** entry beside the libraries, shown only when a Tunarr source is configured.
+- A **Live TV** entry beside the libraries, shown whenever Live TV has something to show: a Tunarr
+  source, a kept virtual channel, or a channel the library can suggest.
 - **On Now** shelf: one card per channel showing the current airing and its progress.
 - **Guide**: channels down, time across, a fixed channel column and time header, cells sized by
   duration, focus moving by time (a cursor time plus a channel, not a cell index), paging by
@@ -236,3 +240,41 @@ a "now playing" item on Home, a remembered last channel.
    are the stable part of Tunarr; avoid its private `/api/*` JSON routes.
 6. **Tuner count is advertised, not enforced.** Several televisions on different channels each
    start their own transcode on the Tunarr host; that host's capacity is the real limit.
+
+## Virtual channels
+
+**Status: implemented for 0.12.0; the pages are seen in the simulator against the mock PMS, playback
+is not yet verified on the television.** The app makes TV channels out of the viewer's own Plex
+library and airs them itself, beside (or instead of) Tunarr's. Code: `plx_data::vchannel` (its
+module doc indexes the parts), the lineup merge in `plx_data::livetv` (`virtual_channel`,
+`republish`), Home's shelf `plx_data::livetv::suggested`, the channel studio
+`plx_screens::livetv::studio` and the tune in `app::livetv` (`tune_virtual`).
+
+- **A channel is a recipe**: where its programmes come from (a playlist, collection, show, season,
+  or the library narrowed by rules), the rules, the order style, a seed and a start. The timeline is
+  computed from it, deterministically, so every television airs the same thing at the same moment
+  (`vchannel::schedule`).
+- **Kept channels are Plex playlists** owned by the profile, titled with a TV mark; the recipe rides
+  in the playlist's description after `[plxnative-channel v1]` (`vchannel::recipe`), so every
+  television in the house reads the same channels. They number from 900 and join the lineup with a
+  `plxvc:<playlist>` URL; a Tunarr channel with the same number wins.
+- **Suggestions** come from the profile's own view state, the hour, the weekday and the month
+  (`vchannel::taste`, `vchannel::suggest`): fourteen families of idea, scored, chosen for variety,
+  named and explained. They are shown on Home (Suggested Channels) and in the channel studio; the
+  app only suggests and never makes a channel by itself. "Not interested" is remembered per profile
+  on the television (`vchannel::dismissed`).
+- **The channel studio** (the Live TV page's fourth face) previews a suggestion's live timeline
+  before it is kept and offers Keep, Reshuffle, Order, Edit (films and/or shows, unwatched only, a
+  rating ceiling, with a live count) and Not interested; on a kept channel, Watch, Reshuffle, Order
+  and Delete.
+- **Making a channel**: *Make a Channel* on a show, season, collection or playlist card (its hold
+  menu) opens the studio on a channel drawn from that title; *New Channel* (at the end of Your
+  Channels) builds one from the library by its options — genre, decade, films and/or shows,
+  unwatched only, rating — each offering only values that still air something, with a live count
+  and a name it takes from its options ("90s Sitcoms"). A library channel's membership follows the
+  library: it is rebuilt from its rules whenever the catalog is read again. It opens from the guide's Channels pill, from a Home card, or is the page itself when
+  there is no Tunarr server and no kept channel.
+- **Watching** plays the library item the timeline airs now, from the moment the channel is at,
+  quietly (`route::request_play_channel`: no PlayQueue, timeline or scrobble — a channel never
+  touches the profile's history), under the Live TV session, so the banner and the channel keys
+  work. The next programme follows when one ends; a pause falls behind live and OK jumps back.

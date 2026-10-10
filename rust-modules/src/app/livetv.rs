@@ -17,6 +17,13 @@
 //! A live stream that ENDS (Tunarr restarted, the network dropped) is re-tuned rather than left,
 //! a bounded number of times; an engine failure is retried the same way before the failure
 //! read-out is allowed to stand.
+//!
+//! A **virtual channel** (`plxvc:`, `plx_data::vchannel`) has no stream to probe: step 2 reads
+//! what its timeline airs right now and plays that library item from the moment the channel is
+//! at (`route::request_play_channel` — quiet, so nothing reaches the profile's history), under
+//! the same Live TV session, so the banner, CH▲/▼, the surf list and *last channel* all work. A
+//! programme that ends is the channel moving on: it is tuned again at once, which plays the next
+//! one. A pause falls behind live; tuning the channel again is *Jump to live*.
 
 use super::bridge::{self, AppHost};
 use super::App;
@@ -131,6 +138,7 @@ pub(crate) fn retry(app: &mut App, now: u32) {
 fn tune(app: &mut App, lineup: Arc<plx_data::livetv::guide::Lineup>, index: usize, previous: Option<usize>, now: u32) {
     let Some(channel) = lineup.channels.get(index) else { return };
     let url = channel.url.clone();
+    let virtual_playlist = plx_data::livetv::virtual_playlist(&url).map(str::to_owned);
     plx_base::eventlog::log(&format!("livetv: tune channel={} index={index}", channel.number));
     // Step 1: stop what plays, and show the channel tuning.
     super::content::halt_preview_now(&mut app.player.session, &mut app.adapters.player);
@@ -152,6 +160,14 @@ fn tune(app: &mut App, lineup: Arc<plx_data::livetv::guide::Lineup>, index: usiz
         app.bridge.seed_player_hud(plx_screens::player::LIVE_BANNER_MS);
     }
     plx_media::player::lifecycle::set_paused(false);
+    if let Some(playlist) = virtual_playlist {
+        app.livetv.epoch += 1;
+        app.livetv.retry_at = None;
+        app.livetv.pending = None;
+        tune_virtual(app, &playlist, now);
+        plx_machine::idle::invalidate();
+        return;
+    }
     // Step 2: probe on a worker.
     app.livetv.epoch += 1;
     app.livetv.retry_at = None;
@@ -168,6 +184,77 @@ fn tune(app: &mut App, lineup: Arc<plx_data::livetv::guide::Lineup>, index: usiz
         start(app, url, StreamFacts::TUNARR_DEFAULT);
     }
     plx_machine::idle::invalidate();
+}
+
+/// Steps 2 and 3 for a virtual channel: what its timeline airs now, played from where the channel
+/// is in it. A channel whose timeline is not built yet (the store is still reading its programmes)
+/// is retried shortly, like a probe that failed.
+fn tune_virtual(app: &mut App, playlist: &str, now: u32) {
+    let wall = plx_base::wallclock::now_ms();
+    let airing = {
+        let view = app.bridge.livetv_view();
+        view.virtuals()
+            .channel(playlist)
+            .and_then(|vc| vc.schedule.as_ref())
+            .and_then(|s| s.at(wall).map(|slot| (slot, s.programs()[slot.program].clone())))
+    };
+    let Some((slot, programme)) = airing else {
+        plx_base::eventlog::log(&format!("livetv: virtual channel {playlist} has no timeline yet"));
+        fail(app);
+        schedule_retry(app, now);
+        return;
+    };
+    let Some(mut session) = plx_media::route::live(&app.player.session).cloned() else { return };
+    session.facts = Some(StreamFacts::TUNARR_DEFAULT);
+    session.failed = false;
+    session.airing_start_ms = Some(slot.start_ms);
+    plx_media::route::set_live_tuning(&mut app.player.session, session);
+    let offset_ns = (wall - slot.start_ms).max(0) * 1_000_000;
+    let (title, ctx) = virtual_titles(&programme);
+    plx_base::eventlog::log(&format!(
+        "livetv: virtual tune rk={} offset={}s", programme.rk, offset_ns / 1_000_000_000
+    ));
+    let requested = plx_media::route::request_play_channel(
+        &mut app.player.session,
+        app.bridge.metadata_mut(),
+        plx_plex::plex::ServerId::from_raw(programme.sid),
+        &programme.rk,
+        &programme.part,
+        &programme.vcodec,
+        &programme.acodec,
+        &title,
+        &ctx,
+    );
+    if !requested {
+        fail(app);
+        schedule_retry(app, now);
+        return;
+    }
+    super::playback::start_playback(
+        &mut app.player.session,
+        &mut app.adapters.player,
+        offset_ns,
+        super::playback::Origin::Here,
+        plx_screens::player::LIVE_BANNER_MS,
+        None,
+        &mut app.pages,
+        &mut app.bridge,
+    );
+    if let Some(channel) = plx_media::route::live(&app.player.session).and_then(|l| l.channel()) {
+        plx_data::livetv::remember_channel(&channel.number);
+    }
+}
+
+/// The HUD's title and context line for a virtual channel's programme: the show and the episode
+/// ("S2 · E5 · Title"), or the film and its year.
+fn virtual_titles(p: &plx_data::vchannel::schedule::Program) -> (String, String) {
+    if p.episode && !p.show_title.is_empty() {
+        let code = p.episode_code();
+        let ctx = [code.as_str(), p.title.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" \u{b7} ");
+        (p.show_title.clone(), ctx)
+    } else {
+        (p.title.clone(), if p.year > 0 { p.year.to_string() } else { String::new() })
+    }
 }
 
 /// Step 3: install the channel and start the engine.
@@ -268,6 +355,14 @@ fn schedule_retry(app: &mut App, now: u32) {
 /// The live stream drained to its end: a channel does not end, so this is a dropped connection.
 /// Re-tune it (bounded); when the budget is spent, leave the banner saying it is unavailable.
 pub(crate) fn stream_ended(app: &mut App, now: u32) {
+    // A virtual channel's programme ended: the channel moves on to the next one, at once.
+    if let Some(live) = plx_media::route::live(&app.player.session).cloned().filter(|l| l.is_virtual()) {
+        plx_base::eventlog::log("livetv: the programme ended; the virtual channel moves on");
+        plx_media::player::stop_bufferfeed(&mut app.player.session, &mut app.adapters.player);
+        app.livetv.retries = 0;
+        tune(app, live.lineup, live.index, live.previous, now);
+        return;
+    }
     plx_base::eventlog::log("livetv: the stream ended; re-tuning");
     plx_media::player::stop_bufferfeed(&mut app.player.session, &mut app.adapters.player);
     if app.livetv.retries < AUTO_RETRIES {
@@ -275,6 +370,35 @@ pub(crate) fn stream_ended(app: &mut App, now: u32) {
     } else {
         fail(app);
     }
+}
+
+/// Open the Live TV page on its channel studio, on the suggestion `id` (a Home Suggested Channels
+/// card).
+pub(crate) fn open_studio(app: &mut App, id: String) {
+    bridge::nav_select_tab(&mut app.pages, AppArg::LiveTv);
+    app.bridge.request_livetv_studio(id);
+}
+
+/// Open the Live TV page's channel studio making a channel from a show, season, collection or
+/// playlist (the card menu's "Make a Channel"). `kind` is the row's catalog kind.
+pub(crate) fn open_make(
+    pages: &mut plx_ui::dispatch::Dispatcher<AppHost>,
+    rig: &mut bridge::Bridge,
+    rk: &str,
+    kind: std::os::raw::c_int,
+    title: &str,
+) {
+    use plx_data::vchannel::recipe::{Recipe, Source};
+    let source = match kind {
+        1 => Source::Show { rk: rk.to_owned() },
+        2 => Source::Season { rk: rk.to_owned() },
+        plx_data::pms::KIND_PLAYLIST => Source::Playlist { rk: rk.to_owned() },
+        _ => Source::Collection { rk: rk.to_owned() },
+    };
+    let why = plx_platform::i18n::msg::livetv_studio_made_from(title);
+    let recipe = Recipe::made(source, title, &why, plx_base::wallclock::now_ms());
+    bridge::nav_select_tab(pages, AppArg::LiveTv);
+    rig.request_livetv_make(recipe, why);
 }
 
 /// Open the Live TV page — on its setup face when asked (Settings > Live TV).

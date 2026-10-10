@@ -1,10 +1,15 @@
-//! **The Live TV page** — the configured Tunarr server's channel guide, or, when there is none (or
-//! it cannot be loaded), the setup that finds one. A peer of Home, the Library and Search on the
+//! **The Live TV page** — the guide of the configured Tunarr server's channels and the profile's
+//! virtual channels (`plx_data::vchannel`), the channel studio where virtual channels are suggested
+//! and kept, or, when there is neither Tunarr nor anything from the library, the setup that finds
+//! a Tunarr server. A peer of Home, the Library and Search on the
 //! top strip (`AppArg::LiveTv`). The data is `plx_data::livetv` (the store's view through
 //! [`LiveTvLike`]); tuning a channel is a request the loop performs (`LiveTvReq::Tune`), because it
 //! needs the playback session and the adapter (§2.1).
 //!
-//! Three faces, chosen from the store every frame ([`Face::of`]):
+//! Four faces, chosen from the store every frame ([`Face::page`]). Without a Tunarr server (or with
+//! one that failed) the guide still shows the channels the profile kept, and the **Studio** — the
+//! channel studio ([`studio`]) — stands in for the setup when the library can suggest channels; it
+//! is also opened from the guide's Channels pill and from a Home Suggested Channels card.
 //!
 //! * **Setup** — no server, a server that failed to load, or the viewer asked to change it: an
 //!   explanation, *Search the network* (SSDP, `LiveTvCmd::Discover`), one row per Tunarr found, an
@@ -30,6 +35,8 @@
 mod draw;
 pub mod filter;
 pub mod grid;
+pub mod studio;
+mod studio_draw;
 
 use std::borrow::Cow;
 
@@ -71,7 +78,7 @@ const DIGIT_MS: u32 = 1_500;
 pub const MATCH_DWELL_MS: u32 = 600;
 
 /// The fields [`LiveTvScreen`] canonicalises, for the recorder's shape pin (§5.4).
-pub const SHAPE: &str = "LiveTvScreen{entry:u32,instance:u32,cursor:{row:u64,at:i64,window:i64,top:u64,follow:bool},setup_sel:u64,force_setup:bool,editing:bool,address:str,typed:str,searched:bool,remembered:str,seated:bool,filter:str,on_strip:bool,strip_sel:u64}";
+pub const SHAPE: &str = "LiveTvScreen{entry:u32,instance:u32,cursor:{row:u64,at:i64,window:i64,top:u64,follow:bool},setup_sel:u64,force_setup:bool,editing:bool,address:str,typed:str,searched:bool,remembered:str,seated:bool,filter:str,on_strip:bool,strip_sel:u64,studio:str}";
 
 // ---- geometry ----------------------------------------------------------------------------------
 
@@ -126,18 +133,42 @@ pub enum Face {
     Setup,
     Loading,
     Guide,
+    /// The channel studio ([`studio`]): opened from the guide, or the page itself when there is
+    /// no Tunarr server and no kept channel but the library can suggest some.
+    Studio,
 }
 
 impl Face {
+    /// The face the store's state calls for. A virtual channel is a guide of its own: without a
+    /// Tunarr server, or with one that failed, the guide still shows the channels the profile kept.
     pub fn of(view: LiveTvView<'_>, force_setup: bool) -> Face {
-        if !view.configured() || force_setup {
+        if force_setup {
             return Face::Setup;
+        }
+        if !view.tunarr_configured() {
+            return if view.has_virtuals() { Face::Guide } else { Face::Setup };
         }
         match view.status() {
             Status::Ready => Face::Guide,
             Status::Loading => Face::Loading,
+            Status::Failed(_) | Status::Unconfigured if view.has_virtuals() => Face::Guide,
             Status::Failed(_) | Status::Unconfigured => Face::Setup,
         }
+    }
+
+    /// The face the page shows: [`Face::of`], with the studio when it is open, and in place of
+    /// the Tunarr setup when there is no Tunarr server but channels can come from the library
+    /// (suggested, or the library still being read for them).
+    pub fn page(view: LiveTvView<'_>, force_setup: bool, studio_open: bool) -> Face {
+        if force_setup {
+            return Face::Setup;
+        }
+        if studio_open {
+            return Face::Studio;
+        }
+        let face = Face::of(view, false);
+        let library = view.configured() || view.virtuals().busy() || view.virtuals().catalog().is_some();
+        if face == Face::Setup && !view.tunarr_configured() && library { Face::Studio } else { face }
     }
 }
 
@@ -159,7 +190,7 @@ pub fn setup_items(view: LiveTvView<'_>, force_setup: bool) -> Vec<Item> {
         items.extend((0..found.len()).map(Item::Found));
     }
     items.push(Item::Address);
-    if view.configured() {
+    if view.tunarr_configured() {
         if matches!(view.status(), Status::Failed(_)) {
             items.push(Item::Retry);
         }
@@ -213,6 +244,8 @@ pub struct LiveTvScreen {
     /// The wall-clock minute last drawn, so the NOW marker moves once a minute and no more often.
     minute: i64,
     ground: plx_ui::widgets::PageGround,
+    /// The channel studio's cursor and drafts ([`studio`]).
+    studio: studio::Studio,
 }
 
 impl LiveTvScreen {
@@ -241,6 +274,7 @@ impl LiveTvScreen {
             rest: None,
             minute: now / 60_000,
             ground: plx_ui::widgets::PageGround::new(),
+            studio: studio::Studio::default(),
         }
     }
 
@@ -248,6 +282,56 @@ impl LiveTvScreen {
     pub fn show_setup(&mut self) {
         self.force_setup = true;
         self.setup_sel = 0;
+    }
+
+    /// Open the channel studio, on the card `want` (a suggestion's id, `surprise`) when given.
+    pub fn show_studio(&mut self, want: Option<String>, view: LiveTvView<'_>) {
+        self.force_setup = false;
+        self.studio.open_on(want, view);
+    }
+
+    /// Carry out what the studio asked for.
+    fn studio_out<H: LiveTvLike>(&mut self, outs: Vec<studio::Out>, view: LiveTvView<'_>, fx: &mut Effects<'_, H>) {
+        for out in outs {
+            match out {
+                studio::Out::Store(cmd) => Self::store(LiveTvCmd::Virtual(cmd), fx),
+                studio::Out::Tune(number) => {
+                    if let Some(index) = view.lineup().index_of_number(&number) {
+                        Self::ask(LiveTvReq::Tune { index }, fx);
+                    }
+                }
+                // Back to the guide it was opened from — unless the studio is the page itself
+                // (no Tunarr, no kept channel), when there is nothing under it to go back to.
+                studio::Out::Close if self.studio.open && Face::page(view, self.force_setup, false) != Face::Studio
+                    && Face::page(view, self.force_setup, false) != Face::Setup =>
+                {
+                    self.studio.open = false
+                }
+                studio::Out::Close => {
+                    self.studio.open = false;
+                    Self::ask(LiveTvReq::Back, fx)
+                }
+            }
+        }
+        fx.invalidate(Provenance::Input);
+    }
+
+    /// A key on the studio. `Handled::No` hands it to the engine (UP to the top strip).
+    fn key_studio<H: LiveTvLike>(&mut self, key: Key, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
+        let view = H::livetv(cx);
+        let mut outs = Vec::new();
+        let mine = self.studio.key(key, view, plx_base::wallclock::now_ms(), &mut outs);
+        self.studio_out(outs, view, fx);
+        if mine { Handled::Yes } else { Handled::No }
+    }
+
+    /// Ask the store to read the virtual channels (and the Tunarr guide when there is one) if
+    /// they are stale — on every arrival of the page.
+    fn refresh<H: LiveTvLike>(cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) {
+        if H::livetv(cx).tunarr_configured() {
+            Self::store(LiveTvCmd::RefreshIfStale, fx);
+        }
+        Self::store(LiveTvCmd::Virtual(plx_data::vchannel::channels::VCmd::RefreshIfStale), fx);
     }
 
     fn key(&self) -> FocusKey<u32> {
@@ -294,7 +378,7 @@ impl LiveTvScreen {
     }
 
     fn face<H: LiveTvLike>(&self, cx: &Cx<'_, H>) -> Face {
-        Face::of(H::livetv(cx), self.force_setup)
+        Face::page(H::livetv(cx), self.force_setup, self.studio.open)
     }
 
     // ---- the guide's derived rows ----------------------------------------------------------------
@@ -385,7 +469,7 @@ impl LiveTvScreen {
                     self.keyboard(false, fx);
                     self.commit_address(view, fx);
                 } else {
-                    if self.address.text().is_empty() && view.configured() {
+                    if self.address.text().is_empty() && view.tunarr_configured() {
                         let source = view.source().to_owned();
                         let len = source.len();
                         self.address = TextBuffer::new(source, len);
@@ -423,7 +507,8 @@ impl LiveTvScreen {
 
     /// A key on the genre strip.
     fn key_chips<H: LiveTvLike>(&mut self, key: Key, view: LiveTvView<'_>, measure: &dyn plx_machine::machine::Measure, fx: &mut Effects<'_, H>) -> Handled {
-        let n = draw::strip_fit(&self.chips, measure);
+        // The chips that fit, then the studio's pill.
+        let n = draw::strip_fit(&self.chips, measure) + 1;
         match key {
             // The top strip's, through the engine's link.
             Key::Up => return Handled::No,
@@ -444,6 +529,9 @@ impl LiveTvScreen {
                     return Handled::Yes;
                 }
                 self.strip_sel += 1;
+            }
+            Key::Ok if self.strip_sel + 1 == n => {
+                self.show_studio(None, view);
             }
             Key::Ok => {
                 let Some(chosen) = self.chips.get(self.strip_sel).cloned() else { return Handled::Yes };
@@ -619,24 +707,50 @@ impl LiveTvScreen {
         if self.setup_sel >= n {
             self.setup_sel = n.saturating_sub(1);
         }
-        // An unconfigured page looks for Tunarr by itself, once per visit.
-        if !view.configured() && !self.searched && matches!(view.discovery(), Discovery::Idle) {
+        let face = self.face(cx);
+        if face == Face::Studio {
+            // Once on screen the studio stays until it is left: a channel kept from it must not
+            // swap the page for the guide that channel just made possible.
+            self.studio.open = true;
+            let mut outs = Vec::new();
+            if self.studio.tick(view, now_ms, wall, self.focused(cx), &mut outs) {
+                fx.invalidate(Provenance::Lifecycle);
+            }
+            if !outs.is_empty() {
+                self.studio_out(outs, view, fx);
+            }
+        }
+        // An unconfigured page looks for Tunarr by itself, once per visit — while it shows setup.
+        if face == Face::Setup && !view.tunarr_configured() && !self.searched && matches!(view.discovery(), Discovery::Idle) {
             self.searched = true;
             Self::store(LiveTvCmd::Discover, fx);
         }
-        let guide = self.face(cx) == Face::Guide;
-        self.key_ground(view, guide, dt);
+        let guide = face == Face::Guide;
+        self.key_ground(view, face, dt);
         self.dwell(view, guide && self.focused(cx), now_ms, fx);
     }
 
     /// Dissolve the page ground toward the focused airing's artwork (its programme picture, else
     /// its channel's logo — exactly the picture the info pane draws, at the same key): HELD while
     /// that picture is on its way, the flat surface when the airing has no picture at all.
-    fn key_ground(&mut self, view: LiveTvView<'_>, guide: bool, dt: f32) {
-        let art = if guide { self.focus_airing(view.lineup()).map(|(ch, a)| draw::info_art(ch, a)) } else { None };
+    fn key_ground(&mut self, view: LiveTvView<'_>, face: Face, dt: f32) {
+        if face == Face::Studio {
+            let rows = studio::rows(view, self.studio.made());
+            let card = self.studio.focus(&rows);
+            let art = card.and_then(|c| studio_draw::card_art(&c, self.studio.schedule(&c, view), plx_base::wallclock::now_ms()));
+            match art {
+                Some((srv, path)) => {
+                    let corners = plx_ui::tex::corners_on(srv, path, studio_draw::CARD_W as i32 * 2, studio_draw::CARD_H as i32 * 2, false);
+                    self.ground.key(corners, plx_ui::widgets::PageGround::CARD_W, dt);
+                }
+                None => self.ground.key_target([theme::SURFACE_APP; 4], dt),
+            }
+            return;
+        }
+        let art = if face == Face::Guide { self.focus_airing(view.lineup()).map(|(ch, a)| draw::info_art(ch, a)) } else { None };
         match art {
             Some(Some(url)) => {
-                let corners = plx_ui::tex::corners_on(plx_ui::tex::PLAIN_URL, url, ART_MAX_W as i32, ART_H as i32, false);
+                let corners = { let (srv, path) = plx_ui::tex::art_source(url); plx_ui::tex::corners_on(srv, path, ART_MAX_W as i32, ART_H as i32, false) };
                 self.ground.key(corners, plx_ui::widgets::PageGround::CARD_W, dt);
             }
             _ => self.ground.key_target([theme::SURFACE_APP; 4], dt),
@@ -683,20 +797,30 @@ impl<H: LiveTvLike> Machine<H> for LiveTvScreen {
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
         match ev {
             ScreenEvent::Mount => {
-                if H::livetv(cx).configured() {
-                    Self::store(LiveTvCmd::RefreshIfStale, fx);
-                }
+                Self::refresh(cx, fx);
                 self.reseat(fx);
                 Handled::Yes
             }
             ScreenEvent::Uncover | ScreenEvent::Resume => {
-                if H::livetv(cx).configured() {
-                    Self::store(LiveTvCmd::RefreshIfStale, fx);
-                }
+                Self::refresh(cx, fx);
                 Handled::Yes
             }
             ScreenEvent::App(crate::registry::AppMsg::LiveTvSetup) => {
+                self.studio.open = false;
                 self.show_setup();
+                fx.invalidate(Provenance::Input);
+                Handled::Yes
+            }
+            ScreenEvent::App(crate::registry::AppMsg::LiveTvMake { recipe, why }) => {
+                self.force_setup = false;
+                self.studio.open_make((**recipe).clone(), why.clone(), H::livetv(cx));
+                self.reseat(fx);
+                fx.invalidate(Provenance::Input);
+                Handled::Yes
+            }
+            ScreenEvent::App(crate::registry::AppMsg::LiveTvStudio(want)) => {
+                self.show_studio(Some(want.clone()), H::livetv(cx));
+                self.reseat(fx);
                 fx.invalidate(Provenance::Input);
                 Handled::Yes
             }
@@ -725,6 +849,7 @@ impl<H: LiveTvLike> Machine<H> for LiveTvScreen {
                         Face::Guide if self.on_strip => self.key_chips(Key::Ok, H::livetv(cx), cx.measure, fx),
                         Face::Guide => self.tune(H::livetv(cx), fx),
                         Face::Loading => Handled::Yes,
+                        Face::Studio => self.key_studio(Key::Ok, cx, fx),
                     };
                 }
                 self.activate_strip(*elem, fx)
@@ -771,6 +896,7 @@ impl<H: LiveTvLike> Machine<H> for LiveTvScreen {
                     match self.face(cx) {
                         Face::Guide => self.key_guide(*key, *sym, *wcode, input.at.ms, cx, fx),
                         Face::Setup => self.key_setup(*key, *sym, cx, fx),
+                        Face::Studio => self.key_studio(*key, cx, fx),
                         Face::Loading => match key {
                             Key::Back => {
                                 Self::ask(LiveTvReq::Back, fx);
@@ -818,7 +944,8 @@ impl<H: LiveTvLike> Focusable<H> for LiveTvScreen {
             Face::Guide if self.on_strip => draw::strip_rects(&self.chips, cx.measure)
                 .get(self.strip_sel)
                 .copied()
-                .unwrap_or(Rect::new(MARGIN_X, STRIP_TOP, CH_W, STRIP_H)),
+                .unwrap_or_else(|| draw::studio_pill_rect(cx.measure)),
+            Face::Studio => self.studio_focus_rect(H::livetv(cx), cx.measure),
             Face::Guide => self.focus_cell_rect(H::livetv(cx)),
             Face::Setup => setup_row_rect(self.setup_sel),
             Face::Loading => Rect::new(MARGIN_X, TOP, SCR_W - 2.0 * MARGIN_X, ROW_H),
@@ -842,12 +969,13 @@ impl LogicalState for LiveTvScreen {
             .str(self.address.text()).str(&self.typed).bool(self.searched)
             .str(&self.remembered).bool(self.seated);
         c.str(&self.filter.canon()).bool(self.on_strip).u64(self.strip_sel as u64);
+        c.str(&self.studio.canon());
     }
     fn probe(&self, out: &mut String) {
         out.push_str(&format!(
-            "livetv row={} top={} setup_sel={} force_setup={} editing={} filter={} on_strip={} strip_sel={}",
+            "livetv row={} top={} setup_sel={} force_setup={} editing={} filter={} on_strip={} strip_sel={} studio={}",
             self.cursor.row, self.cursor.top, self.setup_sel, self.force_setup, self.editing,
-            self.filter.canon(), self.on_strip, self.strip_sel
+            self.filter.canon(), self.on_strip, self.strip_sel, self.studio.canon()
         ));
     }
 }
@@ -881,6 +1009,7 @@ impl<H: LiveTvLike> Screen<H> for LiveTvScreen {
                     .draw_measured(&plx_ui::Env::inert(), p, f.measure);
             }
             Face::Guide => self.draw_guide(p, view, focused, f.measure),
+            Face::Studio => self.draw_studio(p, view, focused, f.cx.tick.ms, f.measure),
         }
     }
     fn render(&self) -> RenderStrategy {

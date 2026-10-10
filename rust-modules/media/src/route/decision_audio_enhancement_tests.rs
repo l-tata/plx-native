@@ -3987,6 +3987,7 @@ fn admit_side_reader(ps: &mut PlaybackSession) {
         preview: false,
         seed: None,
         playlist: String::new(),
+        channel: false,
     });
 }
 

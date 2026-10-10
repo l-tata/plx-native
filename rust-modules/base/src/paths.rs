@@ -719,6 +719,22 @@ pub fn resume_place_candidates() -> Vec<PathBuf> {
     v
 }
 
+/// Candidate locations of the virtual channels' **not interested** list (`plx_data::vchannel`):
+/// suggestion ids each profile dismissed. Same resolution as [`resume_place_candidates`].
+pub fn vchannel_dismissed_candidates() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if ENV_STEERABLE {
+        v.push(in_runtime_dir("vchannel-dismissed.json"));
+    }
+    let id = app_id();
+    v.extend([
+        PathBuf::from(format!("/media/developer/{id}-vchannel-dismissed.json")),
+        PathBuf::from(format!("/media/internal/.{id}-vchannel-dismissed.json")),
+        in_app_dir("vchannel-dismissed.json"),
+    ]);
+    v
+}
+
 /// Candidate locations of the retired **last place** bookmark (`coldstart`).
 ///
 /// Builds before 2026-09-01 wrote into these persistent locations. The current build only removes

@@ -26,10 +26,21 @@ fn with_genres(mut b: SourceBuild, slot: u16, rks: &[&str]) -> SourceBuild {
 fn the_app_shelves_follow_the_deck_in_a_fixed_order() {
     let srcs = [src(0, "", HubState::Ready, Some(with_genres(
         built(0, &[(9, "cw")], vec![shelf(0, "Recent", "home.movies.recent", &["r1"])]), 0, &["g1"])))];
-    let extras = HomeExtras { on_now: vec![channel("12")], watchlist: vec![row(0, "w1")] };
+    let extras = HomeExtras { on_now: vec![channel("12")], watchlist: vec![row(0, "w1")], ..Default::default() };
     let (_, hubs, _) = merge_with_scope(&srcs, &BrowseScope::standalone(), &extras);
     assert_eq!(ids(&hubs), ["home.continue", WATCHLIST_HUB, ON_NOW_HUB, GENRES_HUB, "home.movies.recent"]);
     assert!(hubs.iter().all(|h| h.source.is_empty()), "an app shelf credits nobody");
+}
+
+#[test]
+fn suggested_channels_follow_on_now_and_are_never_dropped_as_unpinned() {
+    let srcs = [src(0, "", HubState::Ready, Some(built(0, &[], vec![shelf(0, "Recent", "home.movies.recent", &["r1"])])))];
+    let idea = Arc::new(PmsMovie { sid: ServerId::UNSET, kind: KIND_CHANNEL_IDEA, rk: "genre:comedy".into(), title: "Comedy".into(), ..Default::default() });
+    let extras = HomeExtras { on_now: vec![channel("12")], channels: vec![idea], ..Default::default() };
+    let (cat, hubs, _) = merge_with_scope(&srcs, &BrowseScope::standalone(), &extras);
+    assert_eq!(ids(&hubs), [ON_NOW_HUB, CHANNELS_HUB, "home.movies.recent"]);
+    assert_eq!(keys(&cat, &hubs[1]), ["genre:comedy"]);
+    assert!(!item_has_menu_kind(KIND_CHANNEL_IDEA), "a suggestion has no item menu: OK opens the studio");
 }
 
 #[test]
@@ -44,7 +55,7 @@ fn the_genre_shelf_shows_only_what_no_other_shelf_does() {
     let srcs = [src(0, "", HubState::Ready, Some(with_genres(
         built(0, &[(9, "cw")], vec![shelf(0, "Recent", "home.movies.recent", &["r1"])]),
         0, &["cw", "r1", "w1", "fresh"])))];
-    let extras = HomeExtras { on_now: Vec::new(), watchlist: vec![row(0, "w1")] };
+    let extras = HomeExtras { on_now: Vec::new(), watchlist: vec![row(0, "w1")], ..Default::default() };
     let (items, hubs, _) = merge_with_scope(&srcs, &BrowseScope::standalone(), &extras);
     let genres = hubs.iter().find(|h| h.hub_id == GENRES_HUB).expect("the genre shelf");
     assert_eq!(keys(&items, genres), ["fresh"], "the deck, the watchlist and the server shelves already show the rest");
@@ -65,7 +76,7 @@ fn an_unpinned_librarys_titles_stay_off_the_app_shelves_but_channels_do_not() {
     let srcs: [Src; 0] = [];
     let mut w = (*row(0, "w1")).clone();
     w.sec = 3;
-    let extras = HomeExtras { on_now: vec![channel("5")], watchlist: vec![Arc::new(w)] };
+    let extras = HomeExtras { on_now: vec![channel("5")], watchlist: vec![Arc::new(w)], ..Default::default() };
     let scope = BrowseScope { sections_gen: 0, pins: vec![(sid(0), 3, false)] };
     let (_, hubs, _) = merge_with_scope(&srcs, &scope, &extras);
     assert_eq!(ids(&hubs), [ON_NOW_HUB], "a channel belongs to no library");
@@ -75,7 +86,7 @@ fn an_unpinned_librarys_titles_stay_off_the_app_shelves_but_channels_do_not() {
 fn an_app_shelf_keeps_one_identity_whichever_server_leads_it() {
     let srcs: [Src; 0] = [];
     for lead in [0, 1] {
-        let extras = HomeExtras { on_now: Vec::new(), watchlist: vec![row(lead, "w"), row(1 - lead, "v")] };
+        let extras = HomeExtras { on_now: Vec::new(), watchlist: vec![row(lead, "w"), row(1 - lead, "v")], ..Default::default() };
         let (items, hubs, _) = merge_with_scope(&srcs, &BrowseScope::standalone(), &extras);
         assert_eq!(
             stable_hub_identity(&hubs[0], &items),
@@ -87,7 +98,7 @@ fn an_app_shelf_keeps_one_identity_whichever_server_leads_it() {
 #[test]
 fn the_app_shelves_are_never_counted_as_left_off_by_the_card_bound() {
     let srcs = [src(0, "", HubState::Ready, Some(built(0, &[(1, "cw")], vec![shelf(0, "Recent", "home.movies.recent", &["r1"])])))];
-    let extras = HomeExtras { on_now: vec![channel("1"), channel("2")], watchlist: vec![row(0, "w1")] };
+    let extras = HomeExtras { on_now: vec![channel("1"), channel("2")], watchlist: vec![row(0, "w1")], ..Default::default() };
     let build = merge_with_scope(&srcs, &BrowseScope::standalone(), &extras);
     assert_eq!(bound_overflow(&srcs, &BrowseScope::standalone(), &build), (0, 0));
 }
@@ -187,7 +198,7 @@ fn a_servers_video_playlists_become_playlist_cards() {
     assert_eq!(rows.len(), 1, "an empty playlist and a non-playlist row are left off");
     assert_eq!((rows[0].kind, rows[0].rk.as_str(), rows[0].thumb.as_str(), rows[0].child_count),
         (KIND_PLAYLIST, "77", "/playlists/77/composite/1", 4));
-    assert!(!item_has_menu_kind(KIND_PLAYLIST));
+    assert!(item_has_menu_kind(KIND_PLAYLIST), "a playlist's hold offers Make a Channel");
 }
 
 #[test]

@@ -21,7 +21,7 @@
 
 use std::os::raw::c_int;
 
-use plx_data::pms::{PmsMovie, KIND_CHANNEL, KIND_COLLECTION, KIND_PLAYLIST};
+use plx_data::pms::{PmsMovie, KIND_CHANNEL, KIND_CHANNEL_IDEA, KIND_COLLECTION, KIND_PLAYLIST};
 use plx_ui::tile::{Resume, TileFacts, TileKind};
 
 /// What `ui` reads of `m`. The result borrows from the row for `'a`, and carries the row's address
@@ -62,7 +62,7 @@ pub fn is_composite_thumb(thumb: &str) -> bool {
 }
 
 /// The row's numeric kind (`0` movie, `1` show, `2` season, `3` episode, `4` collection, `5` live
-/// channel, `6` playlist), named.
+/// channel, `6` playlist, `7` suggested channel), named.
 /// A value outside that table is [`TileKind::Other`], which the library reads as none of the three
 /// it draws differently.
 fn kind_of(kind: c_int) -> TileKind {
@@ -75,6 +75,7 @@ fn kind_of(kind: c_int) -> TileKind {
         // (its count as the caption, its name on the neutral tile when it has no art).
         KIND_COLLECTION | KIND_PLAYLIST => TileKind::Collection,
         KIND_CHANNEL => TileKind::Channel,
+        KIND_CHANNEL_IDEA => TileKind::Suggestion,
         _ => TileKind::Other,
     }
 }
@@ -105,6 +106,7 @@ mod tests {
         assert_eq!(kind(KIND_COLLECTION), TileKind::Collection);
         assert_eq!(kind(KIND_CHANNEL), TileKind::Channel);
         assert_eq!(kind(KIND_PLAYLIST), TileKind::Collection);
+        assert_eq!(kind(KIND_CHANNEL_IDEA), TileKind::Suggestion);
         assert_eq!(kind(9), TileKind::Other);
     }
 

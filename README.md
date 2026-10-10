@@ -158,8 +158,9 @@ A re-encode still burns the selected subtitle on the server; over a remux the ap
 I built this for how *I* watch, so it's narrower than Plex's:
 
 - **Movies and TV shows.** No music, no photos, no DVR. Live TV comes from your own
-  [Tunarr](https://github.com/chrisbenincasa/tunarr) server (Settings > Live TV), not from Plex's
-  Live TV or free channels — see `docs/live-tv-plan.md`.
+  [Tunarr](https://github.com/chrisbenincasa/tunarr) server (Settings > Live TV) and from channels
+  the app makes out of your own library, not from Plex's Live TV or free channels — see
+  `docs/live-tv-plan.md`.
 - **No typing in Plex server addresses.** Servers come from your Plex account; set them up on a phone or
   PC and choose from what's there. (A Tunarr server is found on the network, or typed once.) Servers reached through Plex's relay, or that require an
   encrypted connection, are supported but haven't been watched end to end.
