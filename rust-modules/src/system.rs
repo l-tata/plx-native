@@ -6,32 +6,17 @@
 //! modular-split crash. wl_surface opcode 4 = set_opaque_region.
 use std::os::raw::{c_int, c_uint, c_void};
 
-const SDL_GL_ALPHA_SIZE: c_int = 3; // SDL_GLattr: RED=0,GREEN=1,BLUE=2,ALPHA=3
-/// `SDL_GL_DEPTH_SIZE` / `SDL_GL_STENCIL_SIZE` — same enum, 6 and 7. `app.rs` asks for zero of
-/// both; these read back what the driver actually granted, which is the only thing that settles it.
-const SDL_GL_DEPTH_SIZE: c_int = 6;
-const SDL_GL_STENCIL_SIZE: c_int = 7;
-const GL_ALPHA_BITS: c_uint = 0x0D55;
-const GL_RED_BITS: c_uint = 0x0D52;
-const GL_DEPTH_BITS: c_uint = 0x0D56;
-const GL_STENCIL_BITS: c_uint = 0x0D57;
 // SDL_SysWMinfo layout (32-bit): version u8[3]@0, subsystem int@4, info union@8
 
 extern "C" {
-    // the wayland grab is `cfg(not(hostsim))` — desktop SDL has no webOS surface to reach for
-    #[cfg_attr(feature = "hostsim", allow(dead_code))]
     fn SDL_GetWindowWMInfo(window: *mut c_void, info: *mut c_void) -> c_int;
     /// Fills `SDL_version` — three `Uint8`, major/minor/patch.
     fn SDL_GetVersion(ver: *mut u8);
-    fn SDL_GL_GetAttribute(attr: c_int, value: *mut c_int) -> c_int;
-    fn glGetIntegerv(pname: c_uint, params: *mut c_int);
 }
 
-// The three symbols that exist only on a television: wayland's proxy marshaller and glib's main
-// context. The desktop simulator links neither — SDL owns its own event loop there, and there is
-// no luna bus to pump — so they are declared apart rather than in the block above, which would
-// otherwise fail the host link.
-#[cfg(not(feature = "hostsim"))]
+// Wayland's proxy marshaller and glib's main context: the three symbols that exist only on a
+// television. This module is the webOS port's and is not compiled into the simulator, whose own
+// port (`desktop`) has no wayland surface and no luna bus.
 extern "C" {
     fn wl_proxy_marshal(proxy: *mut c_void, opcode: c_uint, ...);
     fn g_main_context_pending(ctx: *mut c_void) -> c_int;
@@ -51,15 +36,12 @@ pub(crate) fn clear_opaque_region() {
         // commit is left to SDL_GL_SwapWindow (a bare commit here presents a
         // null-buffer surface and disrupts the slaved video plane).
         //
-        // Nothing to do on the simulator: there is no video plane underneath to show through, so
-        // a non-opaque surface would buy a desktop compositor nothing but per-frame blending.
-        //
-        // …and nothing to LINK against under `cargo test`. Since phase 9 this is reached through
+        // Nothing to LINK against under `cargo test`. Since phase 9 this is reached through
         // `Rig::clear_opaque_region` (`app/bridge.rs`), which the host suite exercises, where
         // before it was reachable only from `plex_run` and the dead-strip hid the missing
         // `libwayland-client`. The guard below is `G_WL_SURFACE`, which is null in a test, so
         // nothing is skipped that would have run.
-        #[cfg(all(not(feature = "hostsim"), not(test)))]
+        #[cfg(not(test))]
         wl_proxy_marshal(surface, 4, std::ptr::null_mut::<c_void>());
     }
 }
@@ -75,10 +57,7 @@ pub(crate) fn sys_release_wayland() {
         let had_surface = !G_WL_SURFACE.is_null();
         G_WL_SURFACE = std::ptr::null_mut();
         G_WL_DISPLAY = std::ptr::null_mut();
-        #[cfg(not(feature = "hostsim"))]
-        {
-            G_OPAQUE_SENT = -1;
-        }
+        G_OPAQUE_SENT = -1;
         if had_surface {
             log("wm: released borrowed Wayland handles");
         }
@@ -86,11 +65,7 @@ pub(crate) fn sys_release_wayland() {
 }
 
 /// Service the glib main context that luna-service2 replies arrive on.
-///
-/// A no-op on the simulator: glib is not linked and there is no luna bus to pump, so the loop
-/// simply has nothing to service. Every caller stays unchanged.
 pub(crate) fn ls2_pump() {
-    #[cfg(not(feature = "hostsim"))]
     unsafe {
         let mut guard = 8;
         while guard > 0 && g_main_context_pending(std::ptr::null_mut()) != 0 {
@@ -125,39 +100,10 @@ pub(crate) fn sys_grab_wayland(winp: *mut c_void) {
         // later SDL versions only APPEND to that struct, which is also why the buffer is
         // over-allocated to 512 bytes (the TV's fork writes more than the headers declare).
         SDL_GetVersion(wmbuf.as_mut_ptr());
-        let mut a: c_int = -1;
-        let mut d: c_int = -1;
-        let mut s: c_int = -1;
-        SDL_GL_GetAttribute(SDL_GL_ALPHA_SIZE, &mut a);
-        SDL_GL_GetAttribute(SDL_GL_DEPTH_SIZE, &mut d);
-        SDL_GL_GetAttribute(SDL_GL_STENCIL_SIZE, &mut s);
-        let mut abits: c_int = -1;
-        let mut rbits: c_int = -1;
-        let mut dbits: c_int = -1;
-        let mut sbits: c_int = -1;
-        glGetIntegerv(GL_ALPHA_BITS, &mut abits);
-        glGetIntegerv(GL_RED_BITS, &mut rbits);
-        // Deprecated in a desktop CORE profile (the simulator), where they leave the value alone
-        // and raise `GL_INVALID_ENUM` — harmless and once, at boot, and the SDL attributes above
-        // answer the same question portably. On the television's ES2 context both are legal.
-        glGetIntegerv(GL_DEPTH_BITS, &mut dbits);
-        glGetIntegerv(GL_STENCIL_BITS, &mut sbits);
-        // `depth=`/`stencil=` are here to be READ: `app.rs` asks for zero of each because nothing
-        // in this renderer uses them, and on a tiler a granted depth buffer is a per-frame
-        // write-back of 1920x1080x2 bytes nobody consumes. A non-zero here means the driver
-        // refused and the saving is not real.
-        log(&format!(
-            "FB bits: alpha={abits} red={rbits} depth={dbits} stencil={sbits} \
-             (config alpha={a} depth={d} stencil={s})"
-        ));
-        // The Wayland query is webOS-only. Desktop SDL reports a different backend with a
-        // different union layout, and has no hardware video plane needing this request.
+        let a = plx_gfx::gfx::log_framebuffer_bits();
         // update_wayland_info reads unaligned because the oversized byte buffer has no pointer
         // alignment guarantee, and rejects any non-Wayland subsystem before reading the union.
-        #[cfg(not(feature = "hostsim"))]
         update_wayland_info(SDL_GetWindowWMInfo(winp, wmbuf.as_mut_ptr() as *mut c_void), &wmbuf);
-        #[cfg(feature = "hostsim")]
-        let _ = winp;
         let subsystem = i32::from_ne_bytes([wmbuf[4], wmbuf[5], wmbuf[6], wmbuf[7]]);
         let (surf, disp) = (G_WL_SURFACE, G_WL_DISPLAY);
         // The version bytes are still in wmbuf[0..3] — SDL_GetWindowWMInfo validates them and
@@ -169,7 +115,7 @@ pub(crate) fn sys_grab_wayland(winp: *mut c_void) {
         // Loud, because the consequence is a black screen with working audio and nothing else in
         // the log would say why. SDL_SYSWM_WAYLAND is 6 in SDL2's enum; anything else here means
         // we did not get a surface and the video plane will stay hidden under an opaque UI.
-        if surf.is_null() && !cfg!(feature = "hostsim") {
+        if surf.is_null() {
             log(
                 "wm: NO wl_surface — the UI plane cannot be made transparent, so video will \
                  decode invisibly beneath it. Check the SDL_SysWMinfo version handshake.",
@@ -215,32 +161,22 @@ use plx_base::eventlog::log;
 /// `wl_registry.bind` / `wl_compositor.create_region` / `wl_region.add` — opcodes from
 /// `wayland-client-protocol.h` (`WL_REGISTRY_BIND 0`, `WL_COMPOSITOR_CREATE_REGION 1`,
 /// `WL_REGION_ADD 1`), beside `WL_SURFACE_SET_OPAQUE_REGION 4` which this file already used.
-#[cfg(not(feature = "hostsim"))]
 const WL_REGISTRY_BIND: c_uint = 0;
-#[cfg(not(feature = "hostsim"))]
 const WL_DISPLAY_GET_REGISTRY: c_uint = 1;
-#[cfg(not(feature = "hostsim"))]
 const WL_COMPOSITOR_CREATE_REGION: c_uint = 1;
-#[cfg(not(feature = "hostsim"))]
 const WL_REGION_ADD: c_uint = 1;
-#[cfg(not(feature = "hostsim"))]
 const WL_SURFACE_SET_OPAQUE_REGION: c_uint = 4;
 
 /// The full-surface `wl_region`, created once at boot. Never per frame — a region is a server
 /// object and allocating one every present would be protocol traffic on the frame path.
-#[cfg(not(feature = "hostsim"))]
 static mut G_WL_REGION: *mut c_void = std::ptr::null_mut();
 /// What we last told the compositor: `1` = the full region, `0` = NULL, `-1` = nothing yet.
-#[cfg(not(feature = "hostsim"))]
 static mut G_OPAQUE_SENT: i8 = -1;
 /// Set only by [`opaque_region_init`], and only when the trigger armed AND a region was built.
-#[cfg(not(feature = "hostsim"))]
 static mut G_OPAQUE_ENABLED: bool = false;
 /// Scratch for the registry callback: the `wl_compositor` proxy it binds.
-#[cfg(not(feature = "hostsim"))]
 static mut G_WL_COMPOSITOR: *mut c_void = std::ptr::null_mut();
 
-#[cfg(not(feature = "hostsim"))]
 #[repr(C)]
 struct RegistryListener {
     global: unsafe extern "C" fn(*mut c_void, *mut c_void, c_uint, *const std::ffi::c_char, c_uint),
@@ -249,17 +185,14 @@ struct RegistryListener {
 
 /// A libwayland symbol from the process's own scope. `libwayland-client` is linked normally, so it
 /// is already mapped; this only avoids naming these particular symbols in `DT_NEEDED`.
-#[cfg(not(feature = "hostsim"))]
 fn wl_sym(name: &str) -> Option<*mut c_void> {
     plx_base::dynlib::Handle::self_handle()
         .sym(name)
         .filter(|p| !p.is_null())
 }
 
-#[cfg(not(feature = "hostsim"))]
 unsafe extern "C" fn on_global_remove(_data: *mut c_void, _reg: *mut c_void, _name: c_uint) {}
 
-#[cfg(not(feature = "hostsim"))]
 unsafe extern "C" fn on_global(
     _data: *mut c_void,
     registry: *mut c_void,
@@ -310,7 +243,6 @@ unsafe extern "C" fn on_global(
 
 /// Build the full-surface opaque region, once, at boot. No-op unless `/tmp/plxnative-opaque` is
 /// armed; returns without touching the surface's current (NULL) region either way.
-#[cfg(not(feature = "hostsim"))]
 pub(crate) fn opaque_region_init() {
     if !plx_base::devtrig::flag("opaque") {
         return;
@@ -406,15 +338,12 @@ pub(crate) fn opaque_region_init() {
     ));
 }
 
-#[cfg(feature = "hostsim")]
-pub(crate) fn opaque_region_init() {}
 
 /// Assert the opaque region appropriate to this route, if the experiment is armed.
 ///
 /// A no-op — one read of a `static` and a return — whenever `/tmp/plxnative-opaque` is absent,
 /// which is what keeps the default path byte-identical. Only sends a request when the answer
 /// CHANGES, because the opaque region is sticky server-side.
-#[cfg(not(feature = "hostsim"))]
 pub(crate) fn opaque_route(player: bool) {
     unsafe {
         if !G_OPAQUE_ENABLED {
@@ -450,11 +379,6 @@ pub(crate) fn opaque_route(player: bool) {
     }
 }
 
-/// Nothing to declare opaque on a desktop: there is no video plane underneath and no LG compositor
-/// to hint. The simulator keeps the same call site rather than growing a `cfg` at it.
-#[cfg(feature = "hostsim")]
-pub(crate) fn opaque_route(_player: bool) {}
-
 // ---- The COMPOSITOR FRAME-CALLBACK PROBE (`/tmp/plxnative-framecb`) -----------------------------
 //
 // A present's wait for a free back buffer is paid inside the frame's first framebuffer-0 command
@@ -476,9 +400,9 @@ pub(crate) fn opaque_route(_player: bool) {}
 // from the process's own scope, ONCE (`frame_syms`, on the first armed present, before the swap
 // stretch is marked), so the probe adds no symbol to the link and its lookups are not charged to
 // the `s` stretch. Unarmed it is one latched bool per presented frame. The whole probe is
-// compiled only with `devtriggers` (and not in the simulator); the shipping build has the empty
+// compiled only with `devtriggers`; the shipping build has the empty
 // stubs at the end of this section.
-#[cfg(all(not(feature = "hostsim"), feature = "devtriggers"))]
+#[cfg(feature = "devtriggers")]
 plx_base::devtrig::latched_flag!(
     /// `/tmp/plxnative-framecb` — see the section comment above.
     pub(crate) fn frame_probe_armed = "framecb";
@@ -486,12 +410,12 @@ plx_base::devtrig::latched_flag!(
 
 /// `(frame seq, compositor stamp ms, our CLOCK_MONOTONIC µs at dispatch)` for every `done` that
 /// arrived since the last [`frame_probe_fields`].
-#[cfg(all(not(feature = "hostsim"), feature = "devtriggers"))]
+#[cfg(feature = "devtriggers")]
 static FRAME_DONE: std::sync::Mutex<Vec<(u32, u32, u64)>> = std::sync::Mutex::new(Vec::new());
-#[cfg(all(not(feature = "hostsim"), feature = "devtriggers"))]
+#[cfg(feature = "devtriggers")]
 static FRAME_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-#[cfg(all(not(feature = "hostsim"), feature = "devtriggers"))]
+#[cfg(feature = "devtriggers")]
 fn mono_us() -> u64 {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     // SAFETY: a plain clock read into a local.
@@ -500,7 +424,7 @@ fn mono_us() -> u64 {
 }
 
 /// What the frame thread has cost so far, read at each boundary of a frame's present.
-#[cfg(all(not(feature = "hostsim"), feature = "devtriggers"))]
+#[cfg(feature = "devtriggers")]
 #[derive(Clone, Copy, Default)]
 struct ThreadCost {
     /// `CLOCK_MONOTONIC`, µs.
@@ -516,7 +440,7 @@ struct ThreadCost {
     preempted: u64,
 }
 
-#[cfg(all(not(feature = "hostsim"), feature = "devtriggers"))]
+#[cfg(feature = "devtriggers")]
 impl ThreadCost {
     fn now() -> Self {
         let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
@@ -570,10 +494,10 @@ impl ThreadCost {
 
 /// This frame's boundaries: `[before the first framebuffer command, back buffer acquired, before
 /// the swap]`. Frame-thread only; a `Mutex` because it is a `static`.
-#[cfg(all(not(feature = "hostsim"), feature = "devtriggers"))]
+#[cfg(feature = "devtriggers")]
 static FRAME_COST: std::sync::Mutex<[Option<ThreadCost>; 3]> = std::sync::Mutex::new([None; 3]);
 
-#[cfg(all(not(feature = "hostsim"), feature = "devtriggers"))]
+#[cfg(feature = "devtriggers")]
 fn frame_probe_mark(slot: usize) {
     if !frame_probe_armed() {
         return;
@@ -584,19 +508,19 @@ fn frame_probe_mark(slot: usize) {
 }
 
 /// The frame's first framebuffer command is next: the wait for a back buffer starts here.
-#[cfg(all(not(feature = "hostsim"), feature = "devtriggers"))]
+#[cfg(feature = "devtriggers")]
 pub(crate) fn frame_probe_waiting() {
     frame_probe_mark(0);
 }
 
 /// The frame's first framebuffer command has returned: the back buffer is acquired.
-#[cfg(all(not(feature = "hostsim"), feature = "devtriggers"))]
+#[cfg(feature = "devtriggers")]
 pub(crate) fn frame_probe_acquired() {
     frame_probe_mark(1);
 }
 
 /// The libwayland entry points the probe calls, as addresses (a raw pointer is not `Sync`).
-#[cfg(all(not(feature = "hostsim"), feature = "devtriggers"))]
+#[cfg(feature = "devtriggers")]
 struct FrameSyms {
     ctor: usize,
     add_listener: usize,
@@ -607,7 +531,7 @@ struct FrameSyms {
 
 /// Resolved once. `None` when any of the three request symbols is missing, which makes the probe a
 /// silent no-op.
-#[cfg(all(not(feature = "hostsim"), feature = "devtriggers"))]
+#[cfg(feature = "devtriggers")]
 fn frame_syms() -> Option<&'static FrameSyms> {
     static SYMS: std::sync::OnceLock<Option<FrameSyms>> = std::sync::OnceLock::new();
     SYMS.get_or_init(|| {
@@ -621,7 +545,7 @@ fn frame_syms() -> Option<&'static FrameSyms> {
     .as_ref()
 }
 
-#[cfg(all(not(feature = "hostsim"), feature = "devtriggers"))]
+#[cfg(feature = "devtriggers")]
 unsafe extern "C" fn on_frame_done(data: *mut c_void, callback: *mut c_void, time: c_uint) {
     if let Ok(mut done) = FRAME_DONE.lock() {
         done.push((data as usize as u32, time, mono_us()));
@@ -634,7 +558,7 @@ unsafe extern "C" fn on_frame_done(data: *mut c_void, callback: *mut c_void, tim
 }
 
 /// Ask for this frame's callback. Call on a PRESENTING frame, before the swap that commits it.
-#[cfg(all(not(feature = "hostsim"), feature = "devtriggers"))]
+#[cfg(feature = "devtriggers")]
 pub(crate) fn frame_probe_request() {
     if !frame_probe_armed() {
         return;
@@ -674,7 +598,7 @@ pub(crate) fn frame_probe_request() {
 /// frame made), `mono=` (our monotonic clock, ms, now), the three stretches described in the
 /// section comment, then `cb=<seq>:<compositor ms>:<our ms at dispatch>` for each callback that
 /// arrived since the previous line. `""` unarmed.
-#[cfg(all(not(feature = "hostsim"), feature = "devtriggers"))]
+#[cfg(feature = "devtriggers")]
 pub(crate) fn frame_probe_fields() -> String {
     if !frame_probe_armed() {
         return String::new();
@@ -705,20 +629,19 @@ pub(crate) fn frame_probe_fields() -> String {
     out
 }
 
-#[cfg(any(feature = "hostsim", not(feature = "devtriggers")))]
+#[cfg(not(feature = "devtriggers"))]
 pub(crate) fn frame_probe_request() {}
-#[cfg(any(feature = "hostsim", not(feature = "devtriggers")))]
+#[cfg(not(feature = "devtriggers"))]
 pub(crate) fn frame_probe_waiting() {}
-#[cfg(any(feature = "hostsim", not(feature = "devtriggers")))]
+#[cfg(not(feature = "devtriggers"))]
 pub(crate) fn frame_probe_acquired() {}
-#[cfg(any(feature = "hostsim", not(feature = "devtriggers")))]
+#[cfg(not(feature = "devtriggers"))]
 pub(crate) fn frame_probe_fields() -> String {
     String::new()
 }
 
 // Publish SDL's borrowed handles. Kept separate from the native query so failed queries can
 // be exercised without loading the television's SDL or marshalling a fake proxy.
-#[cfg(any(not(feature = "hostsim"), test))]
 unsafe fn update_wayland_info(ok: c_int, info: &[u8; 512]) {
     sys_release_wayland();
     let subsystem = i32::from_ne_bytes(info[4..8].try_into().unwrap());
@@ -780,12 +703,11 @@ mod wayland_tests {
             pointers.add(1).write_unaligned(surface_ptr);
             update_wayland_info(1, &info);
             let acquired = (G_WL_DISPLAY, G_WL_SURFACE);
-            #[cfg(not(feature = "hostsim"))]
-            { G_OPAQUE_SENT = 1; }
+            G_OPAQUE_SENT = 1;
             sys_release_wayland();
             sys_release_wayland(); // WILL + DID background is idempotent.
-            #[cfg(not(feature = "hostsim"))]
-            { let sent = G_OPAQUE_SENT; assert_eq!(sent, -1); }
+            let sent = G_OPAQUE_SENT;
+            assert_eq!(sent, -1);
             let released = (G_WL_DISPLAY, G_WL_SURFACE);
             clear_opaque_region(); // No native marshal can run after revocation.
             let mut replacement = 0u8;

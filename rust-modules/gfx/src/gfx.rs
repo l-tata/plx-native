@@ -939,6 +939,48 @@ fn bind_core_profile_vao() {
     }
 }
 
+/// Log what framebuffer the driver actually granted, once per surface grab, and hand back the
+/// `SDL_GL_ALPHA_SIZE` the context was configured with (the port's `wm` line reports it beside the
+/// window system's answer). The query is SDL and GL alone, so every port's `grab_surface` shares it.
+///
+/// `depth=`/`stencil=` are here to be READ: `app::boot` asks for zero of each because nothing in
+/// this renderer uses them, and on a tiler a granted depth buffer is a per-frame write-back of
+/// 1920x1080x2 bytes nobody consumes. A non-zero here means the driver refused and the saving is
+/// not real.
+pub fn log_framebuffer_bits() -> c_int {
+    // SDL_GLattr: ALPHA=3, DEPTH=6, STENCIL=7.
+    const SDL_GL_ALPHA_SIZE: c_int = 3;
+    const SDL_GL_DEPTH_SIZE: c_int = 6;
+    const SDL_GL_STENCIL_SIZE: c_int = 7;
+    const GL_RED_BITS: c_uint = 0x0D52;
+    const GL_ALPHA_BITS: c_uint = 0x0D55;
+    const GL_DEPTH_BITS: c_uint = 0x0D56;
+    const GL_STENCIL_BITS: c_uint = 0x0D57;
+    extern "C" {
+        fn SDL_GL_GetAttribute(attr: c_int, value: *mut c_int) -> c_int;
+        fn glGetIntegerv(pname: c_uint, params: *mut c_int);
+    }
+    let (mut a, mut d, mut s) = (-1, -1, -1);
+    let (mut abits, mut rbits, mut dbits, mut sbits) = (-1, -1, -1, -1);
+    unsafe {
+        SDL_GL_GetAttribute(SDL_GL_ALPHA_SIZE, &mut a);
+        SDL_GL_GetAttribute(SDL_GL_DEPTH_SIZE, &mut d);
+        SDL_GL_GetAttribute(SDL_GL_STENCIL_SIZE, &mut s);
+        glGetIntegerv(GL_ALPHA_BITS, &mut abits);
+        glGetIntegerv(GL_RED_BITS, &mut rbits);
+        // Deprecated in a desktop CORE profile, where they leave the value alone and raise
+        // `GL_INVALID_ENUM` — harmless and once, at boot, and the SDL attributes above answer the
+        // same question portably. On the television's ES2 context both are legal.
+        glGetIntegerv(GL_DEPTH_BITS, &mut dbits);
+        glGetIntegerv(GL_STENCIL_BITS, &mut sbits);
+    }
+    log(&format!(
+        "FB bits: alpha={abits} red={rbits} depth={dbits} stencil={sbits} \
+         (config alpha={a} depth={d} stencil={s})"
+    ));
+    a
+}
+
 pub fn init_gl() {
     unsafe {
         WARM_TARGET = None;

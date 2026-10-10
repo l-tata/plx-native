@@ -1,5 +1,6 @@
-//! The television's own Dolby Vision capability: the type, and the cache the port's boot probe
-//! publishes into (`webos::caps`).
+//! The television's own Dolby Vision capability: the type, the cache the port's boot probe
+//! publishes into (`webos::caps` on a television, `desktop` on the simulator), and the developer
+//! override both ports honour.
 //!
 //! An early render-thread read never initializes the cache: the port's worker is the only
 //! publisher, and a failed or late answer cannot be mistaken for an affirmative capability.
@@ -116,9 +117,53 @@ pub fn publish(probe: DvProbe) {
     RESULT.publish(probe);
 }
 
+plx_base::devtrig::latched_flag!(
+    /// `/tmp/plxnative-dvcaps0` — force the boot's platform answer to unsupported.
+    fn forced_unsupported = "dvcaps0";
+);
+
+plx_base::devtrig::latched_flag!(
+    /// `/tmp/plxnative-dvcaps1` — force the boot's platform answer to supported.
+    fn forced_supported = "dvcaps1";
+);
+
+/// The developer override, which a port's boot probe consults before asking its platform:
+/// `Some((capability, conflict))` when a trigger is armed, `conflict` when both are (then
+/// `dvcaps0` wins).
+pub fn forced() -> Option<(DvCapability, bool)> {
+    override_capability(forced_unsupported(), forced_supported())
+}
+
+fn override_capability(zero: bool, one: bool) -> Option<(DvCapability, bool)> {
+    if zero {
+        Some((DvCapability::Unsupported, one))
+    } else if one {
+        Some((DvCapability::Supported, false))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DvCache, DvCapability, DvProbe, ProbeSource};
+    use super::{override_capability, DvCache, DvCapability, DvProbe, ProbeSource};
+
+    #[test]
+    fn dv_caps_override_precedence() {
+        assert_eq!(override_capability(false, false), None);
+        assert_eq!(
+            override_capability(true, false),
+            Some((DvCapability::Unsupported, false))
+        );
+        assert_eq!(
+            override_capability(false, true),
+            Some((DvCapability::Supported, false))
+        );
+        assert_eq!(
+            override_capability(true, true),
+            Some((DvCapability::Unsupported, true))
+        );
+    }
 
     #[test]
     fn early_caps_read_does_not_initialize_cache() {
