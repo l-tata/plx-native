@@ -60,5 +60,7 @@
   "livetv.studio.failed": "No se pudo guardar el canal en Plex.",
   "livetv.studio.loading": "Leyendo tu biblioteca…",
   "livetv.studio.empty": "Los canales aparecerán aquí cuando se haya leído tu biblioteca de Plex.",
-  "livetv.studio.number": "Canal {number}"
+  "livetv.studio.number": "Canal {number}",
+  "livetv.behind": "DIFERIDO",
+  "livetv.jump_to_live": "OK para volver al directo"
 }

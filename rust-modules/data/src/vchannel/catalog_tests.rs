@@ -98,6 +98,20 @@ fn an_episode_inherits_its_shows_facts() {
 }
 
 #[test]
+fn a_programme_carries_its_part_so_a_tune_plays_it_directly() {
+    let media = plx_plex::plex::Media {
+        video_codec: "h264".into(),
+        audio_codec: "aac".into(),
+        part: vec![plx_plex::plex::MediaPart { key: "/library/parts/7/file.mkv".into(), ..Default::default() }],
+        ..Default::default()
+    };
+    let m = Metadata { kind: "movie".into(), rating_key: "f1".into(), media: vec![media], ..Default::default() };
+    let p = programme_of(&m, 1, None);
+    assert_eq!((p.part.as_str(), p.vcodec.as_str(), p.acodec.as_str()), ("/library/parts/7/file.mkv", "h264", "aac"));
+    assert_eq!(programme_of(&Metadata::default(), 1, None).part, "", "no media, no part");
+}
+
+#[test]
 fn excluded_items_and_lengths_narrow_any_source() {
     let r = Rules { min_minutes: 90, exclude: vec!["heat".into()], ..Default::default() };
     let c = cat();

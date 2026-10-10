@@ -109,7 +109,15 @@ pub fn programme_of(m: &Metadata, sid: u16, show: Option<&Show>) -> Program {
         labels: tags(&m.label),
         added_at: m.added_at,
         last_viewed_at: m.last_viewed_at,
+        part: String::new(),
+        vcodec: String::new(),
+        acodec: String::new(),
     };
+    if let Some(media) = m.media.first() {
+        p.vcodec = media.video_codec.clone();
+        p.acodec = media.audio_codec.clone();
+        p.part = media.part.first().map(|part| part.key.clone()).unwrap_or_default();
+    }
     if let Some(s) = show {
         if p.genres.is_empty() {
             p.genres = s.genres.clone();

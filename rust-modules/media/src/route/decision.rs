@@ -48,6 +48,11 @@ struct PlaybackRequest {
     /// the playlist's (`Client::create_playlist_queue`), so the rest of it follows in order.
     /// Empty for every other play.
     playlist: String,
+    /// A programme on one of the app's own virtual channels (`plx_data::vchannel`): it plays
+    /// like any item but makes no PlayQueue, no timeline and no scrobble — watching a channel
+    /// leaves the profile's history alone — and the Live TV session it was tuned under survives
+    /// the landing, so the banner and the channel keys keep working.
+    channel: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -398,6 +403,10 @@ pub struct PlaybackSession {
     /// machine still owns the engine, this says what the session may write. See
     /// [`preview_request`].
     resolved_as_preview: bool,
+    /// This session was RESOLVED for a virtual channel's programme ([`request_play_channel`]):
+    /// like a preview it writes nothing to the account ([`quiet_request`]), unlike one it is an
+    /// ordinary playback on the player route.
+    resolved_as_channel: bool,
     /// **The Live TV channel this playback is**, when it is one (`crate::live`). A channel has no
     /// Plex item behind it — no `cur_rk`, no transcode session, no timeline reporter — so this is
     /// the one field that says what is on screen. [`install_live_stream`] sets it; every Plex plan
@@ -487,6 +496,7 @@ impl PlaybackSession {
         now_ms: 0,
         preview: false,
         resolved_as_preview: false,
+        resolved_as_channel: false,
         live: None,
     };
 }
@@ -563,6 +573,7 @@ impl PlaybackSession {
             media_index,
             preview: _,
             resolved_as_preview,
+            resolved_as_channel,
             live,
         } = self;
         PlaybackSession {
@@ -622,6 +633,7 @@ impl PlaybackSession {
             // A screen copy is not the live preview. The loop reads the real session.
             preview: false,
             resolved_as_preview: *resolved_as_preview,
+            resolved_as_channel: *resolved_as_channel,
             live: live.clone(),
         }
     }
@@ -5641,7 +5653,7 @@ pub fn scrobble_stop(
     final_report: Option<(String, i64, i64)>,
     report_th: Option<std::thread::JoinHandle<()>>,
 ) {
-    if preview_request(ps) {
+    if quiet_request(ps) {
         return;
     }
     let (logical_session, pq, pqi) = (sess(ps), pq_id(ps), pq_item_id(ps));
@@ -7540,6 +7552,7 @@ impl ResolveEnv {
             queue_seed: None,
             media_index: 0,
             playlist: String::new(),
+            channel: false,
             preview: false,
             audio_enhancements: crate::player::audio_enhancements(),
             pass: plx_plex::plex::serverinfo::subscription_of(sid),
@@ -7752,6 +7765,14 @@ pub fn preview_request(ps: &PlaybackSession) -> bool {
     ps.preview || ps.resolved_as_preview
 }
 
+/// **May this session write nothing to the account?** A preview ([`preview_request`]) or a
+/// virtual channel's programme ([`request_play_channel`]): the timeline lease and the stop
+/// scrobble both ask this, so neither a trailer nor an evening of channel-watching moves the
+/// profile's Continue Watching or its watched marks.
+pub fn quiet_request(ps: &PlaybackSession) -> bool {
+    preview_request(ps) || ps.resolved_as_channel
+}
+
 /// Attach the UI's resume point to the resolve currently in flight.
 ///
 /// `request_play_*` is issued immediately before `app::start_playback`, so the latter knows the
@@ -7811,6 +7832,7 @@ pub fn request_play(
             ctx: ctx.to_owned(),
             preview: false,
             playlist: String::new(),
+            channel: false,
             seed: None,
         },
         None,
@@ -7846,6 +7868,7 @@ pub fn request_play_seeded(
             preview: false,
             seed: Some(seed),
             playlist: String::new(),
+            channel: false,
         },
         None,
         None,
@@ -7879,6 +7902,7 @@ pub fn request_preview(
             preview: true,
             seed: None,
             playlist: String::new(),
+            channel: false,
         },
         None,
         None,
@@ -7987,6 +8011,7 @@ fn request_play_inner(
         env.src_kbps = 0;
     }
     env.playlist = request.playlist.clone();
+    env.channel = request.channel;
     env.set_preview(request.preview);
     if let Some(retry) = retry {
         apply_retry_enhancement(&mut env, retry);
@@ -8242,6 +8267,45 @@ pub fn request_play_movie(ps: &mut PlaybackSession, meta: &mut plx_data::stores:
     )
 }
 
+/// **Play a programme on a virtual channel** (`plx_data::vchannel`): the item as [`request_play`]
+/// plays it, but resolved QUIET — no PlayQueue, no timeline, no stop scrobble
+/// ([`quiet_request`]) — and keeping the Live TV session the tune installed
+/// ([`set_live_tuning`]), which the landing would otherwise clear. The caller arms the offset into
+/// the programme with [`arm_play_resume`], as for any resume.
+#[allow(clippy::too_many_arguments)]
+pub fn request_play_channel(
+    ps: &mut PlaybackSession,
+    meta: &mut plx_data::stores::metadata::MetadataStore,
+    sid: ServerId,
+    rk: &str,
+    part: &str,
+    vcodec: &str,
+    acodec: &str,
+    title: &str,
+    ctx: &str,
+) -> bool {
+    request_play_inner(
+        ps,
+        meta,
+        PlaybackRequest {
+            sid,
+            rk: rk.to_owned(),
+            part: part.to_owned(),
+            vcodec: vcodec.to_owned(),
+            acodec: acodec.to_owned(),
+            title: title.to_owned(),
+            ctx: ctx.to_owned(),
+            preview: false,
+            seed: None,
+            playlist: String::new(),
+            channel: true,
+        },
+        None,
+        None,
+        false,
+    )
+}
+
 /// **Play a playlist from its first item** (or the item `m`, which must be one of it): the item
 /// plays as [`request_play_movie`] plays it, but its PlayQueue is the PLAYLIST's
 /// (`playlistID`, `Client::create_playlist_queue`), so Up Next and the queue list walk the
@@ -8269,6 +8333,7 @@ pub fn request_play_playlist(
             ctx: ctx.to_owned(),
             preview: false,
             playlist: playlist.to_owned(),
+            channel: false,
             seed: None,
         },
         None,
@@ -8604,6 +8669,9 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
         };
         let now_ms = s.now_ms;
         let preview = request.as_ref().is_some_and(|r| r.preview);
+        // A virtual channel's programme keeps the Live TV session it was tuned under.
+        let channel = request.as_ref().is_some_and(|r| r.channel);
+        let live = if channel { s.live.take() } else { None };
         *s = PlaybackSession {
             direct_play_mode: plan.direct_play_mode,
             jail_load_blocked: false,
@@ -8679,7 +8747,8 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
             now_ms,
             preview,
             resolved_as_preview: preview,
-            live: None,
+            resolved_as_channel: channel,
+            live,
         };
     } };
     if let (plx_plex::plex::TranscodeDelivery::FixedHls { .. }, Some(rung)) = (
@@ -10632,8 +10701,9 @@ pub fn commit_subtitle_selection(
 /// remains in `PlayerControl`, so a later in-place ABR commit changes the wire session and this
 /// projection under one lock without touching main-thread-only `Session`.
 pub fn begin_timeline_reporting(ps: &PlaybackSession) -> Option<TimelineLease> {
-    // A trailer never writes watch state, whatever became of its preview flag.
-    if preview_request(ps) {
+    // A trailer never writes watch state, whatever became of its preview flag; nor does a
+    // virtual channel's programme.
+    if quiet_request(ps) {
         return None;
     }
     let projection = TimelineProjection {

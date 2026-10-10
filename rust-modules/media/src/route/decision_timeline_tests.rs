@@ -370,6 +370,7 @@ fn a_session_resolved_for_a_preview_never_reports_a_timeline() {
         preview: true,
         seed: None,
         playlist: String::new(),
+        channel: false,
     });
     apply_plan(
         &mut ps,
@@ -390,6 +391,66 @@ fn a_session_resolved_for_a_preview_never_reports_a_timeline() {
         begin_timeline_reporting(&ps).is_none(),
         "a session resolved for a preview must never report a timeline"
     );
+    reset_player_control_for_test(&ps);
+    reset_session(&mut ps);
+}
+
+/// Virtual channels: watching one leaves the profile's history alone (the owner's decision for
+/// 0.12.0). A programme resolved for a channel reports no timeline, scrobbles nothing at the stop,
+/// and keeps the Live TV session it was tuned under, so the banner and the channel keys still work
+/// after the landing — where any other plan clears it.
+#[test]
+fn a_virtual_channel_programme_is_quiet_and_keeps_its_live_session() {
+    let mut ps = crate::route::PlaybackSession::IDLE;
+    let _g = plx_base::testlock::serial();
+    reset_player_control_for_test(&ps);
+    reset_session(&mut ps);
+    let lineup = std::sync::Arc::new(plx_data::livetv::guide::Lineup::default());
+    set_live_tuning(&mut ps, crate::live::LiveSession::tuning(std::sync::Arc::clone(&lineup), 0, None));
+    ps.request = Some(PlaybackRequest {
+        sid: ServerId::from_raw(0),
+        rk: "e1".into(),
+        part: "/library/parts/1/file.mkv".into(),
+        vcodec: "h264".into(),
+        acodec: "aac".into(),
+        title: "Frasier".into(),
+        ctx: String::new(),
+        preview: false,
+        seed: None,
+        playlist: String::new(),
+        channel: true,
+    });
+    apply_plan(
+        &mut ps,
+        Plan { sid: ServerId::from_raw(1), url: "https://example.invalid/e1.mkv".into(), sess: "logical-e1".into(), ..Default::default() },
+        "e1",
+    );
+    assert!(live(&ps).is_some(), "the channel's Live TV session survives the landing");
+    assert!(!preview_request(&ps), "a channel is a playback, not a preview");
+    assert!(quiet_request(&ps));
+    assert!(begin_timeline_reporting(&ps).is_none(), "a channel's programme has no timeline");
+
+    // An ordinary play after it is loud again, and is no channel.
+    ps.request = Some(PlaybackRequest {
+        sid: ServerId::from_raw(1),
+        rk: "f1".into(),
+        part: "/library/parts/2/file.mkv".into(),
+        vcodec: "h264".into(),
+        acodec: "aac".into(),
+        title: "Film".into(),
+        ctx: String::new(),
+        preview: false,
+        seed: None,
+        playlist: String::new(),
+        channel: false,
+    });
+    apply_plan(
+        &mut ps,
+        Plan { sid: ServerId::from_raw(1), url: "https://example.invalid/f1.mkv".into(), sess: "logical-f1".into(), ..Default::default() },
+        "f1",
+    );
+    assert!(live(&ps).is_none(), "an ordinary plan ends the channel");
+    assert!(!quiet_request(&ps));
     reset_player_control_for_test(&ps);
     reset_session(&mut ps);
 }

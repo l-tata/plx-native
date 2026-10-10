@@ -565,10 +565,27 @@ impl PlayerScreen {
                 self.hud.extend(now, LIVE_BANNER_MS);
                 plx_machine::idle::invalidate();
             }
+            // A virtual channel plays a library item the app holds itself, so it pauses: it falls
+            // behind live, and OK (below) jumps back.
+            consts::Key::Play | consts::Key::Pause | consts::Key::PlayPause
+                if edge == Edge::Down && live.is_some_and(|l| l.is_virtual()) =>
+            {
+                let play = match key {
+                    consts::Key::Play => Some(true),
+                    consts::Key::Pause => Some(false),
+                    _ => None,
+                };
+                Self::ask(fx, PlayerReq::Transport(play));
+                self.hud.dismissed = false;
+                self.hud.extend(now, LIVE_BANNER_MS);
+            }
             consts::Key::Ok if edge == Edge::Down => {
+                let behind = live.is_some_and(|l| l.is_behind(plx_base::wallclock::now_ms(), plx_media::player::playpos_ns()));
                 if !self.live_typed.is_empty() {
                     ask(fx, LiveTvReq::Typed(std::mem::take(&mut self.live_typed)));
-                } else if failed {
+                } else if failed || behind {
+                    // A failed tune retries; a virtual channel fallen behind is tuned again, which
+                    // is Jump to live.
                     ask(fx, LiveTvReq::Retry);
                 }
                 self.hud.dismissed = false;

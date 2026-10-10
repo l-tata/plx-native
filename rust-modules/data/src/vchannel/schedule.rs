@@ -49,6 +49,11 @@ pub struct Program {
     /// Unix seconds; 0 when the server did not say.
     pub added_at: i64,
     pub last_viewed_at: i64,
+    /// The first media's Part key and codecs, which a tune plays directly; empty when the listing
+    /// carried none (playback then resolves the item by its ratingKey alone).
+    pub part: String,
+    pub vcodec: String,
+    pub acodec: String,
 }
 
 impl Program {

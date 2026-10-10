@@ -270,5 +270,13 @@
     "args": {
       "number": "str"
     }
+  },
+  "livetv.behind": {
+    "value": "BEHIND",
+    "description": "Live TV banner: badge shown in place of LIVE when a virtual channel is paused behind live. Short, capitals like LIVE."
+  },
+  "livetv.jump_to_live": {
+    "value": "OK to jump to live",
+    "description": "Live TV banner: hint beside the channel name when a virtual channel is behind live; OK is the remote's button"
   }
 }

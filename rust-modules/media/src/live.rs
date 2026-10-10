@@ -30,18 +30,46 @@ pub struct LiveSession {
     /// The tune failed (the probe could not reach the stream, or found nothing playable in it):
     /// the banner says so and OK retries.
     pub failed: bool,
+    /// On a virtual channel (`plx_data::vchannel`): the wall-clock instant the programme playing
+    /// began on the channel's timeline — position 0 of the item — so how far the viewer has
+    /// fallen behind live (a pause) is [`LiveSession::behind_ms`]. `None` on a Tunarr channel.
+    pub airing_start_ms: Option<i64>,
 }
+
+/// How far behind live a virtual channel must be before OK jumps back rather than only raising
+/// the banner, and the banner says so.
+pub const JUMP_TO_LIVE_MS: i64 = 10_000;
 
 impl LiveSession {
     /// A channel about to be tuned.
     pub fn tuning(lineup: Arc<Lineup>, index: usize, previous: Option<usize>) -> Self {
-        Self { lineup, index, previous, facts: None, failed: false }
+        Self { lineup, index, previous, facts: None, failed: false, airing_start_ms: None }
     }
 }
 
 impl LiveSession {
     pub fn channel(&self) -> Option<&Channel> {
         self.lineup.channels.get(self.index)
+    }
+
+    /// Is this one of the app's own virtual channels (its programmes are library items the app
+    /// plays itself) rather than a Tunarr stream?
+    pub fn is_virtual(&self) -> bool {
+        self.channel().is_some_and(|c| plx_data::livetv::virtual_playlist(&c.url).is_some())
+    }
+
+    /// Has a virtual channel fallen far enough behind live (a pause) that OK jumps back?
+    pub fn is_behind(&self, now_ms: i64, playpos_ns: i64) -> bool {
+        self.behind_ms(now_ms, playpos_ns) >= JUMP_TO_LIVE_MS
+    }
+
+    /// How far behind live a virtual channel is at `now_ms` with the item at `playpos_ns`: 0 when
+    /// on time (or ahead, or not a virtual channel).
+    pub fn behind_ms(&self, now_ms: i64, playpos_ns: i64) -> i64 {
+        match self.airing_start_ms {
+            Some(start) => ((now_ms - start) - playpos_ns / 1_000_000).max(0),
+            None => 0,
+        }
     }
 }
 
@@ -311,6 +339,27 @@ fn rate_of(pts: &[i64]) -> f64 {
 
 #[cfg(test)]
 mod tests {
+
+    fn session(url: &str, airing_start_ms: Option<i64>) -> LiveSession {
+        let ch = plx_data::livetv::guide::Channel { number: "900".into(), url: url.into(), ..Default::default() };
+        let lineup = Arc::new(Lineup { channels: vec![ch], ..Default::default() });
+        LiveSession { airing_start_ms, ..LiveSession::tuning(lineup, 0, None) }
+    }
+
+    #[test]
+    fn a_virtual_channel_knows_how_far_behind_live_a_pause_left_it() {
+        let s = session("plxvc:42", Some(1_000_000));
+        assert!(s.is_virtual());
+        // Ten minutes into the programme on the wall clock, the item at ten minutes: on time.
+        assert_eq!(s.behind_ms(1_000_000 + 600_000, 600_000 * 1_000_000), 0);
+        assert!(!s.is_behind(1_000_000 + 600_000, 600_000 * 1_000_000));
+        // Paused for a minute: a minute behind, and OK jumps back.
+        assert_eq!(s.behind_ms(1_000_000 + 660_000, 600_000 * 1_000_000), 60_000);
+        assert!(s.is_behind(1_000_000 + 660_000, 600_000 * 1_000_000));
+        let tunarr = session("http://192.0.2.20:8000/stream/1", None);
+        assert!(!tunarr.is_virtual() && tunarr.behind_ms(i64::MAX / 2, 0) == 0, "a Tunarr stream is always live");
+    }
+
     use super::*;
 
     /// A transport packet carrying `payload` on `pid`, padded with an adaptation field so the

@@ -5,7 +5,8 @@
 //! ground (`player_hud::draw_scrim`) and at the same left edge: the `LIVE` badge and the channel,
 //! the airing on now in the transport's display face, its wall-clock span and how far through it
 //! is, and what follows. While a channel is being tuned it says so; when the tune failed it says
-//! that and that OK retries.
+//! that and that OK retries. A virtual channel paused behind live wears a BEHIND badge in place
+//! of LIVE and says that OK jumps back to live.
 //!
 //! Drawn by `screens::player` whenever the session is live and the banner is up (the HUD's own
 //! auto-hide timer), plus the typed-digits read-out at the top right while a number is being
@@ -51,12 +52,18 @@ pub fn draw(live: &LiveSession, phase: Phase, now: i64, measure: &dyn plx_machin
     let w = sb_w();
     // Row 1: LIVE badge, channel number and name.
     let row1 = SB_Y - 190.0;
-    let badge_text = plx_platform::i18n::msg::livetv_live();
+    // A virtual channel paused behind live says so, and that OK jumps back.
+    let behind = phase == Phase::Playing && live.is_behind(now, plx_media::player::playpos_ns());
+    let badge_text = if behind { plx_platform::i18n::msg::livetv_behind() } else { plx_platform::i18n::msg::livetv_live() };
     let badge_w = measure.width_str(badge_text, theme::size::CAPTION, true) + 2.0 * BADGE_PAD;
     let badge = Rect::new(SB_X, row1, badge_w, BADGE_H);
     p.rect(badge, theme::space::XS, theme::LIVE_BADGE, theme::LIVE_BADGE, 0.0);
     line(p, measure, badge_text, theme::size::CAPTION, theme::LIVE_BADGE_INK, true, badge, HAlign::Center);
-    let channel = format!("{}  {}", ch.number, ch.name);
+    let channel = if behind {
+        format!("{}  {}  \u{b7}  {}", ch.number, ch.name, plx_platform::i18n::msg::livetv_jump_to_live())
+    } else {
+        format!("{}  {}", ch.number, ch.name)
+    };
     line(p, measure, &channel, theme::size::BODY, theme::TEXT_SECONDARY, true,
         Rect::new(badge.x + badge.w + theme::space::SM, row1, w - badge.w - theme::space::SM, BADGE_H), HAlign::Left);
     // Row 2: the airing's title in the transport's display face (HEADLINE: the HUD's own display

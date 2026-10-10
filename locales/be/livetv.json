@@ -60,5 +60,7 @@
   "livetv.studio.failed": "Не ўдалося захаваць канал у Plex.",
   "livetv.studio.loading": "Чытаецца ваша бібліятэка…",
   "livetv.studio.empty": "Каналы з’явяцца тут, калі будзе прачытана ваша бібліятэка Plex.",
-  "livetv.studio.number": "Канал {number}"
+  "livetv.studio.number": "Канал {number}",
+  "livetv.behind": "ЗАТРЫМКА",
+  "livetv.jump_to_live": "OK — вярнуцца ў эфір"
 }
