@@ -45,8 +45,8 @@ pub struct Port {
 
 fn nothing() {}
 
-/// No port installed: host unit tests (nothing calls `plex_run`). Every entry is what today's
-/// `cfg(any(hostsim, test))` arm answered, minus the off-device log lines the other entries would
+/// No port installed: host unit tests (nothing calls `plex_run`). Every entry is what the webOS
+/// modules' `cfg(test)` arms answer, minus the off-device log lines the other entries would
 /// write (`deliver_toast` keeps its one).
 static ABSENT: Port = Port {
     probe_device: nothing,

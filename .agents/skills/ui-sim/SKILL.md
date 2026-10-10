@@ -194,7 +194,7 @@ have always accepted keyboard keys), plus space=pause, `p`=play, `s`=stop, backs
 
 **`back` at a ROOT is the platform's root press** (`tv::home::go_home`) — Home's root, the
 who's-watching picker and the QR sign-in — and it does not end the process. **On the simulator it
-is a LOG LINE and nothing else** (`gohome: no LS2 bus off-device …`): there is no webOS launcher to
+is a LOG LINE and nothing else** (`gohome: no system launcher on the desktop …`): there is no webOS launcher to
 hand a Mac window to, so the screen does not change and a `back` too many looks like a key that did
 nothing. That is the one part of this behaviour the simulator is structurally blind to; whether the
 television really shows its launcher and brings the SAME PROCESS back is a `tv-session` question —
@@ -317,7 +317,7 @@ Report these ONLY from the device, via the **`tv-session`** skill (and `wake-tv`
   drawable and the scale, and a 0.5 there means glyphs are downscaled and softer by construction.
 - **Anything about LG's DECODER** — resource-allocation refusals, the Load payload's Dolby
   declaration, `SOUND_ERROR_019`, frame pacing, which codecs the panel takes. The 29-symbol
-  Starfish/ACB seam does not exist off-device, so by default `player::ffi`'s host arm reports the
+  Starfish/ACB seam does not exist off-device, so by default the simulator's sink (`player::ffi_host::HostSink`) reports the
   seam's own "no video path" failure and pressing Play lands on the app's real failure read-out —
   correct behaviour, not a bug, and a convenient way to look at that screen.
 - ~~**Anything about video.**~~ **Narrowed twice, and the second time is recent.** Arm
