@@ -547,6 +547,241 @@ extern "C" fn write_cb(
     }
 }
 
+/// **Connection reuse for a thread that asks for it** — the artwork workers.
+///
+/// [`request`]'s easy handle is per call on purpose (its doc), and that stays: what this adds is
+/// where the CONNECTION lives. A thread that calls [`pool::enable`] performs each request inside its
+/// own long-lived `curl_multi` handle, whose connection cache outlives the easy handle, so the next
+/// request to the same server rides the same TCP + TLS connection instead of a fresh handshake.
+/// On this television a TLS handshake is a large share of a poster's whole cost, and a page of
+/// artwork is dozens of requests to one server. Nothing about a request's options carries over —
+/// libcurl reuses a connection only when the new request's TLS configuration matches it, and key
+/// mode's `FRESH_CONNECT` / `FORBID_REUSE` keep that request out of the cache entirely.
+///
+/// Every symbol here is one `media::curlio` already binds and plays video over (frozen to webOS's
+/// oldest libcurl, 7.53.1), in a table of its own so a library without them loses only the reuse:
+/// the request then performs exactly as before.
+///
+/// **The multi handle shares one DNS cache across its easy handles**, so a resolve pin
+/// (`CURLOPT_RESOLVE`) added by one request is seen by the next — and this libcurl IGNORES a second
+/// pin for a name already cached rather than replacing it. A pin that differs from the one already
+/// given for the same name therefore starts a fresh multi ([`Pool::admit_resolve`]), so a server
+/// whose address moved is dialled where it is now.
+pub mod pool {
+    use super::CURL;
+    use std::cell::RefCell;
+    use std::os::raw::{c_int, c_void};
+
+    type CURLM = c_void;
+
+    plx_base::dynlib! {
+        curlpool: ["libcurl.so.4", "libcurl.so.5", "libcurl.4.dylib"] {
+        fn curl_multi_init() -> *mut CURLM;
+        fn curl_multi_add_handle(multi: *mut CURLM, easy: *mut CURL) -> c_int;
+        fn curl_multi_perform(multi: *mut CURLM, running: *mut c_int) -> c_int;
+        fn curl_multi_wait(multi: *mut CURLM, extra: *mut c_void, n_extra: u32,
+                           timeout_ms: c_int, numfds: *mut c_int) -> c_int;
+        fn curl_multi_info_read(multi: *mut CURLM, msgs_left: *mut c_int) -> *mut CURLMsg;
+        fn curl_multi_remove_handle(multi: *mut CURLM, easy: *mut CURL) -> c_int;
+        fn curl_multi_cleanup(multi: *mut CURLM) -> c_int;
+    }}
+
+    /// `struct CURLMsg` — `multi.h`; `data` is the union of `void *whatever` and `CURLcode result`,
+    /// declared pointer-sized so the layout matches C on a 32-bit television and a 64-bit host
+    /// alike (the same declaration as `media::curlio`'s).
+    #[repr(C)]
+    pub struct CURLMsg {
+        msg: c_int,
+        easy_handle: *mut CURL,
+        data: *mut c_void,
+    }
+
+    const CURLMSG_DONE: c_int = 1;
+    /// `CURLE_FAILED_INIT`, what a transfer the multi could not run reports.
+    const CURLE_FAILED_INIT: c_int = 2;
+    /// How long one `curl_multi_wait` sleeps at most; the transfer's own timeouts bound the whole.
+    const WAIT_MS: c_int = 200;
+
+    struct Pool {
+        multi: *mut CURLM,
+        /// The resolve pins given to this multi's DNS cache, `host:port:address` each.
+        resolves: Vec<String>,
+    }
+
+    impl Pool {
+        fn new() -> Option<Pool> {
+            static LOADED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if !*LOADED.get_or_init(|| curlpool::load(None).ok()) {
+                return None;
+            }
+            let multi = unsafe { curl_multi_init() };
+            (!multi.is_null()).then(|| Pool { multi, resolves: Vec::new() })
+        }
+
+        /// May this multi's DNS cache take `resolve`? A pin already given, or one for a name not
+        /// yet pinned, is fine; a DIFFERENT pin for a name already pinned is not.
+        fn admit_resolve(&mut self, resolve: &str) -> bool {
+            if self.resolves.iter().any(|r| r == resolve) {
+                return true;
+            }
+            if self.resolves.iter().any(|r| name_of(r) == name_of(resolve)) {
+                return false;
+            }
+            self.resolves.push(resolve.to_owned());
+            true
+        }
+    }
+
+    impl Drop for Pool {
+        fn drop(&mut self) {
+            unsafe { curl_multi_cleanup(self.multi) };
+        }
+    }
+
+    /// The `host:port` a resolve entry names.
+    fn name_of(resolve: &str) -> &str {
+        resolve.rsplitn(2, ':').nth(1).unwrap_or(resolve)
+    }
+
+    thread_local! {
+        /// `None` = this thread does not pool; `Some(None)` = it pools, and has no multi yet.
+        static POOL: RefCell<Option<Option<Pool>>> = const { RefCell::new(None) };
+    }
+
+    /// Pool this thread's requests from now on.
+    pub fn enable() {
+        POOL.with(|p| {
+            let mut p = p.borrow_mut();
+            if p.is_none() {
+                *p = Some(None);
+            }
+        });
+    }
+
+    /// Close every connection this thread holds (a sign-out, an account switch). It keeps pooling.
+    pub fn close_connections() {
+        POOL.with(|p| {
+            if let Some(slot) = p.borrow_mut().as_mut() {
+                *slot = None;
+            }
+        });
+    }
+
+    /// Perform `easy` — inside this thread's multi when it pools, else `curl_easy_perform` as
+    /// ever. `resolve` is the pin the request set, if any. Returns the transfer's `CURLcode`.
+    ///
+    /// # Safety
+    /// `easy` is a configured, live easy handle not in any multi; it is out of this one again when
+    /// this returns, so its owner may clean it up as usual.
+    pub(super) unsafe fn perform(easy: *mut CURL, resolve: Option<&str>) -> c_int {
+        let pooled = POOL.with(|p| {
+            let mut p = p.borrow_mut();
+            let slot = p.as_mut()?;
+            if let (Some(pool), Some(r)) = (slot.as_mut(), resolve) {
+                if !pool.admit_resolve(r) {
+                    *slot = None;
+                }
+            }
+            if slot.is_none() {
+                *slot = Pool::new();
+                if let (Some(pool), Some(r)) = (slot.as_mut(), resolve) {
+                    pool.admit_resolve(r);
+                }
+            }
+            slot.as_ref().map(|pool| pool.multi)
+        });
+        match pooled {
+            Some(multi) => run(multi, easy),
+            None => super::curl_easy_perform(easy),
+        }
+    }
+
+    /// One transfer, driven to completion inside `multi`, then taken out of it.
+    unsafe fn run(multi: *mut CURLM, easy: *mut CURL) -> c_int {
+        if curl_multi_add_handle(multi, easy) != 0 {
+            return super::curl_easy_perform(easy);
+        }
+        let mut result = None;
+        loop {
+            let mut running: c_int = 0;
+            if curl_multi_perform(multi, &mut running) != 0 {
+                break;
+            }
+            loop {
+                let mut left: c_int = 0;
+                let m = curl_multi_info_read(multi, &mut left);
+                if m.is_null() {
+                    break;
+                }
+                if (*m).msg == CURLMSG_DONE && (*m).easy_handle == easy {
+                    // The union's `CURLcode` sits at its start on both widths of pointer.
+                    result = Some(*(std::ptr::addr_of!((*m).data) as *const c_int));
+                }
+            }
+            if result.is_some() || running == 0 {
+                break;
+            }
+            let mut fds: c_int = 0;
+            curl_multi_wait(multi, std::ptr::null_mut(), 0, WAIT_MS, &mut fds);
+        }
+        curl_multi_remove_handle(multi, easy);
+        result.unwrap_or(CURLE_FAILED_INIT)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A second pin for a name already pinned starts a fresh multi; the same pin, or a pin for
+        /// another name, does not.
+        #[test]
+        fn a_moved_server_is_not_dialled_at_its_old_address() {
+            let mut pool = Pool { multi: std::ptr::null_mut(), resolves: Vec::new() };
+            assert!(pool.admit_resolve("abc.plex.direct:32400:192.0.2.10"));
+            assert!(pool.admit_resolve("abc.plex.direct:32400:192.0.2.10"));
+            assert!(pool.admit_resolve("def.plex.direct:32400:192.0.2.11"));
+            assert!(!pool.admit_resolve("abc.plex.direct:32400:192.0.2.99"));
+            assert_eq!(name_of("abc.plex.direct:32400:192.0.2.10"), "abc.plex.direct:32400");
+            std::mem::forget(pool); // no multi to clean up
+        }
+
+        /// Two requests to `served` from a fresh thread, pooling or not: how many TCP connections
+        /// the server accepted for them.
+        fn connections_for_two_requests(pooled: bool, tag: &'static str) -> usize {
+            use super::super::*;
+            let cert = std::sync::Arc::new(mint_cert(&["127.0.0.1"]));
+            let _ca = TestCaGuard::install(&cert.pem, tag);
+            let served = spawn_observed_keepalive(std::sync::Arc::clone(&cert), b"{}".to_vec());
+            let url = format!("https://127.0.0.1:{}/photo", served.port);
+            std::thread::spawn(move || {
+                if pooled {
+                    super::enable();
+                }
+                for _ in 0..2 {
+                    let r = request_result(&url, &[], "GET", None, API, false, None, None);
+                    assert_eq!(r.as_ref().map(|r| r.status).ok(), Some(200), "the loopback request must succeed: {:?}", r.err());
+                }
+            })
+            .join()
+            .expect("request thread");
+            served.accepted()
+        }
+
+        /// **The point of the pool**: a pooling thread's second request to the same server rides
+        /// the first one's connection; without it, each request opens its own (and shakes hands
+        /// again).
+        #[test]
+        fn a_pooling_thread_reuses_its_connection() {
+            let _serial = plx_base::testlock::serial();
+            if !super::super::curl_ready() {
+                return;
+            }
+            assert_eq!(connections_for_two_requests(false, "pool-off"), 2, "PRECONDITION: unpooled, one each");
+            assert_eq!(connections_for_two_requests(true, "pool-on"), 1);
+        }
+    }
+}
+
 struct Easy(*mut CURL);
 
 impl Drop for Easy {
@@ -1797,7 +2032,7 @@ fn request_tls_evidence(
                 );
             }
 
-            let mut rc = curl_easy_perform(easy.0);
+            let mut rc = pool::perform(easy.0, resolve_c.as_ref().and_then(|r| r.to_str().ok()));
             let mut code: c_long = 0;
             let info_rc = curl_easy_getinfo_long(easy.0, CURLINFO_RESPONSE_CODE, &mut code as *mut c_long);
             // Key mode asked libcurl to enforce the pin; a second, independent look at the key the

@@ -26,7 +26,8 @@
 //!
 //! Rust port of the old src/posters.c; rewritten on std::sync (a `Mutex<Store>` + `Condvar` +
 //! two `task::spawn` workers). The decoded-pixel pointer is stored as an address (usize) so the
-//! shared `Store` stays `Send`.
+//! shared `Store` stays `Send`. Each worker keeps its HTTPS connections between fetches
+//! (`plx_net::net::pool`), closed when the account epoch moves.
 //!
 //! ## Every entry point names a SERVER, and none of them assumes one
 //!
@@ -1750,6 +1751,11 @@ fn bake_fan(
 /// BACKGROUND worker: claim a request, read disk or fetch and decode off-lock, publish pixels.
 /// RAM/GPU residency stays bounded independently of the number of persistent images.
 fn poster_worker() {
+    // A page of artwork is dozens of requests to one server: keep the connection between them
+    // rather than shaking hands for every poster (`plx_net::net::pool`). An account change closes
+    // them, so no connection outlives the sign-in that opened it.
+    plx_net::net::pool::enable();
+    let mut pooled_gen = plx_platform::imgcache::generation();
     loop {
         let (idx, key_s, srv, gen, cache_gen, token_gen) = {
             let mut g = store();
@@ -1766,6 +1772,10 @@ fn poster_worker() {
             s.state = P_LOADING;
             (idx, String::from_utf8_lossy(key_bytes(s)).into_owned(), s.srv, s.gen, s.cache_gen, s.token_gen)
         };
+        if cache_gen != pooled_gen {
+            plx_net::net::pool::close_connections();
+            pooled_gen = cache_gen;
+        }
         trace::worker_start(idx, gen);
         let (mut w, mut h) = (0, 0);
         let mut px = std::ptr::null_mut();
