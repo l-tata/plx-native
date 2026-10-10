@@ -128,8 +128,8 @@ pub(crate) fn apply_more_action(ps: &mut plx_media::route::PlaybackSession, pa: 
         // Lab builds only. Nothing about playback changes: the snapshot is taken and the toast
         // reports, over whatever the player is doing.
         plx_appkit::more_menu::Action::SendDiagnostics => crate::lab::request_upload("menu", ps),
-        // performed by the loop's own arm (`player_requests`), which holds the pages a jump needs
-        plx_appkit::more_menu::Action::PlayQueueItem(_) => {}
+        // performed by the loop's own arm (`player_requests`), which holds the pages these need
+        plx_appkit::more_menu::Action::PlayQueueItem(_) | plx_appkit::more_menu::Action::OpenTracks => {}
         // The Version page: remember the pick for this item and resolve it again where it is —
         // the retry ritual, so the new version's part and streams replace the old ones.
         plx_appkit::more_menu::Action::SetVersion(index) => {
@@ -618,6 +618,15 @@ pub(crate) fn player_requests(
             // A Play queue row: the same stop-and-start ritual Up Next performs, inside the queue.
             PlayerReq::More(plx_appkit::more_menu::Action::PlayQueueItem(item_id)) => {
                 let _ = play_queue_row(ps, pa, item_id, HUD_LINGER_MS, pages, bridge);
+            }
+            // A channel's Audio & Subtitles row: the panel the control row's discs open elsewhere.
+            PlayerReq::More(plx_appkit::more_menu::Action::OpenTracks) => {
+                super::bridge::open_player_overlay(
+                    ps,
+                    bridge.metadata_view(),
+                    pages,
+                    plx_screens::player::overlay::OverlayKind::Tracks { tab: 0 },
+                );
             }
             PlayerReq::More(action) => apply_more_action(ps, pa, bridge, action),
             PlayerReq::CommitTrack(commit) => commit_track(ps, commit),

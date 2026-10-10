@@ -97,6 +97,9 @@ pub enum Action {
     /// remembers the pick and resolves the item again at the current position
     /// (`route::switch_version`). The version playing commits nothing.
     SetVersion(u32),
+    /// **Open the Audio & Subtitles panel** — the root's row on a Live TV channel, where the
+    /// banner replaces the control row and its two discs, so this menu is the panel's only door.
+    OpenTracks,
 }
 
 /// **A drill-in page of the More menu** — the form's `Dest`. The root is the empty page stack, not
@@ -206,6 +209,7 @@ impl FormId for Action {
             Action::None => 0,
             Action::ToggleStats => 1,
             Action::SendDiagnostics => 2,
+            Action::OpenTracks => 6,
             Action::SetQuality(Quality::Auto) => 10,
             Action::SetQuality(Quality::Original) => 11,
             Action::SetQuality(Quality::P1080High) => 12,
@@ -227,7 +231,7 @@ impl FormId for Action {
 impl FormId for MoreRow {
     fn key(&self) -> RowKey {
         match self {
-            // free in `Action`'s key space (0..=2 and 10..=16)
+            // free in `Action`'s key space (0..=2, 6 and 10..=16)
             MoreRow::OpenQuality => RowKey(3),
             MoreRow::OpenQueue => RowKey(4),
             MoreRow::OpenVersion => RowKey(5),
@@ -317,6 +321,13 @@ fn root_form(
     let queue = queue_offer(ps);
     let version = version_offer(ps);
     let quality = FormSection::new("").item_if(
+        tracks_offered(ps),
+        MoreRow::Act(Action::OpenTracks),
+        RowKind::Button,
+        Action::OpenTracks,
+        Row::new(plx_platform::i18n::msg::widgets_menu_tracks()),
+    )
+    .item_if(
         quality_offered(rows, forced),
         MoreRow::OpenQuality,
         RowKind::Nav(MorePage::Quality),
@@ -398,7 +409,7 @@ fn quality_form(
 
 impl MoreMenuState {
     fn open_focused(ps: &plx_media::route::PlaybackSession, quality: Option<plx_media::route::Quality>) -> Self {
-        let forced = plx_media::route::forced_direct_play(ps);
+        let forced = no_ladder(ps);
         let rows = rows_for(forced);
         let current = plx_media::route::quality();
         let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
@@ -519,7 +530,7 @@ impl MoreMenuState {
     /// pick), and the page pops to the root when Quality stops being offered. The panel's height
     /// follows, and the card animates to it ([`Self::update`]). Returns whether it rebuilt.
     pub fn refresh(&mut self, ps: &plx_media::route::PlaybackSession) -> bool {
-        let forced = plx_media::route::forced_direct_play(ps);
+        let forced = no_ladder(ps);
         self.refresh_to(ps, forced, rows_for(forced), plx_media::route::quality())
     }
 
@@ -788,6 +799,20 @@ where
 /// the server to convert, and Force forbids conversion, so under it no rung can change what plays:
 /// a row that cannot change the outcome is not offered (the same rule as the failure read-out's
 /// `player::failure_actions`). Pure over the flag so both shapes are testable without a session.
+/// **No rung can change what plays**: Force Direct Play, or a Tunarr channel — a stream Tunarr
+/// encodes to its own settings, with no Plex item behind it for a rung to re-decide. (A virtual
+/// channel's programme IS a Plex item, and keeps the ladder.)
+fn no_ladder(ps: &plx_media::route::PlaybackSession) -> bool {
+    plx_media::route::forced_direct_play(ps) || plx_media::route::live_stream(ps)
+}
+
+/// Is the Audio & Subtitles row offered? Only on a channel (elsewhere the control row's discs open
+/// the panel), and only on one whose programme is a Plex item with tracks to list — a virtual
+/// channel; a Tunarr stream has none the server describes.
+fn tracks_offered(ps: &plx_media::route::PlaybackSession) -> bool {
+    plx_media::route::live(ps).is_some_and(|l| l.is_virtual())
+}
+
 fn rows_for(forced: bool) -> Vec<Action> {
     let mut v: Vec<Action> = if forced {
         Vec::new()
@@ -811,6 +836,7 @@ fn label(a: Action) -> std::borrow::Cow<'static, str> {
         // the picker's leading mark (see this module's doc)
         Action::SetQuality(q) => q.label().into(),
         Action::SendDiagnostics => plx_platform::i18n::msg::widgets_menu_diagnostics().into(),
+        Action::OpenTracks => plx_platform::i18n::msg::widgets_menu_tracks().into(),
         Action::None | Action::PlayQueueItem(_) | Action::SetVersion(_) => "".into(),
     }
 }
@@ -842,7 +868,12 @@ fn is_on(a: Action) -> bool {
     match a {
         Action::ToggleStats => stats_on(),
         // a rung is not a switch — see `row_for`, which gives it the leading mark instead
-        Action::SetQuality(_) | Action::SendDiagnostics | Action::None | Action::PlayQueueItem(_) | Action::SetVersion(_) => false,
+        Action::SetQuality(_)
+        | Action::SendDiagnostics
+        | Action::None
+        | Action::PlayQueueItem(_)
+        | Action::SetVersion(_)
+        | Action::OpenTracks => false,
     }
 }
 
@@ -986,6 +1017,43 @@ mod tests {
         form.table.compact = true;
         form.set_or_open(root_form(&ps, &rows, forced, current), None);
         MoreMenuState { form, rows, forced, current, pages: PageStack::new(), motion: PanelMotion::new(), queue_initial: None, version_initial: None }
+    }
+
+    /// The root's row ids for the playback `ps`, built the way [`MoreMenuState::open_focused`] does.
+    fn root_ids(ps: &plx_media::route::PlaybackSession) -> Vec<Option<MoreRow>> {
+        let forced = no_ladder(ps);
+        let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
+        form.set_or_open(root_form(ps, &rows_for(forced), forced, plx_media::route::Quality::P1080), None);
+        (0..form.table.n_rows() as usize).map(|i| form.id_at(i).copied()).collect()
+    }
+
+    /// A Live TV channel installed as the playback.
+    fn channel(url: &str) -> plx_media::route::PlaybackSession {
+        let ch = plx_data::livetv::guide::Channel { number: "900".into(), url: url.into(), ..Default::default() };
+        let lineup = std::sync::Arc::new(plx_data::livetv::guide::Lineup { channels: vec![ch], ..Default::default() });
+        let mut ps = plx_media::route::PlaybackSession::default();
+        assert!(plx_media::route::install_live_stream(&mut ps, plx_media::live::LiveSession::tuning(lineup, 0, None), url));
+        ps
+    }
+
+    /// **A channel's settings.** The banner replaces the control row, so on a virtual channel —
+    /// a Plex item — this menu leads with Audio & Subtitles and keeps the Quality ladder; a Tunarr
+    /// stream is encoded to Tunarr's own settings and has no Plex tracks, so it offers neither,
+    /// only Options. A film offers no Audio & Subtitles row (its discs open that panel).
+    #[test]
+    fn a_channel_reaches_its_settings_through_this_menu() {
+        let virtual_ch = root_ids(&channel("plxvc:42"));
+        assert_eq!(virtual_ch[0], Some(MoreRow::Act(Action::OpenTracks)), "{virtual_ch:?}");
+        assert!(virtual_ch.contains(&Some(MoreRow::OpenQuality)));
+        assert!(virtual_ch.contains(&Some(MoreRow::Act(Action::ToggleStats))));
+
+        let tunarr = root_ids(&channel("http://192.0.2.20:8000/stream/channels/1.ts"));
+        assert!(!tunarr.contains(&Some(MoreRow::Act(Action::OpenTracks))), "{tunarr:?}");
+        assert!(!tunarr.contains(&Some(MoreRow::OpenQuality)), "{tunarr:?}");
+        assert!(tunarr.contains(&Some(MoreRow::Act(Action::ToggleStats))));
+
+        let film = root_ids(&plx_media::route::PlaybackSession::default());
+        assert!(!film.contains(&Some(MoreRow::Act(Action::OpenTracks))));
     }
 
     /// The same menu with the Quality page pushed (and its slide skipped).

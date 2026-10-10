@@ -63,6 +63,7 @@
   "livetv.studio.number": "Canal {number}",
   "livetv.behind": "DIFERIDO",
   "livetv.jump_to_live": "OK para volver al directo",
+  "livetv.settings_hint": "Derecha: ajustes",
   "livetv.studio.edit": "Editar",
   "livetv.studio.done": "Listo",
   "livetv.studio.kinds_both": "Películas y series",

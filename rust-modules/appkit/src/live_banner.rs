@@ -6,7 +6,9 @@
 //! the airing on now in the transport's display face, its wall-clock span and how far through it
 //! is, and what follows. While a channel is being tuned it says so; when the tune failed it says
 //! that and that OK retries. A virtual channel paused behind live wears a BEHIND badge in place
-//! of LIVE and says that OK jumps back to live.
+//! of LIVE and says that OK jumps back to live. While a stream plays, the channel row's far edge
+//! says that RIGHT opens the player's settings (the overflow menu the control row leads to
+//! elsewhere).
 //!
 //! Drawn by `screens::player` whenever the session is live and the banner is up (the HUD's own
 //! auto-hide timer), plus the typed-digits read-out at the top right while a number is being
@@ -64,8 +66,14 @@ pub fn draw(live: &LiveSession, phase: Phase, now: i64, measure: &dyn plx_machin
     } else {
         format!("{}  {}", ch.number, ch.name)
     };
+    // How to reach the settings, at the row's far edge, while there is a stream to set.
+    let hint = if phase == Phase::Playing { plx_platform::i18n::msg::livetv_settings_hint() } else { "" };
+    let hint_w = if hint.is_empty() { 0.0 } else { measure.width_str(hint, theme::size::CAPTION, false) + theme::space::MD };
+    let text_x = badge.x + badge.w + theme::space::SM;
     line(p, measure, &channel, theme::size::BODY, theme::TEXT_SECONDARY, true,
-        Rect::new(badge.x + badge.w + theme::space::SM, row1, w - badge.w - theme::space::SM, BADGE_H), HAlign::Left);
+        Rect::new(text_x, row1, w - badge.w - theme::space::SM - hint_w, BADGE_H), HAlign::Left);
+    line(p, measure, hint, theme::size::CAPTION, theme::TEXT_SECONDARY, false,
+        Rect::new(SB_X + w - hint_w, row1, hint_w, BADGE_H), HAlign::Right);
     // Row 2: the airing's title in the transport's display face (HEADLINE: the HUD's own display
     // size is a documented carve-out this banner does not need).
     let title_y = row1 + BADGE_H + theme::space::SM;

@@ -279,6 +279,10 @@
     "value": "OK to jump to live",
     "description": "Live TV banner: hint beside the channel name when a virtual channel is behind live; OK is the remote's button"
   },
+  "livetv.settings_hint": {
+    "value": "Right for settings",
+    "description": "Live TV banner: hint at the right of the channel row; Right is the remote's arrow key, which opens the player's settings menu"
+  },
   "livetv.studio.edit": {
     "value": "Edit",
     "description": "Live TV channel studio: button that opens the options for a suggested channel"

@@ -5,6 +5,7 @@
   "widgets.menu.options": "Opciones",
   "widgets.menu.quality": "Calidad",
   "widgets.menu.stats": "Estadísticas",
+  "widgets.menu.tracks": "Audio y subtítulos",
   "widgets.menu.diagnostics": "Enviar diagnósticos",
   "widgets.menu.queue": "Cola de reproducción",
   "widgets.menu.queue_position": "{position} de {total}",

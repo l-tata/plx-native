@@ -485,7 +485,8 @@ impl PlayerScreen {
     /// A key on a live channel (the failure read-out, when the engine failed, still takes its
     /// keys first — see the `Input` arm). CH▲/▼ change channel at once; UP/DOWN open the surf list
     /// and move its highlight while the channel keeps playing, and OK tunes the highlighted one;
-    /// digits key in a channel number; LEFT returns to the previous channel; OK otherwise raises
+    /// digits key in a channel number; LEFT returns to the previous channel; RIGHT opens the
+    /// player's settings menu; OK otherwise raises
     /// the banner (or retries a failed tune); BACK closes the list, else BACK/STOP leave for the
     /// page the channel was started from.
     fn handle_live_key<H: AppLike>(
@@ -552,6 +553,12 @@ impl PlayerScreen {
             consts::Key::Left { .. } if edge == Edge::Down => {
                 ask(fx, LiveTvReq::Previous);
                 self.hud.extend(now, LIVE_BANNER_MS);
+            }
+            // The player's settings: the control row and its discs are not drawn on a channel, so
+            // RIGHT opens the overflow menu they lead to (Quality and Audio & Subtitles where they
+            // apply, Stats for nerds always).
+            consts::Key::Right { .. } if edge == Edge::Down && !failed => {
+                Self::ask(fx, PlayerReq::OpenOverlay(overlay::OverlayKind::More { quality: false }));
             }
             consts::Key::Ok if edge == Edge::Down && self.live_surf.is_some() => {
                 let pick = self.live_surf.take();
