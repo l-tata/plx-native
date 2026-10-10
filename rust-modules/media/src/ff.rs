@@ -7727,6 +7727,24 @@ fn open_input_failure_note(r: c_int, lane_aborted: bool) -> String {
     }
 }
 
+/// **A Live TV stream's analysis window.** `avformat_find_stream_info` reads ahead until it has
+/// FFmpeg's default five seconds of stream (or 5 MB) to settle each track's parameters, frame rate
+/// included — and a Tunarr channel arrives in real time, so that is up to five seconds of a tune
+/// spent before the first packet is handed on. The app has already measured what it needs
+/// (`live::probe`: the codecs and the frame rate), and MPEG-TS carries the parameter sets and ADTS
+/// headers in band, so one second is ample. Set by option name (`av_opt_set` on the context's own
+/// AVClass), no struct offset. A refusal leaves FFmpeg's defaults: slower, never wrong.
+#[inline]
+pub(crate) const fn live_analyzeduration_us() -> i64 {
+    1_000_000
+}
+
+unsafe fn live_analysis_limits(fmt: *mut AVFormatContext) {
+    let us = std::ffi::CString::new(live_analyzeduration_us().to_string()).expect("digits");
+    let rc = av_opt_set(fmt as *mut c_void, c"analyzeduration".as_ptr(), us.as_ptr(), 0);
+    crate::player::log(&format!("ff: live analysis window {}ms rc={rc}", live_analyzeduration_us() / 1000));
+}
+
 /// The demux thread body (spawned by `engine::start_bufferfeed`).
 ///
 /// Takes an [`Origin`](plx_plex::plex::Origin) rather than a `(host, port)` pair because **the scheme
@@ -7740,6 +7758,7 @@ pub fn demux(
     origin: plx_plex::plex::Origin,
     path: String,
     acodec: String,
+    live: bool,
     abr: Option<(crate::route::HlsAbrControl, crate::route::WorkerTicket)>,
     auto_original: Option<crate::route::AutoOriginalWatch>,
     aq: SendPtr<AuQueue>,
@@ -8009,6 +8028,9 @@ pub fn demux(
                     crate::player::log(&open_input_failure_note(r, crate::aq::aq_is_aborted(aq_p)));
                     free_avio(avio);
                     break;
+                }
+                if live {
+                    live_analysis_limits(fmt);
                 }
                 if avformat_find_stream_info(fmt, std::ptr::null_mut()) < 0 {
                     crate::player::log("ff: find_stream_info failed");

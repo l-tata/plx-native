@@ -1305,9 +1305,10 @@ fn start_bufferfeed_inner(
             let acodec = crate::route::stream_acodec(ps);
             let abr = crate::route::hls_abr_control(ps);
             let auto_original = crate::route::auto_original_watch(ps);
+            let live = crate::route::live_stream(ps);
             SHARED.side_subs_owner.store(side_target.is_some(), Ordering::Release);
             stream_th = plx_base::task::spawn_off_frame_keeping("demux", move |off| {
-                crate::ff::demux(off, origin, path, acodec, abr, auto_original, aqp, aqap, hsp)
+                crate::ff::demux(off, origin, path, acodec, live, abr, auto_original, aqp, aqap, hsp)
             });
             if stream_th.is_none() {
                 SHARED.side_subs_owner.store(false, Ordering::Release);
@@ -1495,7 +1496,7 @@ mod live_prime_tests {
         assert!(!decoder_ready(PRIME_NS, PRIME_AUDIO_NS, true, true), "a channel waits for its cushion");
         assert!(!decoder_ready(LIVE_PRIME_NS, PRIME_AUDIO_NS, true, true), "audio needs its cushion too");
         assert!(decoder_ready(LIVE_PRIME_NS, LIVE_PRIME_NS, true, true));
-        assert!(LIVE_PRIME_NS >= 2_000_000_000, "at least two seconds of each lane");
+        assert!(LIVE_PRIME_NS >= 1_000_000_000, "at least a second of each lane");
     }
 
     #[test]
@@ -2091,10 +2092,11 @@ const PRIME_VIDEO_MAX_NS: i64 = 2_500_000_000;
 /// speed it plays (its encoder reads in real time), so the cushion at Play is the cushion for the
 /// whole viewing. Started on the file depths (700 ms video, 300 ms audio), any network or encoder
 /// hiccup longer than a third of a second would starve the audio decoder under Starfish's
-/// audio-master clock. 2.5 s rides out ordinary jitter at the cost of tuning that much later.
+/// audio-master clock. 1.5 s rides out ordinary jitter at the cost of tuning that much later
+/// (it was 2.5 s while it was mistaken for the audio fix; see below).
 /// (This was first taken for the cause of the distorted Tunarr sound; it was not — that was the
 /// pre-keyframe audio [`feed_audio_lane`] used to stack at time 0.)
-const LIVE_PRIME_NS: i64 = 2_500_000_000;
+const LIVE_PRIME_NS: i64 = 1_500_000_000;
 
 /// How deep each lane must be before the clock starts: `(video, audio)`.
 fn prime_depth(live: bool) -> (i64, i64) {

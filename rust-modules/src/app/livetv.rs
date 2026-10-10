@@ -54,6 +54,16 @@ pub(crate) struct LiveTuner {
     retries: u32,
     /// When to re-tune on our own (frame-clock ms), if anything is owed.
     retry_at: Option<u32>,
+    /// What each channel's probe found, by stream URL, so tuning a channel again starts it at once
+    /// instead of reading seconds of its stream first. Tunarr encodes every channel to its one
+    /// transcode configuration, so the answer holds; a re-tune after a failure probes afresh.
+    known: std::collections::HashMap<String, StreamFacts>,
+}
+
+/// The declaration a tune of `url` may start with, skipping the probe: one already measured,
+/// unless this is a re-tune after a failure (`retries > 0`), which must not trust it.
+fn known_facts(known: &std::collections::HashMap<String, StreamFacts>, url: &str, retries: u32) -> Option<StreamFacts> {
+    (retries == 0).then(|| known.get(url).copied()).flatten()
 }
 
 /// Drain the Live TV requests the screens raised this frame.
@@ -132,6 +142,9 @@ pub(crate) fn tune_number(app: &mut App, number: &str, now: u32) {
 pub(crate) fn retry(app: &mut App, now: u32) {
     let Some(live) = plx_media::route::live(&app.player.session).cloned() else { return };
     app.livetv.retries = 0;
+    if let Some(ch) = live.channel() {
+        app.livetv.known.remove(&ch.url);
+    }
     tune(app, live.lineup, live.index, live.previous, now);
 }
 
@@ -168,9 +181,16 @@ fn tune(app: &mut App, lineup: Arc<plx_data::livetv::guide::Lineup>, index: usiz
         plx_machine::idle::invalidate();
         return;
     }
-    // Step 2: probe on a worker.
     app.livetv.epoch += 1;
     app.livetv.retry_at = None;
+    // A channel measured before starts at once.
+    if let Some(facts) = known_facts(&app.livetv.known, &url, app.livetv.retries) {
+        app.livetv.pending = None;
+        start(app, url, facts);
+        return;
+    }
+    app.livetv.known.remove(&url);
+    // Step 2: probe on a worker.
     let (tx, rx) = mpsc::channel();
     let probe_url = url.clone();
     let spawned = plx_base::task::spawn_small("livetv-probe", move || {
@@ -299,7 +319,10 @@ pub(crate) fn pump(app: &mut App, now: u32) {
                 let current = epoch == app.livetv.epoch && plx_media::route::live(&app.player.session).is_some();
                 if current {
                     match result {
-                        Ok(facts) => start(app, url, facts),
+                        Ok(facts) => {
+                            app.livetv.known.insert(url.clone(), facts);
+                            start(app, url, facts)
+                        }
                         // A stream that answered but could not be read — the probe found no PMT in
                         // the bytes it got, say — may still play: try with the default declaration.
                         Err(ProbeError::NotPlayable(why)) => {
@@ -406,5 +429,24 @@ pub(crate) fn open_page(d: &mut plx_ui::dispatch::Dispatcher<AppHost>, rig: &mut
     bridge::nav_select_tab(d, AppArg::LiveTv);
     if setup {
         rig.request_livetv_setup();
+    }
+}
+
+#[cfg(test)]
+mod known_facts_tests {
+    use super::*;
+
+    /// A channel measured before skips its probe — unless the tune is a re-tune after a failure,
+    /// when the stream may have changed under it.
+    #[test]
+    fn a_measured_channel_starts_without_its_probe_until_it_fails() {
+        let url = "http://192.0.2.20:8000/stream/channels/1.ts";
+        let facts = StreamFacts { vcodec: "h264", acodec: "aac", fps: 29.97 };
+        let mut known = std::collections::HashMap::new();
+        assert_eq!(known_facts(&known, url, 0), None, "never measured: probe");
+        known.insert(url.to_owned(), facts);
+        assert_eq!(known_facts(&known, url, 0), Some(facts));
+        assert_eq!(known_facts(&known, url, 1), None, "a re-tune after a failure probes afresh");
+        assert_eq!(known_facts(&known, "http://192.0.2.20:8000/stream/channels/2.ts", 0), None);
     }
 }

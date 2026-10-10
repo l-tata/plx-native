@@ -116,8 +116,10 @@ const TS_PACKET: usize = 188;
 /// delivers this in about three seconds; a PMT repeats every few hundred milliseconds.
 const PROBE_BYTES: usize = 1_536 * 1024;
 const PROBE_WINDOW: Duration = Duration::from_secs(12);
-/// Video timestamps a rate measurement wants (about two seconds of 30p).
-const PTS_SAMPLES: usize = 64;
+/// Video timestamps a rate measurement wants: under a second of 30p. The median of their gaps,
+/// snapped to the broadcast/film rate within 1 %, needs a handful of steady frames, not seconds of
+/// them — and a probe reads the stream in real time, so every sample here is tune latency.
+const PTS_SAMPLES: usize = 24;
 
 /// Read the head of a channel's stream and [`analyse`] it. Blocks for up to [`PROBE_WINDOW`]
 /// (Tunarr starts an FFmpeg for a cold channel before its first byte); run it on a worker.
