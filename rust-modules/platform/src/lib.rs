@@ -22,10 +22,12 @@
 pub mod devcaps; // what this SoC decodes — the TV's own codec table, read once at boot (the capability profile + direct-play gate derive from it)
 pub mod i18n;
 pub mod imgcache; // bounded persistent artwork cache shared by every image source
+#[cfg(not(feature = "hostsim"))] // the webOS port's; the simulator's port has its own answer
 pub mod keymanager; // public LS2 key stores: keymanager3, legacy Palm service, or unavailable
 pub mod labcfg; // `lab.json` (the Cloud Lab session config) and the two answers `ui/` and `screens/` ask of it: is this key the trigger, is the menu row on
 // Stage A foundation: owner adapters connect these APIs in the next integration stage.
 #[allow(dead_code)]
 pub mod storage;
 pub mod tv; // the television as everything outside the port sees it: the interfaces the webOS port fills at boot (step L15)
+#[cfg(not(feature = "hostsim"))] // the webOS port's; not compiled into the simulator
 pub mod webos; // which webOS this set is — nyx's os_info.json, read once at boot (release + codename)

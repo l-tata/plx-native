@@ -56,7 +56,7 @@
 //! # How it is reached
 //!
 //! The verbs below are private; [`HostSink`] is the simulator's own `tv::sink::VideoSink`, one
-//! method per verb, installed by `port.rs` for the `hostsim` build and returned directly by
+//! method per verb, installed by the desktop port (`desktop.rs`) in the simulator build and returned directly by
 //! `player::sink()` in the hostsim tests. The `*_for_test` hooks stay here, next to the statics
 //! they touch, and the tests reach them as `crate::player::ffi_host::<hook>`.
 

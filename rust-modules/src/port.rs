@@ -1,16 +1,14 @@
 //! The webOS port: the one table that fills the `tv` interfaces, and the C entry that installs it.
 //!
 //! Everything outside this module reaches the television through `plx_platform::tv`; this is the only
-//! place that names `webos`, `keymanager`, `system` and `player::ffi` together. Its functions keep
-//! their own `cfg(any(hostsim, test))` arms, so the simulator installs this same table and behaves
-//! as it always did.
+//! place that names `webos`, `keymanager`, `system` and `player::ffi` together. It is not compiled
+//! into the simulator, which installs its own table (`desktop`); under `cargo test` it compiles
+//! with the webOS modules' `cfg(test)` arms and `NoSink`, and nothing calls `plex_run`.
 use std::os::raw::{c_char, c_int};
 
-#[cfg(all(not(feature = "hostsim"), not(test)))]
+#[cfg(not(test))]
 const SINK: &dyn plx_platform::tv::sink::VideoSink = &plx_media::player::ffi::StarfishSink;
-#[cfg(feature = "hostsim")]
-const SINK: &dyn plx_platform::tv::sink::VideoSink = &plx_media::player::ffi_host::HostSink;
-#[cfg(all(not(feature = "hostsim"), test))]
+#[cfg(test)]
 const SINK: &dyn plx_platform::tv::sink::VideoSink = &plx_platform::tv::sink::NoSink;
 
 static PORT: plx_platform::tv::Port = plx_platform::tv::Port {
@@ -39,8 +37,7 @@ static PORT: plx_platform::tv::Port = plx_platform::tv::Port {
     sink: SINK,
 };
 
-/// The C shim's entry (`src/main.c`) and the simulator's (`src/bin/sim.rs`): install the port, then
-/// hand over to `app::run_application`.
+/// The C shim's entry (`src/main.c`): install the port, then hand over to `app::run_application`.
 #[no_mangle]
 pub extern "C" fn plex_run(pms_host: *const c_char, pms_port: c_int) -> c_int {
     let _ = plx_platform::tv::install(&PORT);

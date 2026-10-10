@@ -195,7 +195,7 @@ fn call_with(client: &mut platform::Client, uri: &str, payload: &Value) -> Optio
         .and_then(|s| serde_json::from_str(&s).ok())
 }
 
-#[cfg(any(feature = "hostsim", test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support"))]
 mod platform {
     pub(super) struct Client;
 
@@ -214,7 +214,7 @@ mod platform {
     }
 }
 
-#[cfg(all(not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
+#[cfg(not(any(test, feature = "test-support")))]
 mod platform {
     use std::time::Duration;
 

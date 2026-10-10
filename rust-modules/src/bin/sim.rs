@@ -24,7 +24,7 @@
 //!   PLXNATIVE_RUNTIME_DIR                     this instance's trigger/FIFO/log root
 //!   PLXNATIVE_APP_DIR                         where appfont*.ttf and the icons live (repo `pkg/`)
 
-use plxnative_modules::port::plex_run;
+use plxnative_modules::desktop::plex_run;
 use std::ffi::CString;
 use std::os::raw::c_int;
 
