@@ -266,7 +266,13 @@ module doc indexes the parts), the lineup merge in `plx_data::livetv` (`virtual_
 - **The channel studio** (the Live TV page's fourth face) previews a suggestion's live timeline
   before it is kept and offers Keep, Reshuffle, Order, Edit (films and/or shows, unwatched only, a
   rating ceiling, with a live count) and Not interested; on a kept channel, Watch, Reshuffle, Order
-  and Delete. It opens from the guide's Channels pill, from a Home card, or is the page itself when
+  and Delete.
+- **Making a channel**: *Make a Channel* on a show, season, collection or playlist card (its hold
+  menu) opens the studio on a channel drawn from that title; *New Channel* (at the end of Your
+  Channels) builds one from the library by its options — genre, decade, films and/or shows,
+  unwatched only, rating — each offering only values that still air something, with a live count
+  and a name it takes from its options ("90s Sitcoms"). A library channel's membership follows the
+  library: it is rebuilt from its rules whenever the catalog is read again. It opens from the guide's Channels pill, from a Home card, or is the page itself when
   there is no Tunarr server and no kept channel.
 - **Watching** plays the library item the timeline airs now, from the moment the channel is at,
   quietly (`route::request_play_channel`: no PlayQueue, timeline or scrobble — a channel never

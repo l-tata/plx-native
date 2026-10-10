@@ -76,5 +76,12 @@
     "few": "{count} гадзіны",
     "many": "{count} гадзін",
     "other": "{count} гадзіны"
-  }
+  },
+  "livetv.studio.new_channel": "Новы канал",
+  "livetv.studio.new_body": "Стварыце канал з вашай бібліятэкі: выберыце жанр, дзесяцігоддзе, фільмы ці серыялы і іншае.",
+  "livetv.studio.discard": "Адкінуць",
+  "livetv.studio.made_from": "З «{title}»",
+  "livetv.studio.made_library": "З вашай бібліятэкі",
+  "livetv.studio.genre_any": "Любы жанр",
+  "livetv.studio.decade_any": "Любое дзесяцігоддзе"
 }

@@ -83,6 +83,7 @@ fn act_label(st: &Studio, act: Act, card: &Card<'_>) -> String {
             msg::livetv_studio_delete_confirm().to_owned(),
         Act::Delete => msg::livetv_studio_delete().to_owned(),
         Act::Edit => msg::livetv_studio_edit().to_owned(),
+        Act::Discard => msg::livetv_studio_discard().to_owned(),
     }
 }
 
@@ -104,7 +105,7 @@ fn act_row(st: &Studio, card: &Card<'_>, yours: bool, measure: &dyn plx_machine:
     };
     if st.zone == Zone::Edit {
         if let Some(r) = card.suggestion().and_then(|s| st.draft_of(s)) {
-            return studio::EDIT_ITEMS
+            return studio::edit_items(r, card.is_made())
                 .iter()
                 .map(|&item| {
                     let on = match item {
@@ -112,6 +113,8 @@ fn act_row(st: &Studio, card: &Card<'_>, yours: bool, measure: &dyn plx_machine:
                         studio::EditItem::Kinds => r.rules.kinds != plx_data::vchannel::recipe::Kinds::Both,
                         studio::EditItem::Rating => r.rules.max_rating_rank > 0,
                         studio::EditItem::Done => false,
+                        studio::EditItem::Genre => !r.rules.genres.is_empty(),
+                        studio::EditItem::Decade => r.rules.year_from > 0,
                     };
                     place(studio::edit_label(item, r), on)
                 })
@@ -147,7 +150,7 @@ fn texture(p: Painter, art: Option<(u16, &str)>, w: i32, h: i32) -> (u32, f32, f
 impl LiveTvScreen {
     pub(super) fn draw_studio(&self, p: Painter, view: LiveTvView<'_>, focused: bool, tick_ms: u32, measure: &dyn plx_machine::machine::Measure) {
         let st = &self.studio;
-        let rows = studio::rows(view);
+        let rows = studio::rows(view, self.studio.made());
         let yours = !rows[ROW_YOURS].is_empty();
         let now = plx_base::wallclock::now_ms();
         let card = st.focus(&rows);
@@ -219,7 +222,12 @@ impl LiveTvScreen {
         let x = MARGIN_X;
         let mut y = COPY_TOP;
         let (over, name, why, facts): (String, &str, &str, String) = match card {
+            c @ Card::Idea(s) if c.is_made() => {
+                let held = self.studio.estimate_of(s).copied().or_else(|| schedule.map(studio::schedule_estimate));
+                (msg::livetv_studio_new_channel().to_owned(), &s.name, &s.why, held.map(|e| studio::estimate_line(&e)).unwrap_or_default())
+            }
             Card::Idea(s) => (msg::livetv_studio_suggested().to_owned(), &s.name, &s.why, self.studio.estimate_of(s).map_or_else(|| s.tagline.clone(), studio::estimate_line)),
+            Card::Create => (String::new(), msg::livetv_studio_new_channel(), msg::livetv_studio_new_body(), String::new()),
             Card::Surprise(Some(s)) => (msg::livetv_studio_surprise().to_owned(), &s.name, &s.why, self.studio.estimate_of(s).map_or_else(|| s.tagline.clone(), studio::estimate_line)),
             Card::Surprise(None) => (String::new(), msg::livetv_studio_surprise(), msg::livetv_studio_surprise_body(), String::new()),
             Card::Channel(c) => (msg::livetv_studio_number(&c.number()), &c.recipe.name, &c.recipe.tagline, String::new()),
@@ -244,7 +252,7 @@ impl LiveTvScreen {
             y += label_h;
         }
         y += theme::space::SM;
-        if matches!(card, Card::Surprise(None)) {
+        if matches!(card, Card::Surprise(None) | Card::Create) {
             return;
         }
         let Some(s) = schedule.filter(|s| !s.is_empty()) else {
@@ -276,7 +284,7 @@ impl LiveTvScreen {
         y += label_h + theme::space::XS;
         // Up next: the next few, with their start times.
         let mut next = s.after(&slot);
-        let floor = acts_y(!studio::rows(view)[ROW_YOURS].is_empty()) - theme::space::SM;
+        let floor = acts_y(!studio::rows(view, self.studio.made())[ROW_YOURS].is_empty()) - theme::space::SM;
         for i in 0..studio::UP_NEXT {
             let Some(n) = next else { break };
             if y + label_h > floor {
@@ -300,7 +308,7 @@ impl LiveTvScreen {
         if t != 0 && th > 0.0 {
             p.tex_carded(t, r.cover_uv(tw, th, Crop::Centre), r, CARD_RAD, theme::TINT_WHITE, f);
         } else {
-            let (top, bot) = if matches!(card, Card::Surprise(_)) { (theme::GUIDE_CELL_NOW, theme::GUIDE_CELL) } else { (theme::GUIDE_CELL, theme::GUIDE_CELL) };
+            let (top, bot) = if matches!(card, Card::Surprise(_) | Card::Create) { (theme::GUIDE_CELL_NOW, theme::GUIDE_CELL) } else { (theme::GUIDE_CELL, theme::GUIDE_CELL) };
             p.focus_shadow(r, CARD_RAD, f);
             p.rect(r, CARD_RAD, top, bot, 0.0);
         }
@@ -311,6 +319,7 @@ impl LiveTvScreen {
             Card::Surprise(Some(s)) => &s.name,
             Card::Surprise(None) => plx_platform::i18n::msg::livetv_studio_surprise(),
             Card::Channel(c) => &c.recipe.name,
+            Card::Create => plx_platform::i18n::msg::livetv_studio_new_channel(),
         };
         let pad = theme::space::SM;
         let lh = measure.line_h(theme::size::LABEL);
@@ -333,7 +342,7 @@ impl LiveTvScreen {
     /// Where the engine places focus on the studio: the focused card, or its focused action.
     pub(super) fn studio_focus_rect(&self, view: LiveTvView<'_>, measure: &dyn plx_machine::machine::Measure) -> Rect {
         let st = &self.studio;
-        let rows = studio::rows(view);
+        let rows = studio::rows(view, self.studio.made());
         let yours = !rows[ROW_YOURS].is_empty();
         let Some(card) = st.focus(&rows) else { return guide_frame() };
         match st.zone {

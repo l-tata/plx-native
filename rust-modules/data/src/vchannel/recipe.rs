@@ -181,6 +181,45 @@ impl Recipe {
     }
 }
 
+impl Recipe {
+    /// A channel the person is making ("Make a Channel" on a show, season, collection or
+    /// playlist, or "New Channel" from the library): a fresh seed and a start that joins it
+    /// mid-programme, like a kept suggestion. A show or season airs in order; anything else
+    /// shuffled. The number is assigned when it is kept.
+    pub fn made(source: Source, name: &str, tagline: &str, now_ms: i64) -> Recipe {
+        let style = match source {
+            Source::Show { .. } | Source::Season { .. } => Style::InOrder,
+            _ => Style::Random,
+        };
+        let seed = super::schedule::mix(super::schedule::seed_of(name), now_ms as u64);
+        // Any start joins mid-programme; a few days back spreads two channels made the same
+        // minute apart.
+        let epoch_ms = now_ms - (seed % (3 * 24 * 3_600_000)) as i64;
+        Recipe { name: name.to_owned(), source, style, seed, epoch_ms, tagline: tagline.to_owned(), ..Default::default() }
+    }
+}
+
+/// The name a library channel takes from its rules ("90s Sitcoms", "Horror Movies", "Everything"),
+/// in the same words the suggestions use, so a channel built from parameters names itself.
+pub fn name_for(rules: &Rules) -> String {
+    use super::suggest::{decade_label, genre_noun};
+    let decade = (rules.year_from > 0 && rules.year_to >= rules.year_from).then_some(rules.year_from);
+    match (rules.genres.first(), decade) {
+        (Some(g), Some(d)) => format!("{} {}", decade_label(d), genre_noun(g, rules.kinds, true)),
+        (Some(g), None) => genre_noun(g, rules.kinds, false),
+        (None, Some(d)) => format!("{} {}", decade_label(d), match rules.kinds {
+            Kinds::Movies => "Movies",
+            Kinds::Episodes => "TV",
+            Kinds::Both => "Favourites",
+        }),
+        (None, None) => match rules.kinds {
+            Kinds::Movies => "All Movies".to_owned(),
+            Kinds::Episodes => "All Shows".to_owned(),
+            Kinds::Both => "Everything".to_owned(),
+        },
+    }
+}
+
 /// A channel name from a playlist title: the mark dropped.
 pub fn name_of_title(title: &str) -> &str {
     title.strip_prefix(TITLE_MARK).unwrap_or(title).trim()
@@ -258,6 +297,29 @@ mod tests {
         assert_eq!(next_number([]), 900);
         assert_eq!(next_number([900, 903]), 904);
         assert_eq!(next_number([5]), 900, "a number below the range does not drag new ones down");
+    }
+
+    #[test]
+    fn a_made_channel_airs_a_show_in_order_and_a_collection_shuffled() {
+        let show = Recipe::made(Source::Show { rk: "7".into() }, "Frasier", "", 1_700_000_000_000);
+        assert_eq!((show.style, show.name.as_str(), show.source.clone()), (Style::InOrder, "Frasier", Source::Show { rk: "7".into() }));
+        assert!(show.epoch_ms <= 1_700_000_000_000 && show.epoch_ms > 1_700_000_000_000 - 3 * 24 * 3_600_000);
+        assert_eq!(Recipe::made(Source::Collection { rk: "9".into() }, "Pixar", "", 1).style, Style::Random);
+    }
+
+    #[test]
+    fn a_library_channel_names_itself_from_its_rules() {
+        let r = |genres: &[&str], year: i64, kinds: Kinds| Rules {
+            genres: genres.iter().map(|g| g.to_string()).collect(),
+            year_from: year,
+            year_to: if year > 0 { year + 9 } else { 0 },
+            kinds,
+            ..Default::default()
+        };
+        assert_eq!(name_for(&r(&["Comedy"], 1990, Kinds::Episodes)), "90s Sitcoms");
+        assert_eq!(name_for(&r(&["Horror"], 0, Kinds::Movies)), "Horror Movies");
+        assert_eq!(name_for(&r(&[], 1980, Kinds::Movies)), "80s Movies");
+        assert_eq!(name_for(&r(&[], 0, Kinds::Both)), "Everything");
     }
 
     #[test]

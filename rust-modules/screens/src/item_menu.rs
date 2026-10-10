@@ -25,9 +25,9 @@
 //! **What remains excluded is excluded for a reason that does not dissolve.** A tile that is a
 //! PERSON or a TAG has no rating key and no watch state at all, so every row this module can build
 //! would be absent and the hold would open an empty panel: the detail page's cast headshots, and
-//! Search's Cast & Crew rows (`search::Item::Tag` has no rating key). A collection has a rating
-//! key but no watch state and no row here either ([`has_actions`] refuses it), so a hold on a
-//! Collections tile opens the collection page as OK does.
+//! Search's Cast & Crew rows (`search::Item::Tag` has no rating key). A collection or a playlist
+//! has a rating key but no watch state: its menu is the one row that can be done with it, *Make a
+//! Channel* ([`offers_channel`]), which a show and a season offer too.
 //!
 //! **Navigation owns its lifetime, phase and input scope** (restructure phase 10). It was
 //! `ui/item_menu.rs` — a `Popover` plus six `static mut`s (`POP`, `TABLE`, `ACTS`, `OPENER`,
@@ -110,6 +110,9 @@ pub enum Action {
     /// put the title with this guid on the profile's watchlist (`true`) or take it off (`false`)
     /// — `HubsCmd::EditWatchlist`. Its identity is the GUID, the one key plex.tv's list speaks.
     Watchlist { guid: String, add: bool },
+    /// make a Live TV channel from this show, season, collection or playlist (`kind` is the row's
+    /// catalog kind) — the channel studio opens on it, to preview and keep (`plx_data::vchannel`)
+    MakeChannel { rk: String, kind: c_int, title: String },
 }
 
 impl Action {
@@ -144,6 +147,7 @@ impl Action {
             | Action::SetVersion(rk, _) => rk,
             Action::PlayTrailer { rk, .. } => rk,
             Action::Watchlist { guid, .. } => guid,
+            Action::MakeChannel { rk, .. } => rk,
         }
     }
 
@@ -162,6 +166,7 @@ impl Action {
             Action::SetVersion(..) => 10,
             Action::Watchlist { add: true, .. } => 11,
             Action::Watchlist { add: false, .. } => 12,
+            Action::MakeChannel { .. } => 13,
         };
         c.u32(tag).str(self.rk());
         if let Action::SetVersion(_, index) = self {
@@ -169,6 +174,9 @@ impl Action {
         }
         if let Action::GoToShow(_, season) = self {
             c.u32(*season as u32);
+        }
+        if let Action::MakeChannel { kind, title, .. } = self {
+            c.u32(*kind as u32).str(title);
         }
         if let Action::PlayTrailer {
             part,
@@ -202,8 +210,39 @@ pub const SHAPE: &str =
 /// Is `m` an item the menu has anything to offer? A leaf or a show/season — i.e. everything the
 /// home shelves carry. Kept as a predicate so the caller can decline to present an empty panel.
 pub fn has_actions(m: &PmsMovie) -> bool {
-    !matches!(m.kind, plx_data::pms::KIND_COLLECTION | plx_data::pms::KIND_PLAYLIST | plx_data::pms::KIND_CHANNEL | plx_data::pms::KIND_CHANNEL_IDEA)
+    if m.rk.is_empty() {
+        return false;
+    }
+    match m.kind {
+        plx_data::pms::KIND_CHANNEL | plx_data::pms::KIND_CHANNEL_IDEA => false,
+        // A collection or a playlist has no watch state; its one row is Make a Channel.
+        plx_data::pms::KIND_COLLECTION | plx_data::pms::KIND_PLAYLIST => offers_channel(m),
+        _ => true,
+    }
+}
+
+/// Does `m` offer *Make a Channel*? A show, a season, a collection or a playlist on the server
+/// the profile's channels live on (`plex::current_server`, the server `vchannel` keeps them on):
+/// a title borrowed from another server could not be read back to air.
+pub fn offers_channel(m: &PmsMovie) -> bool {
+    matches!(m.kind, 1 | 2 | plx_data::pms::KIND_COLLECTION | plx_data::pms::KIND_PLAYLIST)
         && !m.rk.is_empty()
+        && (!m.sid.is_set() || m.sid == plx_plex::plex::current_server())
+}
+
+/// The *Make a Channel* row for `m`. A season's channel is named for its show as well.
+fn make_channel_row(m: &PmsMovie) -> FormSection<ItemRow, Action, Infallible> {
+    let title = if m.kind == 2 && !m.show_title.is_empty() {
+        format!("{} \u{b7} {}", m.show_title, m.title)
+    } else {
+        m.title.clone()
+    };
+    FormSection::new("").item(
+        ItemRow::MakeChannel,
+        RowKind::Button,
+        Action::MakeChannel { rk: m.rk.clone(), kind: m.kind, title },
+        Row::new(plx_platform::i18n::msg::browse_menu_make_channel()).licon(Icon::Show),
+    )
 }
 
 /// A menu row's identity: which of the seven rows it is. Hand-assigned keys, never a position —
@@ -225,6 +264,7 @@ pub enum ItemRow {
     /// a row of the version chooser: version `n`
     Version(u32),
     Watchlist,
+    MakeChannel,
 }
 
 impl ItemRow {
@@ -249,6 +289,7 @@ impl FormId for ItemRow {
             ItemRow::Shuffle => 9,
             ItemRow::Version(n) => 100 + n,
             ItemRow::Watchlist => 11,
+            ItemRow::MakeChannel => 12,
         })
     }
 }
@@ -613,9 +654,13 @@ impl ItemMenuScreen {
         }
         self.built = true;
         let form = match &self.arg.kind {
+            ItemMenuKind::Card { row, .. } if matches!(row.kind, plx_data::pms::KIND_COLLECTION | plx_data::pms::KIND_PLAYLIST) => {
+                Form::new().section(make_channel_row(row))
+            }
             ItemMenuKind::Card { row, from_deck } => {
                 let trailer = cached_trailer(self.arg.sid, row, meta);
-                build_with(row, *from_deck, plx_media::route::deck_press(), trailer.as_ref(), watchlist)
+                let form = build_with(row, *from_deck, plx_media::route::deck_press(), trailer.as_ref(), watchlist);
+                if offers_channel(row) { form.section(make_channel_row(row)) } else { form }
             }
             ItemMenuKind::Episode { mark } => build_episode(&self.arg.rk, *mark),
             ItemMenuKind::Season { mark } => build_season(&self.arg.rk, *mark),
@@ -1017,6 +1062,31 @@ mod tests {
             self.0.index_of(&id).is_some_and(|i| self.0.table.sections[0].rows[i].destructive)
         }
     }
+    /// *Make a Channel*: offered on a show, a season, a collection and a playlist from the server
+    /// the channels live on, never on a film, an episode, a channel or another server's title; a
+    /// season's channel is named for its show too.
+    #[test]
+    fn make_a_channel_is_offered_where_a_channel_can_be_made() {
+        let mut show = item(1, PosterMark::None);
+        show.title = "Frasier".into();
+        assert!(offers_channel(&show));
+        let mut season = item(2, PosterMark::None);
+        season.title = "Season 3".into();
+        season.show_title = "Frasier".into();
+        let row = built(Form::new().section(make_channel_row(&season)));
+        assert_eq!(row.action(ItemRow::MakeChannel), Action::MakeChannel { rk: "42".into(), kind: 2, title: "Frasier \u{b7} Season 3".into() });
+        for kind in [plx_data::pms::KIND_COLLECTION, plx_data::pms::KIND_PLAYLIST] {
+            let m = item(kind, PosterMark::None);
+            assert!(offers_channel(&m) && has_actions(&m), "kind {kind} opens a menu for its one row");
+        }
+        for kind in [0, 3, plx_data::pms::KIND_CHANNEL, plx_data::pms::KIND_CHANNEL_IDEA] {
+            assert!(!offers_channel(&item(kind, PosterMark::None)), "kind {kind}");
+        }
+        let mut borrowed = item(1, PosterMark::None);
+        borrowed.sid = plx_plex::plex::ServerId::from_raw(9);
+        assert!(!offers_channel(&borrowed), "another server's show cannot become a channel here");
+    }
+
     fn labels_of(menu: &Built) -> Vec<String> {
         labels(menu)
     }
@@ -1173,11 +1243,17 @@ mod tests {
         assert!(!menu.offers(ItemRow::GoToShow));
     }
 
+    /// A collection has no watch state and nothing to play from the start: its menu is the one
+    /// row that can be done with it, *Make a Channel* — and none at all from another server.
     #[test]
-    fn a_collection_has_no_item_menu_actions() {
+    fn a_collections_only_item_menu_row_is_make_a_channel() {
         let collection = PmsMovie { rk: "42".into(), kind: plx_data::pms::KIND_COLLECTION,
             ..Default::default() };
-        assert!(!has_actions(&collection), "a collection menu must not be openable before its page exists");
+        assert!(has_actions(&collection));
+        let menu = built(Form::new().section(make_channel_row(&collection)));
+        assert_eq!(menu.ids(), [ItemRow::MakeChannel]);
+        let borrowed = PmsMovie { sid: plx_plex::plex::ServerId::from_raw(9), ..collection };
+        assert!(!has_actions(&borrowed), "nothing to offer for another server's collection");
     }
 
     /// A show or season never offers *Play from Start* — there is no single part to start — and

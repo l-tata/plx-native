@@ -100,10 +100,11 @@ impl std::fmt::Debug for ShelfRows {
     }
 }
 
-/// Does a card of this kind open the item menu on a hold? Not a channel (it only tunes), a
-/// collection or a playlist (no watch state to mark, nothing to play from the start).
+/// Does a card of this kind open the item menu on a hold? Not a channel (it only tunes) or a
+/// suggested one (OK opens the studio). A collection or a playlist does: its one row is *Make a
+/// Channel* (`item_menu::offers_channel`).
 pub fn item_has_menu_kind(kind: c_int) -> bool {
-    !matches!(kind, KIND_CHANNEL | KIND_CHANNEL_IDEA | KIND_COLLECTION | KIND_PLAYLIST)
+    !matches!(kind, KIND_CHANNEL | KIND_CHANNEL_IDEA)
 }
 
 /// Is `hub_id` one of the shelves the app assembles ([`APP_SHELF_PREFIX`])?

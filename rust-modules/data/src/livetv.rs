@@ -567,6 +567,13 @@ impl LiveTvState {
         self.revision += 1;
     }
 
+    /// Install the library's catalog for the virtual channels directly.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn install_catalog_for_test(&mut self, catalog: crate::vchannel::catalog::Catalog) {
+        self.virtuals.install_catalog_for_test(catalog);
+        self.revision += 1;
+    }
+
     /// Land a load result as if a worker had returned it (tests).
     #[cfg(test)]
     fn land_for_test(&mut self, result: LoadResult, now_ms: i64) {

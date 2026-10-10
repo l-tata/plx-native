@@ -198,7 +198,7 @@ fn a_servers_video_playlists_become_playlist_cards() {
     assert_eq!(rows.len(), 1, "an empty playlist and a non-playlist row are left off");
     assert_eq!((rows[0].kind, rows[0].rk.as_str(), rows[0].thumb.as_str(), rows[0].child_count),
         (KIND_PLAYLIST, "77", "/playlists/77/composite/1", 4));
-    assert!(!item_has_menu_kind(KIND_PLAYLIST));
+    assert!(item_has_menu_kind(KIND_PLAYLIST), "a playlist's hold offers Make a Channel");
 }
 
 #[test]

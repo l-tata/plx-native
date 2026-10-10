@@ -735,7 +735,7 @@ impl LiveTvScreen {
     /// that picture is on its way, the flat surface when the airing has no picture at all.
     fn key_ground(&mut self, view: LiveTvView<'_>, face: Face, dt: f32) {
         if face == Face::Studio {
-            let rows = studio::rows(view);
+            let rows = studio::rows(view, self.studio.made());
             let card = self.studio.focus(&rows);
             let art = card.and_then(|c| studio_draw::card_art(&c, self.studio.schedule(&c, view), plx_base::wallclock::now_ms()));
             match art {
@@ -808,6 +808,13 @@ impl<H: LiveTvLike> Machine<H> for LiveTvScreen {
             ScreenEvent::App(crate::registry::AppMsg::LiveTvSetup) => {
                 self.studio.open = false;
                 self.show_setup();
+                fx.invalidate(Provenance::Input);
+                Handled::Yes
+            }
+            ScreenEvent::App(crate::registry::AppMsg::LiveTvMake { recipe, why }) => {
+                self.force_setup = false;
+                self.studio.open_make((**recipe).clone(), why.clone(), H::livetv(cx));
+                self.reseat(fx);
                 fx.invalidate(Provenance::Input);
                 Handled::Yes
             }

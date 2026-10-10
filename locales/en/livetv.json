@@ -323,5 +323,36 @@
       "count": "i64"
     },
     "description": "Live TV channel studio: how many hours of programmes a channel holds"
+  },
+  "livetv.studio.new_channel": {
+    "value": "New Channel",
+    "description": "Live TV channel studio: the card that starts a channel built from the library by the viewer's own options; also the overline over a channel being made"
+  },
+  "livetv.studio.new_body": {
+    "value": "Build a channel from your library: choose a genre, a decade, films or shows, and more.",
+    "description": "Live TV channel studio: explanation on the New Channel card"
+  },
+  "livetv.studio.discard": {
+    "value": "Discard",
+    "description": "Live TV channel studio: button that drops a channel being made, without keeping it"
+  },
+  "livetv.studio.made_from": {
+    "value": "From {title}",
+    "description": "Live TV channel studio: why line for a channel the viewer made from a show, collection or playlist. {title} is its name.",
+    "args": {
+      "title": "str"
+    }
+  },
+  "livetv.studio.made_library": {
+    "value": "From your library",
+    "description": "Live TV channel studio: why line for a channel built from the viewer's own options"
+  },
+  "livetv.studio.genre_any": {
+    "value": "Any Genre",
+    "description": "Live TV channel option: no genre limit"
+  },
+  "livetv.studio.decade_any": {
+    "value": "Any Decade",
+    "description": "Live TV channel option: no decade limit"
   }
 }

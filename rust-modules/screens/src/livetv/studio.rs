@@ -1,6 +1,10 @@
 //! **The channel studio** — the Live TV page's face for the channels the app makes out of the
 //! viewer's own library (`plx_data::vchannel`): the channels suggested for this profile, *Surprise
-//! me*, and the channels it kept.
+//! me*, the channels it kept, and the channel the viewer is making — from a show, season,
+//! collection or playlist (the card menu's *Make a Channel*, [`Studio::open_make`]), or from the
+//! library by its own options (*New Channel*, whose Genre and Decade options offer only values that
+//! still air something, and which names itself after them, `recipe::name_for`). A channel being
+//! made leads the suggestion row, is discarded rather than dismissed, and leaves the row once kept.
 //!
 //! The page is a billboard over two rows. The billboard is the focused card, full bleed: the
 //! picture of what would be on right now, the channel's name, why it is suggested, what it holds,
@@ -53,6 +57,8 @@ pub enum Card<'a> {
     /// *Surprise me*, with the channel it last drew.
     Surprise(Option<&'a Suggestion>),
     Channel(&'a VChannel),
+    /// *New Channel*: OK starts a channel built from the library by the viewer's own options.
+    Create,
 }
 
 impl<'a> Card<'a> {
@@ -62,7 +68,13 @@ impl<'a> Card<'a> {
             Card::Idea(s) => s.id.clone(),
             Card::Surprise(_) => SURPRISE_ID.to_owned(),
             Card::Channel(c) => format!("pl:{}", c.playlist),
+            Card::Create => CREATE_ID.to_owned(),
         }
+    }
+
+    /// Is this the channel the viewer is making (from a title, or from the library)?
+    pub fn is_made(&self) -> bool {
+        matches!(self, Card::Idea(s) if s.id.starts_with(MADE_PREFIX))
     }
 
     /// The suggestion a draft is made from: the idea, or the surprise drawn.
@@ -70,10 +82,16 @@ impl<'a> Card<'a> {
         match self {
             Card::Idea(s) => Some(s),
             Card::Surprise(s) => *s,
-            Card::Channel(_) => None,
+            Card::Channel(_) | Card::Create => None,
         }
     }
 }
+
+/// The New Channel card's identity.
+pub const CREATE_ID: &str = "create";
+/// The prefix of the id of the channel being made: it is shown as a suggestion card, but it is
+/// the viewer's own and is discarded rather than dismissed.
+pub const MADE_PREFIX: &str = "made:";
 
 /// What a card's action row offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,11 +105,17 @@ pub enum Act {
     Delete,
     /// Open the suggestion's options ([`EditItem`]).
     Edit,
+    /// Drop the channel being made, without keeping it.
+    Discard,
 }
 
 /// One of a suggestion's options, as the Edit row offers them left to right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditItem {
+    /// A genre from the library's own (a channel built from the library only).
+    Genre,
+    /// A decade the library holds titles from (likewise).
+    Decade,
     /// Films and shows, films only, shows only.
     Kinds,
     /// Only titles the profile has not watched.
@@ -102,6 +126,85 @@ pub enum EditItem {
 }
 
 pub const EDIT_ITEMS: [EditItem; 4] = [EditItem::Kinds, EditItem::Unwatched, EditItem::Rating, EditItem::Done];
+/// A channel built from the library chooses its genre and decade too.
+pub const LIBRARY_EDIT_ITEMS: [EditItem; 6] =
+    [EditItem::Genre, EditItem::Decade, EditItem::Kinds, EditItem::Unwatched, EditItem::Rating, EditItem::Done];
+
+/// The options `recipe` offers: a channel the viewer is building from the library chooses what it
+/// draws from; any other narrows what its source holds.
+pub fn edit_items(recipe: &Recipe, made: bool) -> &'static [EditItem] {
+    if made && recipe.source == plx_data::vchannel::recipe::Source::Library { &LIBRARY_EDIT_ITEMS } else { &EDIT_ITEMS }
+}
+
+/// The genres the Genre option cycles for `rules`: the library's, most titles first, keeping only
+/// those that would still air something with the channel's other options as they are — so
+/// cycling never lands on an empty channel.
+pub fn genre_choices(cat: &plx_data::vchannel::catalog::Catalog, rules: &plx_data::vchannel::recipe::Rules) -> Vec<String> {
+    library_genres(cat)
+        .into_iter()
+        .filter(|g| cat.estimate(&plx_data::vchannel::recipe::Rules { genres: vec![g.clone()], ..rules.clone() }).programmes > 0)
+        .collect()
+}
+
+/// The decades the Decade option cycles for `rules`, oldest first, likewise only those that air
+/// something with the other options.
+pub fn decade_choices(cat: &plx_data::vchannel::catalog::Catalog, rules: &plx_data::vchannel::recipe::Rules) -> Vec<i64> {
+    library_decades(cat)
+        .into_iter()
+        .filter(|d| cat.estimate(&plx_data::vchannel::recipe::Rules { year_from: *d, year_to: d + 9, ..rules.clone() }).programmes > 0)
+        .collect()
+}
+
+/// The library's genres, most titles first, then by name.
+pub fn library_genres(cat: &plx_data::vchannel::catalog::Catalog) -> Vec<String> {
+    let mut count: HashMap<String, usize> = HashMap::new();
+    let mut spelled: HashMap<String, String> = HashMap::new();
+    let genres = cat.movies.iter().flat_map(|p| p.genres.iter()).chain(cat.shows.iter().flat_map(|s| s.genres.iter()));
+    for g in genres {
+        let key = g.trim().to_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        *count.entry(key.clone()).or_default() += 1;
+        spelled.entry(key).or_insert_with(|| g.trim().to_owned());
+    }
+    let mut v: Vec<(String, usize)> = count.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    v.into_iter().take(16).map(|(k, _)| spelled.remove(&k).unwrap_or(k)).collect()
+}
+
+/// The decades the library holds titles from, oldest first.
+pub fn library_decades(cat: &plx_data::vchannel::catalog::Catalog) -> Vec<i64> {
+    let mut v: Vec<i64> = cat.movies.iter().map(|p| p.year).chain(cat.shows.iter().map(|s| s.year))
+        .filter(|y| *y >= 1900).map(|y| y / 10 * 10).collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// The value after `current` in `values`, wrapping through "any" (`None`).
+fn cycle<T: Clone + PartialEq>(values: &[T], current: Option<&T>) -> Option<T> {
+    match current.and_then(|c| values.iter().position(|v| v == c)) {
+        Some(i) if i + 1 < values.len() => Some(values[i + 1].clone()),
+        Some(_) => None,
+        None => values.first().cloned(),
+    }
+}
+
+/// What a timeline holds, for a channel whose source the catalog cannot count (a show, a
+/// collection, a playlist): its films, its shows and its hours.
+pub fn schedule_estimate(s: &Schedule) -> Estimate {
+    let progs = s.programs();
+    let mut shows: Vec<&str> = progs.iter().filter(|p| p.episode && !p.show_rk.is_empty()).map(|p| p.show_rk.as_str()).collect();
+    shows.sort_unstable();
+    shows.dedup();
+    Estimate {
+        films: progs.iter().filter(|p| !p.episode).count(),
+        shows: shows.len(),
+        programmes: progs.len(),
+        hours: progs.iter().map(|p| p.dur_ms.max(0)).sum::<i64>() as f64 / 3_600_000.0,
+    }
+}
 
 /// The next kinds, as the option cycles them.
 pub fn next_kinds(k: Kinds) -> Kinds {
@@ -141,6 +244,9 @@ pub fn edit_label(item: EditItem, recipe: &Recipe) -> String {
         EditItem::Rating if recipe.rules.max_rating_rank == 0 => msg::livetv_studio_rating_any().to_owned(),
         EditItem::Rating => msg::livetv_studio_rating_up_to(rating_name(recipe.rules.max_rating_rank)),
         EditItem::Done => msg::livetv_studio_done().to_owned(),
+        EditItem::Genre => recipe.rules.genres.first().cloned().unwrap_or_else(|| msg::livetv_studio_genre_any().to_owned()),
+        EditItem::Decade if recipe.rules.year_from > 0 => plx_data::vchannel::suggest::decade_label(recipe.rules.year_from),
+        EditItem::Decade => msg::livetv_studio_decade_any().to_owned(),
     }
 }
 
@@ -164,7 +270,9 @@ pub fn estimate_line(e: &Estimate) -> String {
 /// The actions of `card`, left to right.
 pub fn acts(card: &Card<'_>) -> Vec<Act> {
     match card {
+        c @ Card::Idea(_) if c.is_made() => vec![Act::Keep, Act::Reshuffle, Act::Order, Act::Edit, Act::Discard],
         Card::Idea(_) => vec![Act::Keep, Act::Reshuffle, Act::Order, Act::Edit, Act::NotInterested],
+        Card::Create => Vec::new(),
         Card::Surprise(None) => vec![Act::Surprise],
         Card::Surprise(Some(_)) => vec![Act::Keep, Act::Surprise, Act::Reshuffle, Act::Order, Act::Edit],
         Card::Channel(_) => vec![Act::Watch, Act::Reshuffle, Act::Order, Act::Delete],
@@ -188,15 +296,20 @@ pub fn style_name(s: Style) -> &'static str {
     }
 }
 
-/// The rows' cards for this view: the suggestions then *Surprise me* (offered once the library has
-/// been read), and the kept channels.
-pub fn rows(view: LiveTvView<'_>) -> [Vec<Card<'_>>; 2] {
+/// The rows' cards for this view: the channel being made (`made`) first, then the suggestions and
+/// *Surprise me* (offered once the library has been read); and the kept channels, then *New
+/// Channel* (once the library has been read, since it is built from it).
+pub fn rows<'a>(view: LiveTvView<'a>, made: Option<&'a Suggestion>) -> [Vec<Card<'a>>; 2] {
     let v = view.virtuals();
-    let mut suggested: Vec<Card<'_>> = v.suggestions().iter().map(Card::Idea).collect();
-    if !suggested.is_empty() || v.catalog().is_some() {
+    let mut suggested: Vec<Card<'a>> = made.into_iter().map(Card::Idea).collect();
+    suggested.extend(v.suggestions().iter().map(Card::Idea));
+    if !v.suggestions().is_empty() || v.catalog().is_some() {
         suggested.push(Card::Surprise(v.surprise()));
     }
-    let yours = v.channels().iter().map(Card::Channel).collect();
+    let mut yours: Vec<Card<'a>> = v.channels().iter().map(Card::Channel).collect();
+    if v.catalog().is_some() {
+        yours.push(Card::Create);
+    }
     [suggested, yours]
 }
 
@@ -277,6 +390,12 @@ pub struct Studio {
     /// What each edited draft holds, by suggestion id, worked out from the catalog when an
     /// option changed (so the billboard's count follows the options at once).
     estimates: HashMap<String, Estimate>,
+    /// The channel being made, shown as the first card ("Make a Channel" on a title, or *New
+    /// Channel*); its draft is in [`Self::drafts`] under its id.
+    made: Option<Suggestion>,
+    made_count: u64,
+    /// The Keep in flight is of the channel being made (it leaves the row once kept).
+    keeping_made: bool,
 }
 
 impl Default for Studio {
@@ -298,6 +417,9 @@ impl Default for Studio {
             toast: None,
             edit: 0,
             estimates: HashMap::new(),
+            made: None,
+            made_count: 0,
+            keeping_made: false,
         }
     }
 }
@@ -309,6 +431,54 @@ impl Studio {
         self.zone = Zone::Cards;
         self.want = want.filter(|w| !w.is_empty());
         self.seen_done = view.virtuals().done().0;
+    }
+
+    /// The channel being made, if any.
+    pub fn made(&self) -> Option<&Suggestion> {
+        self.made.as_ref()
+    }
+
+    /// Start making a channel from `recipe` ("Make a Channel" on a title): it becomes the first
+    /// card, focused, and previews as soon as focus rests on it.
+    pub fn open_make(&mut self, recipe: Recipe, why: String, view: LiveTvView<'_>) {
+        self.made_count += 1;
+        let id = format!("{MADE_PREFIX}{}", self.made_count);
+        if let Some(old) = self.made.take() {
+            self.drafts.remove(&old.id);
+            self.estimates.remove(&old.id);
+        }
+        self.made = Some(Suggestion { id: id.clone(), name: recipe.name.clone(), why, tagline: String::new(), style: recipe.style, ..Default::default() });
+        self.drafts.insert(id.clone(), Recipe { origin: String::new(), ..recipe });
+        self.open = true;
+        self.zone = Zone::Cards;
+        self.want = Some(id);
+        self.seen_done = view.virtuals().done().0;
+    }
+
+    /// *New Channel*: a channel built from the whole library, its options open at once.
+    fn start_new(&mut self, view: LiveTvView<'_>, wall_ms: i64) {
+        let rules = plx_data::vchannel::recipe::Rules::default();
+        let name = plx_data::vchannel::recipe::name_for(&rules);
+        let why = plx_platform::i18n::msg::livetv_studio_made_library().to_owned();
+        let recipe = Recipe { rules, ..Recipe::made(plx_data::vchannel::recipe::Source::Library, &name, &why, wall_ms) };
+        self.open_make(recipe, why, view);
+        let id = self.made.as_ref().map(|m| m.id.clone()).unwrap_or_default();
+        if let (Some(cat), Some(r)) = (view.virtuals().catalog().map(|c| c.as_ref()), self.drafts.get(&id)) {
+            self.estimates.insert(id.clone(), cat.estimate(&r.rules));
+        }
+        self.row = ROW_SUGGESTED;
+        self.col[ROW_SUGGESTED] = 0;
+        self.want = None;
+        self.zone = Zone::Edit;
+        self.edit = 0;
+    }
+
+    /// Forget the channel being made.
+    fn drop_made(&mut self) {
+        if let Some(m) = self.made.take() {
+            self.drafts.remove(&m.id);
+            self.estimates.remove(&m.id);
+        }
     }
 
     /// The focused card, after clamping the cursor to the rows.
@@ -358,24 +528,52 @@ impl Studio {
         self.estimates.get(&s.id)
     }
 
-    /// OK on an option: change the draft and preview it again, or close the options.
+    /// OK on an option: change the draft and preview it again, or close the options. A channel
+    /// being built from the library renames itself after its options ("90s Sitcoms").
     fn apply_edit(&mut self, view: LiveTvView<'_>, wall_ms: i64, out: &mut Vec<Out>) {
-        let rows = rows(view);
-        let Some(s) = self.focus(&rows).and_then(|c| c.suggestion().cloned()) else { return };
-        let item = EDIT_ITEMS[self.edit.min(EDIT_ITEMS.len() - 1)];
-        let change: fn(&mut Recipe) = match item {
-            EditItem::Kinds => |r| r.rules.kinds = next_kinds(r.rules.kinds),
-            EditItem::Unwatched => |r| r.rules.unwatched_only = !r.rules.unwatched_only,
-            EditItem::Rating => |r| r.rules.max_rating_rank = next_rating(r.rules.max_rating_rank),
+        let made = self.made.clone();
+        let rows = rows(view, made.as_ref());
+        let Some(card) = self.focus(&rows) else { return };
+        let is_made = card.is_made();
+        let Some(s) = card.suggestion().cloned() else { return };
+        let draft = self.draft(&s, wall_ms).clone();
+        let items = edit_items(&draft, is_made);
+        let item = items[self.edit.min(items.len() - 1)];
+        let cat = view.virtuals().catalog().map(|c| c.as_ref());
+        let mut next = draft.clone();
+        match item {
+            EditItem::Kinds => next.rules.kinds = next_kinds(next.rules.kinds),
+            EditItem::Unwatched => next.rules.unwatched_only = !next.rules.unwatched_only,
+            EditItem::Rating => next.rules.max_rating_rank = next_rating(next.rules.max_rating_rank),
+            EditItem::Genre => {
+                let genres = cat.map(|c| genre_choices(c, &next.rules)).unwrap_or_default();
+                next.rules.genres = cycle(&genres, next.rules.genres.first()).into_iter().collect();
+            }
+            EditItem::Decade => {
+                let decades = cat.map(|c| decade_choices(c, &next.rules)).unwrap_or_default();
+                let now = (next.rules.year_from > 0).then_some(next.rules.year_from);
+                match cycle(&decades, now.as_ref()) {
+                    Some(d) => (next.rules.year_from, next.rules.year_to) = (d, d + 9),
+                    None => (next.rules.year_from, next.rules.year_to) = (0, 0),
+                }
+            }
             EditItem::Done => {
                 self.zone = Zone::Actions;
-                self.act = acts(&Card::Idea(&s)).iter().position(|a| *a == Act::Edit).unwrap_or(0);
+                self.act = acts(&card).iter().position(|a| *a == Act::Edit).unwrap_or(0);
                 return;
             }
-        };
-        self.redraft(&s, wall_ms, change, out);
-        if let (Some(cat), Some(r)) = (view.virtuals().catalog(), self.drafts.get(&s.id)) {
-            self.estimates.insert(s.id.clone(), cat.estimate(&r.rules));
+        }
+        if is_made && next.source == plx_data::vchannel::recipe::Source::Library {
+            next.name = plx_data::vchannel::recipe::name_for(&next.rules);
+            if let Some(m) = self.made.as_mut() {
+                m.name = next.name.clone();
+            }
+        }
+        self.redraft(&s, wall_ms, move |r| *r = next, out);
+        if let (Some(cat), Some(r)) = (cat, self.drafts.get(&s.id)) {
+            if r.source == plx_data::vchannel::recipe::Source::Library {
+                self.estimates.insert(s.id.clone(), cat.estimate(&r.rules));
+            }
         }
     }
 
@@ -410,6 +608,10 @@ impl Studio {
             match done {
                 WriteDone::Kept { token, playlist } if self.keeping == Some(*token) => {
                     self.keeping = None;
+                    if self.keeping_made {
+                        self.drop_made();
+                        self.keeping_made = false;
+                    }
                     let number = v.channel(playlist).map(|c| c.number()).unwrap_or_default();
                     self.toast = Some((plx_platform::i18n::msg::livetv_studio_kept(&number), now_ms));
                     self.want = Some(format!("pl:{playlist}"));
@@ -429,7 +631,8 @@ impl Studio {
             self.toast = None;
             changed = true;
         }
-        let rows = rows(view);
+        let made = self.made.clone();
+        let rows = rows(view, made.as_ref());
         self.clamp(&rows);
         let Some(card) = self.focus(&rows).filter(|_| focused) else {
             self.rest = None;
@@ -472,7 +675,8 @@ impl Studio {
 
     /// Perform the focused card's action.
     pub fn activate(&mut self, view: LiveTvView<'_>, wall_ms: i64, out: &mut Vec<Out>) {
-        let rows = rows(view);
+        let made = self.made.clone();
+        let rows = rows(view, made.as_ref());
         let Some(card) = self.focus(&rows) else { return };
         let list = acts(&card);
         let Some(act) = list.get(self.act.min(list.len().saturating_sub(1))).copied() else { return };
@@ -497,6 +701,7 @@ impl Studio {
                 };
                 let recipe = self.draft(&s, wall_ms).clone();
                 self.keeping = Some(token);
+                self.keeping_made = s.id.starts_with(MADE_PREFIX);
                 out.push(Out::Store(VCmd::Keep { token, recipe }));
             }
             (Act::Reshuffle, Card::Channel(c)) => {
@@ -525,6 +730,10 @@ impl Studio {
                 self.zone = Zone::Cards;
             }
             (Act::NotInterested, _) => {}
+            (Act::Discard, _) => {
+                self.drop_made();
+                self.zone = Zone::Cards;
+            }
             (Act::Surprise, _) => {
                 out.push(Out::Store(VCmd::Surprise { seed: mix(wall_ms as u64, self.token + 1) }));
                 self.token += 1;
@@ -556,7 +765,8 @@ impl Studio {
     /// A direction or OK / BACK. `false` hands the key to the engine (UP off the action row).
     pub fn key(&mut self, key: plx_machine::machine::Key, view: LiveTvView<'_>, wall_ms: i64, out: &mut Vec<Out>) -> bool {
         use plx_machine::machine::Key;
-        let rows = rows(view);
+        let made = self.made.clone();
+        let rows = rows(view, made.as_ref());
         self.clamp(&rows);
         let Some(card) = self.focus(&rows) else {
             return match key {
@@ -579,7 +789,10 @@ impl Studio {
             }
             (Zone::Actions, Key::Ok) => self.activate(view, wall_ms, out),
             (Zone::Edit, Key::Left) => self.edit = self.edit.saturating_sub(1),
-            (Zone::Edit, Key::Right) => self.edit = (self.edit + 1).min(EDIT_ITEMS.len() - 1),
+            (Zone::Edit, Key::Right) => {
+                let n = card.suggestion().and_then(|s| self.draft_of(s)).map_or(EDIT_ITEMS.len(), |r| edit_items(r, card.is_made()).len());
+                self.edit = (self.edit + 1).min(n - 1);
+            }
             (Zone::Edit, Key::Up) => return false,
             (Zone::Edit, Key::Down) => self.zone = Zone::Cards,
             (Zone::Edit, Key::Back) => self.zone = Zone::Actions,
@@ -601,6 +814,7 @@ impl Studio {
                     self.row = ROW_YOURS;
                 }
             }
+            (Zone::Cards, Key::Ok) if matches!(card, Card::Create) => self.start_new(view, wall_ms),
             (Zone::Cards, Key::Ok) => {
                 self.zone = Zone::Actions;
                 self.act = 0;

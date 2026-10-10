@@ -1152,6 +1152,9 @@ pub enum AppMsg {
     /// Open the Live TV page's channel studio on this card (a suggestion's id, `surprise`; empty
     /// for none) — a Home Suggested Channels card was pressed.
     LiveTvStudio(String),
+    /// Open the channel studio making a channel from this recipe ("Make a Channel" on a show,
+    /// season, collection or playlist), with the line that says where it comes from.
+    LiveTvMake { recipe: Box<plx_data::vchannel::recipe::Recipe>, why: String },
     /// The *Also available* surface committed a row: open that copy's own page. The SURFACE names
     /// the destination and the PAGE navigates, which is `LibraryMenu`'s shape (`LibrarySelect`) and
     /// what keeps "what a press means on the Detail page" in one place instead of two.

@@ -685,6 +685,14 @@ impl Channels {
         self.revision += 1;
     }
 
+    /// Install a catalog directly (tests and the simulator's fixtures).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn install_catalog_for_test(&mut self, catalog: Catalog) {
+        self.scope = Some(Scope::current());
+        self.catalog = Some(Arc::new(catalog));
+        self.revision += 1;
+    }
+
     /// Install a row of suggestions directly (tests and the simulator's fixtures).
     #[cfg(any(test, feature = "test-support"))]
     pub fn install_suggestions_for_test(&mut self, suggestions: Vec<Suggestion>) {

@@ -485,5 +485,6 @@
   "browse.home.playlists": "Listas de reproducción",
   "browse.home.channels": "Canales sugeridos",
   "browse.home.surprise_title": "Sorpréndeme",
-  "browse.home.surprise_why": "Un canal en el que no habrías pensado"
+  "browse.home.surprise_why": "Un canal en el que no habrías pensado",
+  "browse.menu.make_channel": "Crear un canal"
 }

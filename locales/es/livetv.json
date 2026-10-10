@@ -75,5 +75,12 @@
     "one": "{count} hora",
     "many": "{count} horas",
     "other": "{count} horas"
-  }
+  },
+  "livetv.studio.new_channel": "Nuevo canal",
+  "livetv.studio.new_body": "Crea un canal con tu biblioteca: elige un género, una década, películas o series y más.",
+  "livetv.studio.discard": "Descartar",
+  "livetv.studio.made_from": "De {title}",
+  "livetv.studio.made_library": "De tu biblioteca",
+  "livetv.studio.genre_any": "Cualquier género",
+  "livetv.studio.decade_any": "Cualquier década"
 }

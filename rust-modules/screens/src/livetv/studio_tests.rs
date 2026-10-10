@@ -29,7 +29,7 @@ fn state(ideas: &[&str], channels: Vec<VChannel>) -> LiveTvState {
 #[test]
 fn the_rows_hold_the_suggestions_then_surprise_and_the_kept_channels() {
     let s = state(&["a", "b"], vec![channel("p1", 900)]);
-    let rows = rows(s.view());
+    let rows = rows(s.view(), None);
     let ids: Vec<String> = rows[ROW_SUGGESTED].iter().map(|c| c.id()).collect();
     assert_eq!(ids, ["a", "b", SURPRISE_ID]);
     assert_eq!(rows[ROW_YOURS].iter().map(|c| c.id()).collect::<Vec<_>>(), ["pl:p1"]);
@@ -99,7 +99,7 @@ fn keep_uses_the_previews_token_and_is_not_sent_twice() {
 fn a_kept_channel_writes_its_changes_and_delete_asks_twice() {
     let s = state(&[], vec![channel("p1", 900)]);
     let mut st = Studio::default();
-    st.clamp(&rows(s.view()));
+    st.clamp(&rows(s.view(), None));
     assert_eq!(st.row, ROW_YOURS, "an empty suggestion row hands the cursor to the kept channels");
     let mut out = Vec::new();
     st.zone = Zone::Actions;
@@ -122,7 +122,7 @@ fn not_interested_dismisses_and_surprise_draws() {
     let mut st = Studio::default();
     let mut out = Vec::new();
     st.zone = Zone::Actions;
-    st.act = acts(&rows(s.view())[ROW_SUGGESTED][0]).iter().position(|a| *a == Act::NotInterested).unwrap();
+    st.act = acts(&rows(s.view(), None)[ROW_SUGGESTED][0]).iter().position(|a| *a == Act::NotInterested).unwrap();
     st.activate(s.view(), NOW, &mut out);
     assert_eq!(out.pop(), Some(Out::Store(VCmd::Dismiss { id: "a".into() })));
     st.col[ROW_SUGGESTED] = 2; // Surprise me
@@ -137,13 +137,13 @@ fn a_wanted_card_is_seated_when_it_exists() {
     let s = state(&["a", "b"], vec![channel("p1", 900)]);
     let mut st = Studio::default();
     st.open_on(Some("b".into()), s.view());
-    st.clamp(&rows(s.view()));
+    st.clamp(&rows(s.view(), None));
     assert_eq!((st.row, st.col[ROW_SUGGESTED]), (ROW_SUGGESTED, 1));
     st.want = Some("pl:p1".into());
-    st.clamp(&rows(s.view()));
+    st.clamp(&rows(s.view(), None));
     assert_eq!(st.row, ROW_YOURS);
     st.want = Some("pl:later".into());
-    st.clamp(&rows(s.view()));
+    st.clamp(&rows(s.view(), None));
     assert_eq!(st.want.as_deref(), Some("pl:later"), "kept until the channel lands");
 }
 
@@ -174,7 +174,7 @@ fn edit_opens_the_options_and_each_change_previews_the_draft_again() {
     let mut st = Studio::default();
     let mut out = Vec::new();
     st.zone = Zone::Actions;
-    st.act = acts(&rows(s.view())[ROW_SUGGESTED][0]).iter().position(|a| *a == Act::Edit).unwrap();
+    st.act = acts(&rows(s.view(), None)[ROW_SUGGESTED][0]).iter().position(|a| *a == Act::Edit).unwrap();
     st.activate(s.view(), NOW, &mut out);
     assert_eq!(st.zone, Zone::Edit);
     assert!(out.is_empty(), "opening the options changes nothing");
@@ -196,7 +196,7 @@ fn edit_opens_the_options_and_each_change_previews_the_draft_again() {
     // Done returns to the actions, on Edit; Keep then keeps the edited draft.
     st.key(Key::Right, s.view(), NOW, &mut out);
     st.key(Key::Ok, s.view(), NOW, &mut out);
-    assert_eq!((st.zone, acts(&rows(s.view())[ROW_SUGGESTED][0])[st.act]), (Zone::Actions, Act::Edit));
+    assert_eq!((st.zone, acts(&rows(s.view(), None)[ROW_SUGGESTED][0])[st.act]), (Zone::Actions, Act::Edit));
     st.act = 0;
     st.activate(s.view(), NOW, &mut out);
     let Some(Out::Store(VCmd::Keep { recipe, .. })) = out.pop() else { panic!() };
@@ -210,4 +210,75 @@ fn options_cycle_and_the_count_reads_naturally() {
     let line = estimate_line(&Estimate { films: 1, shows: 0, programmes: 1, hours: 2.4 });
     assert_eq!(line, format!("{} \u{b7} {}", plx_platform::i18n::msg::browse_person_films(1), plx_platform::i18n::msg::livetv_studio_hours(2)));
     assert_eq!(estimate_line(&Estimate::default()), "");
+}
+
+fn catalog_state() -> LiveTvState {
+    use plx_data::vchannel::catalog::Catalog;
+    let film = |rk: &str, year: i64, genre: &str| Program { rk: rk.into(), title: rk.into(), year, genres: vec![genre.into()], dur_ms: 90 * 60_000, ..Default::default() };
+    let cat = Catalog { sid: 0, movies: vec![film("a", 1985, "Comedy"), film("b", 1992, "Comedy"), film("c", 1994, "Horror"), film("d", 1971, "Horror")], ..Default::default() };
+    let mut s = state(&["x"], Vec::new());
+    s.install_catalog_for_test(cat);
+    s
+}
+
+#[test]
+fn new_channel_starts_from_the_library_and_names_itself_from_its_options() {
+    let s = catalog_state();
+    let mut st = Studio::default();
+    let mut out = Vec::new();
+    let r = rows(s.view(), None);
+    assert!(matches!(r[ROW_YOURS].last(), Some(Card::Create)), "New Channel closes Your Channels once the library is read");
+    st.row = ROW_YOURS;
+    st.col[ROW_YOURS] = r[ROW_YOURS].len() - 1;
+    assert!(st.key(Key::Ok, s.view(), NOW, &mut out));
+    assert_eq!(st.zone, Zone::Edit, "its options open at once");
+    let made = st.made().cloned().expect("a channel being made");
+    assert_eq!(made.name, "Everything");
+    assert_eq!(st.focus(&rows(s.view(), st.made()) ).map(|c| c.id()), Some(made.id.clone()), "it is the focused first card");
+    // Genre: the library's most-held genre first.
+    st.key(Key::Ok, s.view(), NOW, &mut out);
+    let Some(Out::Store(VCmd::Preview { recipe, .. })) = out.pop() else { panic!("{out:?}") };
+    assert_eq!((recipe.rules.genres.clone(), recipe.name.as_str()), (vec!["Comedy".to_owned()], "Comedy"));
+    // Decade: the oldest the library holds.
+    st.key(Key::Right, s.view(), NOW, &mut out);
+    st.key(Key::Ok, s.view(), NOW, &mut out);
+    let Some(Out::Store(VCmd::Preview { recipe, .. })) = out.pop() else { panic!() };
+    assert_eq!((recipe.rules.year_from, recipe.rules.year_to, recipe.name.as_str()), (1980, 1989, "80s Comedy"));
+    assert_eq!(st.made().unwrap().name, "80s Comedy", "the card follows the name");
+    let line = estimate_line(st.estimate_of(st.made().unwrap()).expect("a live count"));
+    assert_eq!(line, format!("{} \u{b7} {}", plx_platform::i18n::msg::browse_person_films(1), plx_platform::i18n::msg::livetv_studio_hours(2)));
+}
+
+#[test]
+fn a_made_channel_keeps_its_source_and_discard_drops_it() {
+    use plx_data::vchannel::recipe::Source;
+    let s = state(&["x"], Vec::new());
+    let mut st = Studio::default();
+    let mut out = Vec::new();
+    st.open_make(Recipe::made(Source::Show { rk: "7".into() }, "Frasier", "From Frasier", NOW), "From Frasier".into(), s.view());
+    let made = st.made().cloned().unwrap();
+    st.clamp(&rows(s.view(), Some(&made)));
+    assert_eq!((st.row, st.col[ROW_SUGGESTED]), (ROW_SUGGESTED, 0), "the made channel leads the row, focused");
+    assert_eq!(acts(&Card::Idea(&made)).last(), Some(&Act::Discard), "it is discarded, not dismissed");
+    st.zone = Zone::Actions;
+    st.act = 0;
+    st.activate(s.view(), NOW, &mut out);
+    let Some(Out::Store(VCmd::Keep { recipe, .. })) = out.pop() else { panic!("{out:?}") };
+    assert_eq!((recipe.source.clone(), recipe.style, recipe.name.as_str()), (Source::Show { rk: "7".into() }, Style::InOrder, "Frasier"));
+    st.keeping = None;
+    st.act = acts(&Card::Idea(&made)).iter().position(|a| *a == Act::Discard).unwrap();
+    st.activate(s.view(), NOW, &mut out);
+    assert!(st.made().is_none() && out.is_empty(), "discarding writes nothing");
+    assert_eq!(edit_items(&recipe, true), &EDIT_ITEMS, "a show's channel narrows; only a library channel picks genre and decade");
+}
+
+#[test]
+fn an_option_only_offers_values_that_still_air_something() {
+    let s = catalog_state();
+    let cat = s.view().virtuals().catalog().unwrap().clone();
+    let comedy = plx_data::vchannel::recipe::Rules { genres: vec!["Comedy".into()], ..Default::default() };
+    assert_eq!(decade_choices(&cat, &comedy), [1980, 1990], "no 1970s: the library's only 70s film is horror");
+    let seventies = plx_data::vchannel::recipe::Rules { year_from: 1970, year_to: 1979, ..Default::default() };
+    assert_eq!(genre_choices(&cat, &seventies), ["Horror"]);
+    assert_eq!(library_decades(&cat), [1970, 1980, 1990]);
 }

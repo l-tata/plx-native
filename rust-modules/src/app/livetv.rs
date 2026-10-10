@@ -379,6 +379,28 @@ pub(crate) fn open_studio(app: &mut App, id: String) {
     app.bridge.request_livetv_studio(id);
 }
 
+/// Open the Live TV page's channel studio making a channel from a show, season, collection or
+/// playlist (the card menu's "Make a Channel"). `kind` is the row's catalog kind.
+pub(crate) fn open_make(
+    pages: &mut plx_ui::dispatch::Dispatcher<AppHost>,
+    rig: &mut bridge::Bridge,
+    rk: &str,
+    kind: std::os::raw::c_int,
+    title: &str,
+) {
+    use plx_data::vchannel::recipe::{Recipe, Source};
+    let source = match kind {
+        1 => Source::Show { rk: rk.to_owned() },
+        2 => Source::Season { rk: rk.to_owned() },
+        plx_data::pms::KIND_PLAYLIST => Source::Playlist { rk: rk.to_owned() },
+        _ => Source::Collection { rk: rk.to_owned() },
+    };
+    let why = plx_platform::i18n::msg::livetv_studio_made_from(title);
+    let recipe = Recipe::made(source, title, &why, plx_base::wallclock::now_ms());
+    bridge::nav_select_tab(pages, AppArg::LiveTv);
+    rig.request_livetv_make(recipe, why);
+}
+
 /// Open the Live TV page — on its setup face when asked (Settings > Live TV).
 pub(crate) fn open_page(d: &mut plx_ui::dispatch::Dispatcher<AppHost>, rig: &mut bridge::Bridge, setup: bool) {
     bridge::nav_select_tab(d, AppArg::LiveTv);
