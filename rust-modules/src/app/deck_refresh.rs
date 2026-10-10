@@ -8,7 +8,8 @@
 //! - **a playback stopped** (Stop, BACK, end of stream, a live channel left — every exit goes
 //!   through `playback::exit_player`, which arms `App::refresh_hubs_at`). The refetch is owed a
 //!   beat after the stop ([`PLAYBACK_SETTLE_MS`] in the arming code) so the final timeline PUT has
-//!   landed server-side first;
+//!   landed server-side first, and once more [`PLAYBACK_FOLLOWUP_MS`] later, because the stop's
+//!   final `stopped` timeline is sent by a worker and can land after the first read;
 //! - **Home is shown again after another page** and its deck is older than [`SHOWN_STALE_MS`] —
 //!   something may have been watched on another device, or on this one through a page that does
 //!   not stop through the player;
@@ -20,7 +21,8 @@
 //! issues one while a hub fetch is still in flight. A reason that arrives during a fetch is not
 //! dropped and not doubled: it stays owed and is paid once, as soon as that fetch lands. That is
 //! the "never more than one in flight" rule, and it is also what keeps a burst of reasons (a stop
-//! that returns to Home just as the app is foregrounded) to one request.
+//! that returns to Home just as the app is foregrounded) to one request — besides the stop's own
+//! follow-up read.
 //!
 //! Nothing here blanks a shelf: a refetch keeps the published catalog until the new one lands
 //! (`pms::step_landings_with_scope` commits only a landing), and Home keys its focus by item

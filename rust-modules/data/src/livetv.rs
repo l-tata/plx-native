@@ -1,7 +1,9 @@
 //! **Live TV** — the channels and guide of a Tunarr server, consumed exactly the way Plex and
 //! Jellyfin consume one: Tunarr presents itself as an HDHomeRun tuner (`discover.json`,
-//! `lineup.json`, one continuous MPEG-TS stream per channel) and publishes an XMLTV guide. Plex
-//! Media Server is not in the path. The design record is `docs/live-tv-plan.md`.
+//! `lineup.json`, one continuous MPEG-TS stream per channel) and publishes an XMLTV guide; Plex
+//! Media Server is not in the path for those channels. The profile's virtual channels
+//! (`crate::vchannel` — library items the app airs itself, kept as Plex playlists) are merged into
+//! the same lineup ([`virtual_channel`]). The design record is `docs/live-tv-plan.md`.
 //!
 //! * [`hdhr`] — the HDHomeRun HTTP surface, parsed.
 //! * [`xmltv`] — the guide, parsed as a stream over a window of time.

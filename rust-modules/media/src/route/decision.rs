@@ -407,10 +407,12 @@ pub struct PlaybackSession {
     /// like a preview it writes nothing to the account ([`quiet_request`]), unlike one it is an
     /// ordinary playback on the player route.
     resolved_as_channel: bool,
-    /// **The Live TV channel this playback is**, when it is one (`crate::live`). A channel has no
-    /// Plex item behind it — no `cur_rk`, no transcode session, no timeline reporter — so this is
-    /// the one field that says what is on screen. [`install_live_stream`] sets it; every Plex plan
-    /// ([`apply_plan`]) and [`end_live`] clears it.
+    /// **The Live TV channel this playback is**, when it is one (`crate::live`). A Tunarr channel
+    /// has no Plex item behind it — no `cur_rk`, no transcode session, no timeline reporter — so
+    /// this is the one field that says what is on screen; [`install_live_stream`] sets it. A
+    /// virtual channel's programme is a Plex item played quietly ([`request_play_channel`]), and
+    /// its plan keeps the session the tune set ([`set_live_tuning`]); every other Plex plan
+    /// ([`apply_plan`]) and [`end_live`] clear it.
     live: Option<crate::live::LiveSession>,
 }
 
@@ -5344,6 +5346,14 @@ pub fn sink_max_raster(ps: &PlaybackSession) -> (u16, u16) {
 /// The Live TV channel this playback is, if it is one.
 pub fn live(ps: &PlaybackSession) -> Option<&crate::live::LiveSession> {
     ps.live.as_ref()
+}
+
+/// Is this playback a real-time Live TV STREAM (a Tunarr channel), as against a virtual
+/// channel's programme — a library file that arrives faster than it plays, which keeps the Live
+/// TV session for the banner and the channel keys but needs none of a stream's handling (the
+/// engine's two-lane prime, `engine::prime_depth`).
+pub fn live_stream(ps: &PlaybackSession) -> bool {
+    ps.live.as_ref().is_some_and(|l| !l.is_virtual())
 }
 
 /// **Install a Live TV channel as the playback** — the channel's URL, the declaration its probe

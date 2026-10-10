@@ -171,8 +171,9 @@ pub struct Engine {
     pub placed_src: (c_int, c_int),
     pub eos_pushed: bool, // Kodi VIDEO_DRAIN: pushEOS() sent once at true EOF
     pub rebase_pending: bool, // g_rebase_pending
-    /// This engine plays a Live TV channel: a stream that arrives at the speed it plays, so the
-    /// cushion it starts with is the cushion it keeps ([`prime_depth`]).
+    /// This engine plays a Live TV STREAM (a Tunarr channel, `route::live_stream`): one that
+    /// arrives at the speed it plays, so the cushion it starts with is the cushion it keeps
+    /// ([`prime_depth`]). A virtual channel's programme is a library file and is not one.
     pub live: bool,
     // In-place seek only: keyframes this far AHEAD of the seek target are stale frames the demuxer
     // produced from its pre-flush read position before the reopen+av_seek won the race (playback
@@ -1391,9 +1392,9 @@ fn start_bufferfeed_inner(
         // `first_open_rebases`.
         rebase_pending: first_open_rebases(
             SHARED.seek_to_ns.load(Ordering::Relaxed) >= 0,
-            crate::route::live(ps).is_some(),
+            crate::route::live_stream(ps),
         ),
-        live: crate::route::live(ps).is_some(),
+        live: crate::route::live_stream(ps),
         rebase_drops: 0,
         seek_armed_at: 0,
         seek_retries: 0,

@@ -78,7 +78,7 @@ pub const STRIP_MOVIES_ELEM: u32 = plx_ui::dispatch::STRIP_BASE + 1;
 pub const STRIP_SHOWS_ELEM: u32 = plx_ui::dispatch::STRIP_BASE + 2;
 pub const STRIP_SEARCH_ELEM: u32 = plx_ui::dispatch::STRIP_BASE + 3;
 pub const STRIP_ACCOUNT_ELEM: u32 = plx_ui::dispatch::STRIP_BASE + 4;
-/// The Live TV pill, drawn only while a Tunarr server is configured (`app::chrome`).
+/// The Live TV pill, drawn while Live TV has anything to show (`LiveTvView::configured`, `app::chrome`).
 pub const STRIP_LIVETV_ELEM: u32 = plx_ui::dispatch::STRIP_BASE + 5;
 
 const MAX_ITEMS: usize = plx_data::pms::MAX_SHELF_ITEMS;

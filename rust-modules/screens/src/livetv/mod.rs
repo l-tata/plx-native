@@ -1,10 +1,15 @@
-//! **The Live TV page** — the configured Tunarr server's channel guide, or, when there is none (or
-//! it cannot be loaded), the setup that finds one. A peer of Home, the Library and Search on the
+//! **The Live TV page** — the guide of the configured Tunarr server's channels and the profile's
+//! virtual channels (`plx_data::vchannel`), the channel studio where virtual channels are suggested
+//! and kept, or, when there is neither Tunarr nor anything from the library, the setup that finds
+//! a Tunarr server. A peer of Home, the Library and Search on the
 //! top strip (`AppArg::LiveTv`). The data is `plx_data::livetv` (the store's view through
 //! [`LiveTvLike`]); tuning a channel is a request the loop performs (`LiveTvReq::Tune`), because it
 //! needs the playback session and the adapter (§2.1).
 //!
-//! Three faces, chosen from the store every frame ([`Face::of`]):
+//! Four faces, chosen from the store every frame ([`Face::page`]). Without a Tunarr server (or with
+//! one that failed) the guide still shows the channels the profile kept, and the **Studio** — the
+//! channel studio ([`studio`]) — stands in for the setup when the library can suggest channels; it
+//! is also opened from the guide's Channels pill and from a Home Suggested Channels card.
 //!
 //! * **Setup** — no server, a server that failed to load, or the viewer asked to change it: an
 //!   explanation, *Search the network* (SSDP, `LiveTvCmd::Discover`), one row per Tunarr found, an

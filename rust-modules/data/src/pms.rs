@@ -1125,8 +1125,10 @@ pub fn allot(budget: usize, want: &[usize]) -> Vec<usize> {
 /// gradeable on the host.
 ///
 /// The shape of Home, in order:
-/// 1. **Continue Watching**, merged across every source and sorted by `lastViewedAt` descending, so
-///    a borrowed item holds first position exactly when the owner watched it last. It carries NO
+/// 1. **Continue Watching**, merged across every source by `deck_recency`: each server's own order
+///    is kept (a next-up episode with no `lastViewedAt` of its own does not sink) and sources are
+///    interleaved by time, so a borrowed item holds first position exactly when the owner watched
+///    it last. It carries NO
 ///    annotation (see [`HubRow::source`]). This is the official client's own shape: the owner's
 ///    screenshots show a friend's two films sitting BETWEEN their own three, in one row.
 /// 2. **The app's own shelves** — the watchlist, On Now, recently added in your genres and the

@@ -6,8 +6,8 @@ store (`plx_net::ssdp`, `plx_data::livetv`, `plx_data::stores::livetv`); the cha
 and the live playback session (`plx_media::live`, `route::install_live_stream`); the Live TV page —
 setup face, guide grid, CH▲/▼ paging and digit entry (`plx_screens::livetv`); the player's live
 banner, CH▲/▼, digits, last channel, a channel list to surf over the playing channel (UP/DOWN) and bounded automatic re-tune (`plx_appkit::live_banner`,
-`screens::player`, `app::livetv`); Settings > Live TV; and the Live TV pill on the tab strip once a
-server is configured. Home's On Now shelf has since landed (`plx_data::livetv::on_now`). Not built yet: a "now playing" item on Home, the airing
+`screens::player`, `app::livetv`); Settings > Live TV; and the Live TV pill on the tab strip once there is
+anything to show (a Tunarr server, or since 0.12.0 a virtual channel or a suggestion). Home's On Now shelf has since landed (`plx_data::livetv::on_now`). Not built yet: a "now playing" item on Home, the airing
 popover, favourites/ordering, and a re-Load on a
 mid-stream frame-rate change (risk 2 — run Tunarr with frame-rate normalisation on). Wall times
 print in the C library's zone; when the library says UTC, in the set's own zone from its system
@@ -172,7 +172,8 @@ A **live route** beside the Plex route, not a branch inside it:
 
 ### Interface
 
-- A **Live TV** entry beside the libraries, shown only when a Tunarr source is configured.
+- A **Live TV** entry beside the libraries, shown whenever Live TV has something to show: a Tunarr
+  source, a kept virtual channel, or a channel the library can suggest.
 - **On Now** shelf: one card per channel showing the current airing and its progress.
 - **Guide**: channels down, time across, a fixed channel column and time header, cells sized by
   duration, focus moving by time (a cursor time plus a channel, not a cell index), paging by

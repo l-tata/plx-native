@@ -405,7 +405,8 @@ fn a_virtual_channel_programme_is_quiet_and_keeps_its_live_session() {
     let _g = plx_base::testlock::serial();
     reset_player_control_for_test(&ps);
     reset_session(&mut ps);
-    let lineup = std::sync::Arc::new(plx_data::livetv::guide::Lineup::default());
+    let channel = plx_data::livetv::guide::Channel { number: "900".into(), url: "plxvc:61001".into(), ..Default::default() };
+    let lineup = std::sync::Arc::new(plx_data::livetv::guide::Lineup { channels: vec![channel], ..Default::default() });
     set_live_tuning(&mut ps, crate::live::LiveSession::tuning(std::sync::Arc::clone(&lineup), 0, None));
     ps.request = Some(PlaybackRequest {
         sid: ServerId::from_raw(0),
@@ -426,6 +427,7 @@ fn a_virtual_channel_programme_is_quiet_and_keeps_its_live_session() {
         "e1",
     );
     assert!(live(&ps).is_some(), "the channel's Live TV session survives the landing");
+    assert!(!live_stream(&ps), "but it is a library file, not a stream: no live prime, no stream rebase");
     assert!(!preview_request(&ps), "a channel is a playback, not a preview");
     assert!(quiet_request(&ps));
     assert!(begin_timeline_reporting(&ps).is_none(), "a channel's programme has no timeline");

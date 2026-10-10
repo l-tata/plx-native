@@ -276,7 +276,8 @@ pub enum HomeTab {
     Movies,
     Shows,
     Search,
-    /// Drawn only while a Tunarr server is configured (`LiveTvView::configured`).
+    /// Drawn while Live TV has anything to show (`LiveTvView::configured`): a Tunarr server, a
+    /// kept virtual channel, or a suggested one.
     LiveTv,
 }
 
@@ -1574,9 +1575,10 @@ pub enum AppArg {
     /// Playback. Its panels are NOT here — they are entries on the player page's own
     /// `ModalStack` ([`Self::PlayerOverlay`]), and the container owns which one is up.
     Player,
-    /// **Live TV**: the configured Tunarr server's guide, or its setup when there is none. A PEER
-    /// of Home, the Library and Search, reached from the strip's Live TV pill (drawn only while a
-    /// server is configured) and from Settings > Live TV.
+    /// **Live TV**: the guide (Tunarr's channels and the profile's virtual ones), the channel
+    /// studio, or the Tunarr setup when there is nothing to show. A PEER of Home, the Library and
+    /// Search, reached from the strip's Live TV pill (drawn while `LiveTvView::configured`), from
+    /// a Home Suggested Channels card, and from Settings > Live TV.
     LiveTv,
     /// A page with an ITEM IDENTITY — a detail page, a person page, a filmography. Two of these
     /// are two entries (`person → detail → person` is three), which is the whole reason the
